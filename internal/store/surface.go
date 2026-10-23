@@ -1,0 +1,371 @@
+package store
+
+import (
+	"regexp"
+	"strconv"
+	"strings"
+	"time"
+
+	"netsa/internal/geo"
+	"netsa/internal/model"
+)
+
+// Endpoint 是一个真实存在（返回 2xx/3xx）的 Web 资产入口。
+type Endpoint struct {
+	Host       string              `json:"host"`
+	Path       string              `json:"path"`
+	Methods    map[string]int      `json:"methods"`
+	Hits       int64               `json:"hits"`
+	Attacks    int64               `json:"attacks"`
+	Attackers  int                 `json:"attackers"`
+	Status     map[int]int         `json:"status"`
+	Sensitive  string              `json:"sensitive,omitempty"`
+	Severity   model.Severity      `json:"severity"`
+	Tech       []string            `json:"tech,omitempty"`
+	FirstSeen  time.Time           `json:"first_seen"`
+	LastSeen   time.Time           `json:"last_seen"`
+	atk        map[string]struct{} // 攻击者集合（有上限）
+	sens       *sensitiveRule      // 敏感资源分类缓存
+	classified bool
+}
+
+// Service 是从防火墙日志中观测到的网络服务（目的 IP:端口）。
+type Service struct {
+	DstIP    string              `json:"dst_ip"`
+	Port     int                 `json:"port"`
+	Proto    string              `json:"proto"`
+	Name     string              `json:"name"`
+	Risk     model.Severity      `json:"risk"`
+	Allowed  int64               `json:"allowed"`
+	Denied   int64               `json:"denied"`
+	Sources  int                 `json:"sources"`
+	Exposed  bool                `json:"exposed"` // 存在来自公网的放行流量
+	LastSeen time.Time           `json:"last_seen"`
+	src      map[string]struct{} // 来源集合（有上限）
+}
+
+// Finding 是攻击面风险发现。
+type Finding struct {
+	ID          string         `json:"id"`
+	Title       string         `json:"title"`
+	Category    string         `json:"category"`
+	Severity    model.Severity `json:"severity"`
+	Asset       string         `json:"asset"`
+	Evidence    string         `json:"evidence"`
+	Remediation string         `json:"remediation"`
+	Count       int64          `json:"count"`
+	FirstSeen   time.Time      `json:"first_seen"`
+	LastSeen    time.Time      `json:"last_seen"`
+}
+
+type surface struct {
+	Endpoints map[string]*Endpoint `json:"endpoints"`
+	Services  map[string]*Service  `json:"services"`
+	Findings  map[string]*Finding  `json:"findings"`
+	Tech      map[string]int       `json:"tech"`
+	Ports     map[int]int64        `json:"ports"` // 被探测的目的端口
+	// 漏洞利用类攻击的结果统计，用于评估 WAF 防护有效性
+	ExploitBlocked int64 `json:"exploit_blocked"`
+	ExploitPassed  int64 `json:"exploit_passed"`
+}
+
+func newSurface() *surface {
+	return &surface{
+		Endpoints: map[string]*Endpoint{}, Services: map[string]*Service{}, Findings: map[string]*Finding{},
+		Tech: map[string]int{}, Ports: map[int]int64{},
+	}
+}
+
+const (
+	maxEndpoints = 20000
+	maxServices  = 20000
+	maxSetSize   = 2000
+)
+
+type sensitiveRule struct {
+	re          *regexp.Regexp
+	title       string
+	sev         model.Severity
+	remediation string
+}
+
+var sensitiveRules = []sensitiveRule{
+	{regexp.MustCompile(`/\.(git|svn|hg|bzr)(/|$)|/\.ds_store$`), "源代码仓库泄露", model.SevCritical,
+		"删除 Web 目录中的版本库目录；nginx 中添加 location ~ /\\.(git|svn|hg) { deny all; }"},
+	{regexp.MustCompile(`/\.env(\.\w+)?$|/\.aws/credentials$|/id_[rd]sa$|/\.htpasswd$|/\.git-credentials$|/credentials(\.json|\.xml)?$|/\.kube/config$`), "密钥/凭证文件可公开访问", model.SevCritical,
+		"立即删除该文件并轮换其中涉及的全部密钥、口令与令牌"},
+	{regexp.MustCompile(`/[^/]*(backup|bak|db|database|dump|site|www|wwwroot|web|htdocs|admin|sql|config|old)[^/]*\.(zip|rar|tar|tar\.gz|tgz|7z|sql|sql\.gz|bak|dump|mdb|sqlite)$|\.(sql|sql\.gz|bak)$`), "备份/数据库文件可下载", model.SevCritical,
+		"删除 Web 目录下的备份文件，备份应存放在不可通过 HTTP 访问的位置"},
+	{regexp.MustCompile(`/web-inf/|/meta-inf/|/web\.config$|/wp-config\.php\.\w+$|/application(-\w+)?\.(properties|ya?ml)$|/config\.(php|inc|json|ya?ml|xml)\.(bak|old|swp)$|/\.user\.ini$`), "配置文件泄露", model.SevHigh,
+		"禁止访问配置文件，检查是否泄露数据库连接串等敏感信息"},
+	{regexp.MustCompile(`/(phpinfo|php_info|info|test)\.php$|/server-(status|info)$|/nginx_status$|/actuator/(env|heapdump|threaddump|configprops|mappings|beans|trace|httptrace|logfile|jolokia|gateway/routes)|/heapdump$|/_profiler|/debug/pprof|/elmah\.axd$|/trace\.axd$|/druid/(index|sql|websession)\.html$`), "调试/监控接口暴露", model.SevHigh,
+		"关闭生产环境调试接口，或在反向代理上限制为内网/白名单访问"},
+	{regexp.MustCompile(`/(phpmyadmin|pma|adminer[^/]*\.php|manager/html|host-manager|jmx-console|web-console|jenkins|kibana|grafana|nacos|xxl-job-admin|solr|swagger-ui(\.html)?|v2/api-docs|v3/api-docs|wp-login\.php|wp-admin|administrator|console)(/|$)`), "管理后台/运维入口对外暴露", model.SevMedium,
+		"管理后台应仅允许 VPN 或白名单访问，并启用强口令与多因素认证"},
+	{regexp.MustCompile(`/(logs?|storage/logs)/[^/]*\.(log|txt)$|/[^/]*(error|access|debug|laravel)[^/]*\.log$|/nohup\.out$`), "日志文件可公开访问", model.SevMedium,
+		"禁止通过 Web 访问日志目录，日志中可能包含会话、口令或内部路径"},
+}
+
+func classifySensitive(path string) *sensitiveRule {
+	p := strings.ToLower(path)
+	for i := range sensitiveRules {
+		if sensitiveRules[i].re.MatchString(p) {
+			return &sensitiveRules[i]
+		}
+	}
+	return nil
+}
+
+var techRules = []struct {
+	re   *regexp.Regexp
+	tech string
+}{
+	{regexp.MustCompile(`\.php\d?$`), "PHP"},
+	{regexp.MustCompile(`\.(jsp|jspx|do)$`), "Java"},
+	{regexp.MustCompile(`\.action$`), "Struts2"},
+	{regexp.MustCompile(`\.(aspx|ashx|asmx|axd)$`), "ASP.NET"},
+	{regexp.MustCompile(`\.asp$`), "ASP"},
+	{regexp.MustCompile(`\.(cgi|pl)$`), "CGI"},
+	{regexp.MustCompile(`^/wp-(content|includes|admin|login)`), "WordPress"},
+	{regexp.MustCompile(`^/actuator`), "Spring Boot"},
+	{regexp.MustCompile(`^/druid/`), "Druid"},
+	{regexp.MustCompile(`^/nacos`), "Nacos"},
+	{regexp.MustCompile(`^/graphql`), "GraphQL"},
+	{regexp.MustCompile(`^/(swagger|v2/api-docs|v3/api-docs)`), "Swagger"},
+	{regexp.MustCompile(`^/phpmyadmin`), "phpMyAdmin"},
+	{regexp.MustCompile(`^/jenkins`), "Jenkins"},
+	{regexp.MustCompile(`^/seeyon`), "致远OA"},
+	{regexp.MustCompile(`^/(weaver|wui|ecology)`), "泛微OA"},
+	{regexp.MustCompile(`^/(ispirit|general)/`), "通达OA"},
+	{regexp.MustCompile(`^/api/`), "REST API"},
+}
+
+// normPath 去掉查询串并将 ID 类路径段（纯数字、UUID、16 位以上十六进制）泛化，避免资产数量爆炸。
+// 单次扫描实现，位于单线程聚合路径上，避免正则开销。
+func normPath(uri string) string {
+	if i := strings.IndexAny(uri, "?#"); i >= 0 {
+		uri = uri[:i]
+	}
+	if uri == "" {
+		return "/"
+	}
+	segs := strings.Split(strings.ToLower(uri), "/")
+	for i, s := range segs {
+		switch {
+		case s == "":
+		case isDigits(s):
+			segs[i] = "{id}"
+		case isUUID(s):
+			segs[i] = "{uuid}"
+		case len(s) >= 16 && isHex(s):
+			segs[i] = "{hash}"
+		}
+	}
+	p := strings.Join(segs, "/")
+	if len(p) > 200 {
+		p = p[:200]
+	}
+	return p
+}
+
+func isDigits(s string) bool {
+	for i := 0; i < len(s); i++ {
+		if s[i] < '0' || s[i] > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+func isHex(s string) bool {
+	for i := 0; i < len(s); i++ {
+		if c := s[i]; !(c >= '0' && c <= '9' || c >= 'a' && c <= 'f') {
+			return false
+		}
+	}
+	return true
+}
+
+func isUUID(s string) bool {
+	if len(s) != 36 || s[8] != '-' || s[13] != '-' || s[18] != '-' || s[23] != '-' {
+		return false
+	}
+	return isHex(s[:8]) && isHex(s[9:13]) && isHex(s[14:18]) && isHex(s[19:23]) && isHex(s[24:])
+}
+
+// 端口 → 服务名与对公网开放时的风险等级。
+var services = map[int]struct {
+	name string
+	risk model.Severity
+}{
+	21: {"FTP", model.SevHigh}, 22: {"SSH", model.SevMedium}, 23: {"Telnet", model.SevCritical}, 25: {"SMTP", model.SevLow},
+	53: {"DNS", model.SevLow}, 80: {"HTTP", model.SevInfo}, 110: {"POP3", model.SevLow}, 111: {"RPCbind", model.SevHigh},
+	135: {"MSRPC", model.SevHigh}, 137: {"NetBIOS", model.SevHigh}, 139: {"NetBIOS", model.SevHigh}, 143: {"IMAP", model.SevLow},
+	161: {"SNMP", model.SevHigh}, 389: {"LDAP", model.SevHigh}, 443: {"HTTPS", model.SevInfo}, 445: {"SMB", model.SevCritical},
+	465: {"SMTPS", model.SevLow}, 587: {"SMTP", model.SevLow}, 873: {"Rsync", model.SevHigh}, 993: {"IMAPS", model.SevLow},
+	995: {"POP3S", model.SevLow}, 1080: {"SOCKS", model.SevHigh}, 1099: {"Java RMI", model.SevHigh}, 1433: {"MSSQL", model.SevHigh},
+	1521: {"Oracle", model.SevHigh}, 2049: {"NFS", model.SevHigh}, 2375: {"Docker API", model.SevCritical}, 2376: {"Docker TLS", model.SevHigh},
+	2379: {"etcd", model.SevCritical}, 3306: {"MySQL", model.SevHigh}, 3389: {"RDP", model.SevHigh}, 4848: {"GlassFish", model.SevHigh},
+	5432: {"PostgreSQL", model.SevHigh}, 5601: {"Kibana", model.SevHigh}, 5672: {"RabbitMQ", model.SevMedium}, 5900: {"VNC", model.SevHigh},
+	5984: {"CouchDB", model.SevHigh}, 5985: {"WinRM", model.SevHigh}, 6379: {"Redis", model.SevCritical}, 6443: {"K8s API", model.SevHigh},
+	7001: {"WebLogic", model.SevHigh}, 8080: {"HTTP-Alt", model.SevLow}, 8443: {"HTTPS-Alt", model.SevLow}, 8848: {"Nacos", model.SevHigh},
+	8888: {"HTTP-Alt", model.SevLow}, 9000: {"PHP-FPM/Portainer", model.SevMedium}, 9090: {"Prometheus", model.SevMedium},
+	9200: {"Elasticsearch", model.SevCritical}, 9300: {"Elasticsearch", model.SevHigh}, 10250: {"Kubelet", model.SevCritical},
+	11211: {"Memcached", model.SevCritical}, 15672: {"RabbitMQ Web", model.SevMedium}, 27017: {"MongoDB", model.SevCritical},
+	50070: {"Hadoop", model.SevHigh},
+}
+
+func serviceInfo(port int) (string, model.Severity) {
+	if s, ok := services[port]; ok {
+		return s.name, s.risk
+	}
+	return "port-" + strconv.Itoa(port), model.SevInfo
+}
+
+// observeWeb 更新 Web 资产与风险发现（调用方持锁）。
+func (sf *surface) observeWeb(ev *model.Event, hits []model.Hit, attacked bool) {
+	host := ev.Host
+	if host == "" {
+		host = "-"
+	}
+	path := normPath(ev.URI)
+	exists := ev.Status >= 200 && ev.Status < 400
+	key := host + " " + path
+	ep := sf.Endpoints[key]
+	// 敏感资源分类只在可能产生影响时计算（新登记入口、或 2xx/3xx 响应可能暴露敏感资源），
+	// 并缓存在入口上；扫描器大量的 404 请求不再逐条执行分类正则。
+	var sens *sensitiveRule
+	if exists {
+		if ep != nil && ep.classified {
+			sens = ep.sens
+		} else {
+			sens = classifySensitive(path)
+			if ep != nil {
+				ep.sens, ep.classified = sens, true
+			}
+		}
+	}
+	// 攻击请求只在命中敏感资源时才登记为新入口：对所有路径都返回 200 的站点（SPA 兜底路由），
+	// 扫描器的随机路径不会污染资产清单；已有入口上的攻击仍会被统计。
+	if ep == nil && exists && (!attacked || sens != nil) && len(sf.Endpoints) < maxEndpoints {
+		ep = &Endpoint{Host: host, Path: path, Methods: map[string]int{}, Status: map[int]int{}, FirstSeen: ev.Time,
+			atk: map[string]struct{}{}, sens: sens, classified: true}
+		for _, t := range techRules {
+			if t.re.MatchString(path) {
+				ep.Tech = append(ep.Tech, t.tech)
+				sf.Tech[t.tech]++
+			}
+		}
+		if sens != nil {
+			ep.Sensitive, ep.Severity = sens.title, sens.sev
+		}
+		sf.Endpoints[key] = ep
+	}
+	if ep != nil {
+		ep.Hits++
+		if ev.Method != "" && len(ep.Methods) < 20 {
+			ep.Methods[ev.Method]++
+		}
+		ep.Status[ev.Status]++
+		if ev.Time.After(ep.LastSeen) {
+			ep.LastSeen = ev.Time
+		}
+		if attacked {
+			ep.Attacks++
+			if len(ep.atk) < maxSetSize {
+				ep.atk[ev.SrcIP] = struct{}{}
+				ep.Attackers = max(ep.Attackers, len(ep.atk))
+			}
+		}
+	}
+
+	asset := host + path
+	if host == "-" {
+		asset = path
+	}
+	// 敏感资源被成功访问
+	if ev.Status == 200 && ev.Bytes > 0 && sens != nil {
+		sf.finding("sens:"+key, sens.title, "敏感资源暴露", sens.sev, asset,
+			ev.SrcIP+" 访问返回 200，响应 "+strconv.FormatInt(ev.Bytes, 10)+" 字节", sens.remediation, ev.Time)
+	}
+	for _, h := range hits {
+		if h.TagOnly || h.Phase == model.PhaseRecon {
+			continue
+		}
+		switch h.Result {
+		case model.ResultBlocked:
+			sf.ExploitBlocked++
+		case model.ResultSuccess, model.ResultPassed, model.ResultError:
+			sf.ExploitPassed++
+		}
+		if h.Result == model.ResultSuccess && h.Severity >= model.SevHigh {
+			rem := successRemediation[h.Category]
+			if rem == "" {
+				rem = "核查该接口是否存在对应漏洞，排查服务器是否已被入侵，并在 WAF 中加入拦截规则"
+			}
+			sf.finding("succ:"+h.Category+":"+key, "疑似攻击成功: "+h.Category, "攻击成功研判", h.Severity, asset,
+				ev.SrcIP+" "+ev.Method+" 返回 "+strconv.Itoa(ev.Status)+"，"+h.Name+": "+h.Evidence, rem, ev.Time)
+		}
+	}
+}
+
+// observeFw 更新网络服务暴露面（调用方持锁）。
+func (sf *surface) observeFw(ev *model.Event) {
+	if ev.DstPort <= 0 {
+		return
+	}
+	sf.Ports[ev.DstPort]++
+	key := ev.DstIP + ":" + strconv.Itoa(ev.DstPort) + "/" + ev.Proto
+	sv := sf.Services[key]
+	if sv == nil {
+		// 只有被放行的连接才能证明服务真实存在；被拒绝的探测只计入“被探测端口”统计
+		if ev.Action != model.ActionAllow || len(sf.Services) >= maxServices {
+			return
+		}
+		name, risk := serviceInfo(ev.DstPort)
+		sv = &Service{DstIP: ev.DstIP, Port: ev.DstPort, Proto: ev.Proto, Name: name, Risk: risk, src: map[string]struct{}{}}
+		sf.Services[key] = sv
+	}
+	switch ev.Action {
+	case model.ActionAllow:
+		sv.Allowed++
+		if !geo.IsPrivate(ev.SrcIP) {
+			sv.Exposed = true
+			if sv.Risk >= model.SevMedium {
+				sf.finding("svc:"+key, "高危服务对公网开放: "+sv.Name, "服务暴露", sv.Risk, key,
+					"防火墙放行了来自公网 "+ev.SrcIP+" 的连接", "通过安全组/防火墙将该端口限制为内网或白名单访问，必要时修改默认端口并启用认证", ev.Time)
+			}
+		}
+	case model.ActionDeny:
+		sv.Denied++
+	}
+	if len(sv.src) < maxSetSize {
+		sv.src[ev.SrcIP] = struct{}{}
+		sv.Sources = max(sv.Sources, len(sv.src))
+	}
+	if ev.Time.After(sv.LastSeen) {
+		sv.LastSeen = ev.Time
+	}
+}
+
+func (sf *surface) finding(id, title, cat string, sev model.Severity, asset, evidence, remediation string, t time.Time) {
+	f := sf.Findings[id]
+	if f == nil {
+		if len(sf.Findings) >= 5000 {
+			return
+		}
+		f = &Finding{ID: id, Title: title, Category: cat, Severity: sev, Asset: asset, Evidence: evidence, Remediation: remediation, FirstSeen: t}
+		sf.Findings[id] = f
+	}
+	f.Count++
+	if t.After(f.LastSeen) {
+		f.LastSeen = t
+	}
+}
+
+var successRemediation = map[string]string{
+	"暴力破解":       "立即核查该账号的登录记录，重置口令并启用登录失败锁定与多因素认证",
+	"WebShell后门": "立即排查并删除可疑脚本文件，检查上传功能与服务器是否已被控制",
+	"SQL注入":      "使用参数化查询修复注入点，核查数据库是否有异常访问与数据外泄",
+	"命令/代码执行":    "立即修复漏洞并排查服务器是否存在异常进程、计划任务与外连",
+}

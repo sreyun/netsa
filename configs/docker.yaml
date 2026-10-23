@@ -1,0 +1,94 @@
+# netsa 容器部署配置（配合 docker-compose.yml 使用）
+# 容器内路径约定：
+#   /logs/nginx   ← 宿主机 /var/log/nginx（只读）
+#   /logs/host    ← 宿主机 /var/log（只读，用于 ufw.log / kern.log 等防火墙日志）
+#   /app/data     ← 离线定位库（镜像内置 ip2region；MaxMind 可挂载到此目录）
+#   /app/state    ← 态势快照（数据卷持久化）
+timezone: Asia/Shanghai   # 不带时区的日志（syslog、防火墙）按此时区解析，需与日志产生方一致
+
+server:
+  listen: ":8080"
+  username: ""             # 对外暴露时务必设置
+  password: ""
+
+home:
+  name: "数据中心"
+  lat: 31.23
+  lon: 121.47
+
+sources:
+  - name: nginx
+    type: auto
+    paths: ["/logs/nginx/*access*.log"]
+    from_beginning: false
+  - name: ufw
+    type: firewall
+    paths: ["/logs/host/ufw.log"]
+    from_beginning: false
+  # firewalld / iptables LOG 写入 kern.log（Debian/Ubuntu）或 messages（RHEL/CentOS），按需启用：
+  # - name: kernel-firewall
+  #   type: netfilter
+  #   paths: ["/logs/host/kern.log"]
+
+syslog:
+  enabled: true
+  udp: ":5514"
+  tcp: ":5514"
+
+real_ip:
+  header: x_forwarded_for
+  trusted_proxies: ["127.0.0.0/8", "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "::1/128", "fc00::/7"]
+  # 使用 CDN 时在此加入 CDN 回源网段
+  trusted_presets: []   # 例如 [cloudflare]
+  headers: []           # 例如 [cf_connecting_ip, x_forwarded_for]，说明见 configs/config.yaml
+  cdn_only: false
+
+geo:
+  ip2region_v4: /app/data/ip2region_v4.xdb
+  ip2region_v6: /app/data/ip2region_v6.xdb
+  maxmind_city: /app/data/GeoLite2-City.mmdb
+  maxmind_asn: /app/data/GeoLite2-ASN.mmdb
+  reverse_dns: true
+  enrich_level: low
+  # 每隔该时间检查定位库文件是否被替换（更新 xdb / mmdb 无需重启）、并重新读取下方 custom 配置；0 为关闭。
+  # 替换库文件时建议先写临时文件再重命名，避免读到未复制完的文件。
+  reload_interval: 10m
+  # 自定义网段位置：内网办公区、分支机构、VPN 地址池、合作方出口等，按最长前缀匹配，优先级高于所有定位库。
+  # 命中的内网攻击源会以菱形标注在地图对应地点；未填写经纬度时按省/市名称换算中心点。
+  custom: []
+  #  - cidr: 10.10.0.0/16
+  #    name: 北京总部办公网
+  #    country: 中国
+  #    province: 北京市
+  #    city: 北京市
+  #  - cidr: 10.20.0.0/16
+  #    name: 上海研发中心
+  #    country: 中国
+  #    province: 上海市
+  #    city: 上海市
+  #    lat: 31.2304          # 可选：精确坐标
+  #    lon: 121.4737
+  #  - cidr: 172.16.100.0/24
+  #    name: VPN 地址池
+  #    country: 中国
+  #    province: 广东省
+  #    city: 深圳市
+  #    isp: SSL VPN
+  online:
+    # 在线溯源会把攻击 IP（不含正常访客）发送到 ip-api.com；隔离网络请设为 false
+    enabled: true
+    rdap: true
+
+detect:
+  rules_file: ""
+  whitelist: []
+
+alert:
+  webhooks: []
+
+storage:
+  snapshot: /app/state/netsa-state.json.gz
+  interval: 1m
+  max_ips: 200000
+  max_alerts: 20000
+  retention: 168h

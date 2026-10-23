@@ -1,0 +1,137 @@
+# netsa 配置文件（生产环境模板）
+
+# 不带时区信息的日志时间（syslog、Windows 防火墙、FortiGate 等）按此时区解析，为空则使用系统时区
+timezone: Asia/Shanghai
+
+server:
+  listen: ":8080"
+  # 设置后启用 HTTP Basic 认证，强烈建议在公网部署时开启
+  username: ""
+  password: ""
+
+# 被保护资产所在位置（用于在攻击地图上绘制攻击连线）
+home:
+  name: "数据中心"
+  lat: 31.23
+  lon: 121.47
+
+# 日志数据源：type 为 auto 时自动识别格式；paths 支持通配符，新出现的文件会被自动发现
+sources:
+  - name: nginx
+    type: auto            # auto | nginx | firewall | nginx_json | netfilter | pfsense | windows_firewall | cisco_asa | kv_firewall | json_firewall
+    paths: ["/var/log/nginx/*access*.log"]
+    from_beginning: false # true 表示启动时先分析已有内容
+    host: ""              # 日志中没有 $host 时用于区分站点
+    # 使用自定义 log_format 时，把 nginx.conf 中的格式原样粘贴到这里：
+    # log_format: '$remote_addr - $remote_user [$time_local] "$request" $status $body_bytes_sent "$http_referer" "$http_user_agent" "$http_x_forwarded_for" $request_time $host'
+  - name: firewall
+    type: firewall
+    paths: ["/var/log/ufw.log", "/var/log/kern.log", "/var/log/firewalld"]
+    from_beginning: false
+
+# 接收防火墙 / 安全设备通过 syslog 推送的日志（格式自动识别）
+syslog:
+  enabled: true
+  udp: ":5514"
+  tcp: ":5514"
+
+# 真实 IP 还原：仅当直连地址属于可信代理时才信任 X-Forwarded-For / X-Real-IP
+real_ip:
+  header: x_forwarded_for   # x_forwarded_for | x_real_ip | none
+  trusted_proxies:
+    - 127.0.0.0/8
+    - 10.0.0.0/8
+    - 172.16.0.0/12
+    - 192.168.0.0/16
+    - ::1/128
+    - fc00::/7
+    # 使用 CDN 时在此加入 CDN 回源网段（如阿里云 CDN、腾讯云 CDN 的回源 IP 段）
+  # 内置的可信代理网段：cloudflare（使用 Cloudflare 时开启，无需手工维护其回源网段）
+  trusted_presets: []
+  # 按优先级依次尝试的客户端地址头（设置后覆盖 header）。仅当请求来自可信代理时才采信这些头：
+  # cf_connecting_ip / true_client_ip / ali_cdn_real_ip / x_client_ip / x_real_ip / x_forwarded_for / forwarded
+  # 例如 Cloudflare：[cf_connecting_ip, x_forwarded_for]；注意 nginx 日志需记录对应的请求头
+  headers: []
+  # 站点只允许经 CDN/负载均衡访问时开启：来自非可信代理的公网直连会被标记为“绕过 CDN 直连源站”
+  cdn_only: false
+
+# IP 溯源定位：多数据源交叉比对
+geo:
+  ip2region_v4: data/ip2region_v4.xdb   # 国内地址精确到城市 + 运营商
+  ip2region_v6: data/ip2region_v6.xdb
+  maxmind_city: data/GeoLite2-City.mmdb # 可选：提供经纬度与精度半径（https://dev.maxmind.com 免费注册下载）
+  maxmind_asn: data/GeoLite2-ASN.mmdb   # 可选：提供 ASN 与网络运营方
+  reverse_dns: true
+  # 达到该威胁等级的攻击 IP 才做在线查询与反向 DNS（info|low|medium|high|critical）
+  enrich_level: low
+  # 每隔该时间检查定位库文件是否被替换（更新 xdb / mmdb 无需重启）、并重新读取下方 custom 配置；0 为关闭。
+  # 替换库文件时建议先写临时文件再重命名，避免读到未复制完的文件。
+  reload_interval: 10m
+  # 自定义网段位置：内网办公区、分支机构、VPN 地址池、合作方出口等，按最长前缀匹配，优先级高于所有定位库。
+  # 命中的内网攻击源会以菱形标注在地图对应地点；未填写经纬度时按省/市名称换算中心点。
+  custom: []
+  #  - cidr: 10.10.0.0/16
+  #    name: 北京总部办公网
+  #    country: 中国
+  #    province: 北京市
+  #    city: 北京市
+  #  - cidr: 10.20.0.0/16
+  #    name: 上海研发中心
+  #    country: 中国
+  #    province: 上海市
+  #    city: 上海市
+  #    lat: 31.2304          # 可选：精确坐标
+  #    lon: 121.4737
+  #  - cidr: 172.16.100.0/24
+  #    name: VPN 地址池
+  #    country: 中国
+  #    province: 广东省
+  #    city: 深圳市
+  #    isp: SSL VPN
+  online:
+    # 在线溯源会把攻击 IP（不含正常访客）发送到 ip-api.com，用于获取经纬度、代理/IDC 标记等。
+    # 内网隔离环境或不允许外发数据时请设置为 false。
+    enabled: true
+    url: http://ip-api.com/batch
+    lang: zh-CN
+    rdap: true   # 允许在 IP 详情页按需查询 WHOIS/RDAP 注册信息与滥用投诉邮箱
+
+# 威胁情报
+intel:
+  blocklists: []
+  #  - name: 本地黑名单
+  #    path: data/blacklist.txt   # 每行一个 IP 或 CIDR
+  tor_exit_url: ""               # 例如 https://check.torproject.org/torbulkexitlist
+
+detect:
+  rules_file: ""                 # 自定义规则，例如 configs/rules.example.yaml
+  whitelist: []                  # 白名单 IP/网段（只统计流量，不做检测），例如自有监控与扫描器
+  success_min_bytes: 1           # 2xx 响应体大于该值才研判为“疑似成功”
+  alerts_per_rule: 5             # 同一 IP 同一规则 10 分钟内最多记录的告警条数（计数不受影响）
+  thresholds:
+    web_window: 1m
+    cc_requests: 600             # 窗口内请求数达到该值判定 CC 攻击
+    scan_404: 40
+    scan_paths: 30
+    brute_login: 15
+    server_5xx: 30
+    fw_window: 5m
+    port_scan_ports: 20
+    host_sweep: 20
+    brute_conns: 30
+    flood_events: 5000
+
+# 告警推送（威胁等级提升至高危及以上、疑似攻击成功时推送）
+alert:
+  webhooks: []
+  #  - name: 钉钉安全群
+  #    type: dingtalk            # generic | dingtalk | wecom | feishu
+  #    url: https://oapi.dingtalk.com/robot/send?access_token=xxx
+  #    min_severity: high
+
+storage:
+  snapshot: state/netsa-state.json.gz   # 定期快照，重启后恢复态势数据
+  interval: 1m
+  max_ips: 200000
+  max_alerts: 20000
+  retention: 168h                # 趋势数据保留时长

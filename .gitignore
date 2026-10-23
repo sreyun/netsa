@@ -1,0 +1,7 @@
+bin/
+demo-logs/
+state/
+data/state.json*
+data/*.mmdb
+*.exe
+.claude/

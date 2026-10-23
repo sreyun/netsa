@@ -1,0 +1,38 @@
+# 演示环境：docker compose -f docker-compose.demo.yml up -d --build
+# simulator 先生成 6 小时历史日志，再持续追加实时日志；netsa 实时分析并展示大屏。
+# 访问 http://localhost:8080 ，停止：docker compose -f docker-compose.demo.yml down -v
+name: netsa-demo
+
+services:
+  simulator:
+    build:
+      context: .
+      args:
+        GOPROXY: ${GOPROXY:-https://proxy.golang.org,direct}
+    image: netsa:latest
+    restart: unless-stopped
+    command: ["simulate", "-o", "/app/demo-logs", "-hours", "6", "-live", "-interval", "2s"]
+    volumes:
+      - demo-logs:/app/demo-logs
+    healthcheck:
+      disable: true
+
+  netsa:
+    build:
+      context: .
+      args:
+        GOPROXY: ${GOPROXY:-https://proxy.golang.org,direct}
+    image: netsa:latest
+    restart: unless-stopped
+    depends_on:
+      - simulator
+    command: ["serve", "-c", "/app/configs/demo.yaml"]
+    environment:
+      TZ: Asia/Shanghai
+    ports:
+      - "8080:8080"
+    volumes:
+      - demo-logs:/app/demo-logs:ro
+
+volumes:
+  demo-logs:

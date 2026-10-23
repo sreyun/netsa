@@ -1,0 +1,152 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>网络安全态势感知平台</title>
+<link rel="stylesheet" href="style.css">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Cpath d='M16 2 4 7v8c0 7.5 5.1 13.6 12 15 6.9-1.4 12-7.5 12-15V7z' fill='%2336cfc9'/%3E%3C/svg%3E">
+</head>
+<body>
+<header class="topbar">
+  <div class="brand">
+    <svg viewBox="0 0 32 32" class="logo"><path d="M16 2 4 7v8c0 7.5 5.1 13.6 12 15 6.9-1.4 12-7.5 12-15V7z"/><path d="M11 16l3.5 3.5L21 13" class="tick"/></svg>
+    <div>
+      <div class="title">网络安全态势感知平台</div>
+      <div class="subtitle">流量分析 · 攻击溯源 · 攻击面管理</div>
+    </div>
+  </div>
+  <nav class="tabs" id="tabs">
+    <button data-tab="overview" class="active">态势总览</button>
+    <button data-tab="attackers">攻击溯源</button>
+    <button data-tab="alerts">告警事件</button>
+    <button data-tab="surface">攻击面分析</button>
+    <button data-tab="sources">数据源</button>
+  </nav>
+  <div class="status">
+    <span class="threat" id="threatBadge">威胁等级 --</span>
+    <span class="live" id="liveDot" title="实时推送连接状态">● 实时</span>
+    <span class="clock" id="clock"></span>
+    <button class="icon-btn" id="fullscreen" title="全屏大屏模式">⛶</button>
+  </div>
+</header>
+
+<main>
+  <!-- 态势总览 -->
+  <section id="tab-overview" class="tab active">
+    <div class="kpis" id="kpis"></div>
+    <!-- 统一 8 列栅格：KPI、主体两行、底部一行共用相同的列线，所有面板左右边缘与上下边界对齐 -->
+    <div class="grid-overview">
+      <div class="stack area-stack">
+        <div class="panel"><h3>威胁指数 <small id="rangeText"></small></h3><div class="chart" id="cGauge" style="min-height:190px"></div></div>
+        <div class="panel grow"><h3>攻击类型分布</h3><div class="chart" id="cCategory" style="min-height:260px"></div></div>
+      </div>
+      <div class="panel map-panel area-map">
+        <h3>攻击来源态势地图
+          <span class="crumb" id="mapCrumb"></span>
+          <span class="seg map-seg" id="mapView"><button data-v="world" class="active">世界</button><button data-v="china">中国</button></span>
+        </h3>
+        <div class="map-wrap">
+          <div class="chart" id="cMap"></div>
+          <div class="map-stats" id="mapStats"></div>
+          <div class="map-legend">
+            <span><i style="background:var(--critical)"></i>严重</span><span><i style="background:var(--high)"></i>高危</span>
+            <span><i style="background:var(--medium)"></i>中危</span><span><i style="background:var(--low)"></i>低危</span>
+            <span class="muted">◎ 精确坐标　○ 区划中心</span>
+          </div>
+          <div class="map-tools"><button class="btn" id="mapReset" title="重置视角">⟲ 重置</button></div>
+          <div class="map-pop" id="mapPop" hidden></div>
+        </div>
+        <div class="map-note" id="mapNote"></div>
+      </div>
+      <div class="panel feed-panel area-feed"><h3>实时告警 <small id="feedCount"></small></h3>
+        <div class="feed-wrap"><div class="feed-new" id="feedNew" hidden></div><ul class="feed" id="feed"></ul></div></div>
+      <div class="panel area-phase"><h3>攻击链阶段</h3><div class="chart" id="cPhase" style="min-height:190px"></div></div>
+      <div class="panel area-trend"><h3>流量与攻击趋势
+        <span class="seg" id="trendRange"><button data-m="60">1小时</button><button data-m="360" class="active">6小时</button><button data-m="1440">24小时</button><button data-m="10080">7天</button></span></h3>
+        <div class="chart" id="cTrend" style="min-height:220px"></div></div>
+      <div class="panel area-top"><h3>高威胁攻击源 TOP</h3><table class="mini" id="topAttackers"></table></div>
+    </div>
+    <div class="grid-4">
+      <div class="panel"><h3>来源国家/地区</h3><div class="chart" id="cCountry" style="min-height:240px"></div></div>
+      <div class="panel"><h3>攻击来源城市 TOP</h3><div class="chart" id="cCity" style="min-height:240px"></div></div>
+      <div class="panel"><h3>攻击源网络类型</h3><div class="chart" id="cNetType" style="min-height:240px"></div></div>
+      <div class="panel"><h3>被攻击目标 TOP</h3><table class="mini" id="topTargets"></table></div>
+    </div>
+  </section>
+
+  <!-- 攻击溯源 -->
+  <section id="tab-attackers" class="tab">
+    <div class="toolbar">
+      <input id="atkSearch" placeholder="搜索 IP / 归属地 / 运营商 / 攻击类型 / 标签">
+      <select id="atkLevel">
+        <option value="">全部等级</option><option value="critical">严重</option><option value="high">高危及以上</option>
+        <option value="medium">中危及以上</option><option value="low">低危及以上</option>
+      </select>
+      <select id="atkSort"><option value="score">按威胁评分</option><option value="attacks">按攻击次数</option><option value="last">按最近活动</option></select>
+      <span class="spacer"></span>
+      <span class="muted" id="atkTotal"></span>
+    </div>
+    <div class="panel"><div class="table-wrap"><table class="table" id="atkTable"></table></div>
+      <div class="pager" id="atkPager"></div></div>
+  </section>
+
+  <!-- 告警事件 -->
+  <section id="tab-alerts" class="tab">
+    <div class="toolbar">
+      <input id="alSearch" placeholder="搜索规则 / 目标 / 载荷 / IP">
+      <select id="alSev"><option value="">全部等级</option><option value="critical">严重</option><option value="high">高危及以上</option><option value="medium">中危及以上</option><option value="low">低危及以上</option></select>
+      <select id="alCat"><option value="">全部类型</option></select>
+      <select id="alResult"><option value="">全部结果</option></select>
+      <select id="alKind"><option value="">全部来源</option><option value="web">Web 日志</option><option value="firewall">防火墙日志</option></select>
+      <span class="spacer"></span>
+      <label class="muted"><input type="checkbox" id="alAuto" checked> 自动刷新</label>
+    </div>
+    <div class="panel"><div class="table-wrap"><table class="table" id="alTable"></table></div></div>
+  </section>
+
+  <!-- 攻击面分析 -->
+  <section id="tab-surface" class="tab">
+    <div class="grid-3">
+      <div class="panel"><h3>攻击面风险指数</h3><div class="chart" id="cSurfaceGauge" style="min-height:200px"></div></div>
+      <div class="panel"><h3>防护有效性（漏洞利用类请求）</h3><div class="chart" id="cWaf" style="min-height:200px"></div></div>
+      <div class="panel"><h3>被探测端口 TOP</h3><div class="chart" id="cPorts" style="min-height:200px"></div></div>
+    </div>
+    <div class="panel"><h3>识别到的技术栈与站点</h3><div id="techChips" class="chips"></div></div>
+    <div class="panel"><h3>风险发现 <small id="findingCount"></small></h3><div id="findings" class="findings"></div></div>
+    <div class="grid-2">
+      <div class="panel"><h3>网络服务暴露面（防火墙日志）</h3><div class="scroll"><table class="table" id="svcTable"></table></div></div>
+      <div class="panel"><h3>Web 资产入口（nginx 日志）</h3><div class="scroll"><table class="table" id="epTable"></table></div></div>
+    </div>
+  </section>
+
+  <!-- 数据源 -->
+  <section id="tab-sources" class="tab">
+    <div class="panel"><h3>日志数据源 <small id="procCount"></small></h3><div class="table-wrap"><table class="table" id="srcTable"></table></div></div>
+    <div class="grid-2">
+      <div class="panel"><h3>溯源与检测能力</h3><div id="caps"></div></div>
+      <div class="panel"><h3>导出</h3>
+        <div class="exports">
+          <label>封禁等级 <select id="blLevel"><option value="critical">严重</option><option value="high" selected>高危及以上</option><option value="medium">中危及以上</option><option value="low">低危及以上</option></select></label>
+          <div class="btns">
+            <a class="btn" data-fmt="txt">IP 列表</a><a class="btn" data-fmt="nginx">nginx deny</a><a class="btn" data-fmt="iptables">iptables</a>
+            <a class="btn" data-fmt="ipset">ipset</a><a class="btn" data-fmt="firewalld">firewalld</a><a class="btn" data-fmt="windows">Windows 防火墙</a><a class="btn" data-fmt="csv">CSV</a>
+          </div>
+          <a class="btn primary" href="/api/report" download>下载完整分析报告 (JSON)</a>
+        </div>
+      </div>
+    </div>
+  </section>
+</main>
+
+<!-- IP 溯源详情抽屉 -->
+<div class="drawer-mask" id="drawerMask"></div>
+<aside class="drawer" id="drawer">
+  <div class="drawer-head"><div id="drawerTitle"></div><button class="close" id="drawerClose" aria-label="关闭">✕</button></div>
+  <div class="drawer-body" id="drawerBody"></div>
+</aside>
+
+<script src="/vendor/echarts.min.js"></script>
+<script src="app.js"></script>
+</body>
+</html>

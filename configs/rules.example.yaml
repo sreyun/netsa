@@ -1,0 +1,24 @@
+# 自定义检测规则示例
+# pattern 为 Go 正则（RE2 语法，自动忽略大小写），匹配的是“多轮 URL 解码 + 小写化”之后的文本
+# target: uri（路径+参数） | path（仅路径） | ua | referer | any（三者合并）
+
+# 禁用不需要的内置规则（规则 ID 可通过 `netsa rules` 查看）
+disable: []
+#  - ua-automation
+
+rules:
+  - id: custom-internal-api
+    name: 访问内部管理接口
+    category: 越权访问
+    severity: high
+    phase: exploit
+    target: path
+    pattern: '^/(internal|inner)/api/'
+
+  - id: custom-sensitive-export
+    name: 批量导出用户数据
+    category: 数据窃取
+    severity: medium
+    phase: exploit
+    target: uri
+    pattern: '/api/v\d+/users/export\?.*(limit|size)=\d{4,}'

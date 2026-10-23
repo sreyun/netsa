@@ -1,0 +1,9 @@
+.git
+.claude
+bin
+demo-logs
+state
+*.exe
+data/state.json*
+data/*.mmdb
+README.md

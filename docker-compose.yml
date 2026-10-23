@@ -1,0 +1,48 @@
+# 生产部署：docker compose up -d --build
+# 浏览器访问 http://<服务器IP>:8080 ，防火墙/网络设备 syslog 发送到 <服务器IP>:5514
+name: netsa
+
+services:
+  netsa:
+    build:
+      context: .
+      args:
+        # 国内网络构建可改为 https://goproxy.cn,direct
+        GOPROXY: ${GOPROXY:-https://proxy.golang.org,direct}
+    image: netsa:latest
+    container_name: netsa
+    restart: unless-stopped
+    command: ["serve", "-c", "/app/configs/docker.yaml"]
+    environment:
+      TZ: Asia/Shanghai
+    ports:
+      - "8080:8080"
+      - "5514:5514/udp"
+      - "5514:5514/tcp"
+    # 读取 /var/log/nginx 通常需要 adm 组（Debian/Ubuntu 上 gid=4）
+    group_add:
+      - "4"
+    volumes:
+      # 配置文件挂载为只读，修改后 docker compose restart 生效
+      - ./configs/docker.yaml:/app/configs/docker.yaml:ro
+      # 必须挂载目录而不是单个文件：logrotate 轮转会创建新文件，单文件挂载会一直指向旧文件
+      - /var/log/nginx:/logs/nginx:ro
+      - /var/log:/logs/host:ro
+      # 可选：MaxMind GeoLite2 数据库（获得精确经纬度与 ASN）
+      # - ./data/GeoLite2-City.mmdb:/app/data/GeoLite2-City.mmdb:ro
+      # - ./data/GeoLite2-ASN.mmdb:/app/data/GeoLite2-ASN.mmdb:ro
+      - netsa-state:/app/state
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/healthz"]
+      interval: 30s
+      timeout: 5s
+      start_period: 30s
+      retries: 3
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "3"
+
+volumes:
+  netsa-state:
