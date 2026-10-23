@@ -4,7 +4,7 @@
 #   /logs/host    ← 宿主机 /var/log（只读，用于 ufw.log / kern.log 等防火墙日志）
 #   /app/data     ← 离线定位库（镜像内置 ip2region；MaxMind 可挂载到此目录）
 #   /app/state    ← 态势快照（数据卷持久化）
-timezone: UTC   # 华为防火墙 syslog 使用 UTC 时间，需与此配置一致
+timezone: Asia/Shanghai   # 不带时区的日志（syslog、防火墙）按此时区解析，需与日志产生方一致
 
 server:
   listen: ":8080"

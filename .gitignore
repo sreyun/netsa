@@ -5,3 +5,7 @@ data/state.json*
 data/*.mmdb
 *.exe
 .claude/
+.env
+build.log
+.workbuddy/
+*.new

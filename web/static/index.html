@@ -21,6 +21,7 @@
     <button data-tab="attackers">攻击溯源</button>
     <button data-tab="alerts">告警事件</button>
     <button data-tab="surface">攻击面分析</button>
+    <button data-tab="notify">告警推送</button>
     <button data-tab="sources">数据源</button>
   </nav>
   <div class="status">
@@ -102,7 +103,7 @@
       <span class="spacer"></span>
       <label class="muted"><input type="checkbox" id="alAuto" checked> 自动刷新</label>
     </div>
-    <div class="panel"><div class="table-wrap"><table class="table" id="alTable"></table></div></div>
+    <div class="panel"><div class="al-summary" id="alSummary"></div><div class="table-wrap"><table class="table" id="alTable"></table></div></div>
   </section>
 
   <!-- 攻击面分析 -->
@@ -117,6 +118,22 @@
     <div class="grid-2">
       <div class="panel"><h3>网络服务暴露面（防火墙日志）</h3><div class="scroll"><table class="table" id="svcTable"></table></div></div>
       <div class="panel"><h3>Web 资产入口（nginx 日志）</h3><div class="scroll"><table class="table" id="epTable"></table></div></div>
+    </div>
+  </section>
+
+  <!-- 告警推送 -->
+  <section id="tab-notify" class="tab">
+    <div class="toolbar">
+      <span class="muted" id="ntIntro">告警事件实时推送到钉钉、企业微信、飞书群机器人，每个机器人可分别选择推送的告警等级。</span>
+      <span class="spacer"></span>
+      <button class="btn primary" id="ntAdd">＋ 添加机器人</button>
+    </div>
+    <div class="panel"><h3>推送机器人 <small id="ntCount"></small></h3>
+      <div class="table-wrap"><table class="table" id="ntTable"></table></div>
+      <div class="nt-note" id="ntNote"></div></div>
+    <div class="grid-2">
+      <div class="panel"><h3>推送规则</h3><div class="nt-rules" id="ntRules"></div></div>
+      <div class="panel"><h3>最近推送记录</h3><div class="scroll"><table class="table" id="ntHistory"></table></div></div>
     </div>
   </section>
 
@@ -145,6 +162,37 @@
   <div class="drawer-head"><div id="drawerTitle"></div><button class="close" id="drawerClose" aria-label="关闭">✕</button></div>
   <div class="drawer-body" id="drawerBody"></div>
 </aside>
+
+<!-- 告警机器人编辑对话框 -->
+<div class="modal-mask" id="ntModal" hidden>
+  <form class="modal" id="ntForm" autocomplete="off" novalidate>
+    <div class="modal-head"><b id="ntFormTitle">添加机器人</b><button type="button" class="close" id="ntClose" aria-label="关闭">✕</button></div>
+    <div class="modal-body">
+      <div class="field"><span class="flabel">机器人类型</span>
+        <span class="seg nt-type" id="ntType"><button type="button" data-t="dingtalk" class="active">钉钉</button><button type="button" data-t="wecom">企业微信</button><button type="button" data-t="feishu">飞书</button></span></div>
+      <label class="field"><span class="flabel">名称</span><input id="ntName" maxlength="40" placeholder="例如：安全运营值班群"></label>
+      <label class="field"><span class="flabel">Webhook 地址</span><input id="ntUrl" spellcheck="false"></label>
+      <div class="hint" id="ntUrlHint"></div>
+      <div id="ntSecretRow">
+        <label class="field"><span class="flabel">加签密钥</span><input id="ntSecret" type="password" spellcheck="false" placeholder="机器人安全设置选择“加签”时填写，以 SEC 开头"></label>
+        <label class="inline" id="ntClearRow" hidden><input type="checkbox" id="ntClear"> 清除已保存的密钥</label>
+      </div>
+      <div class="field"><span class="flabel">推送等级</span>
+        <span class="nt-levels" id="ntLevels">
+          <label><input type="checkbox" value="critical"> <span class="badge lv-critical bg-critical">严重</span></label>
+          <label><input type="checkbox" value="high"> <span class="badge lv-high bg-high">高危</span></label>
+          <label><input type="checkbox" value="medium"> <span class="badge lv-medium bg-medium">中危</span></label>
+        </span></div>
+      <label class="inline"><input type="checkbox" id="ntEnabled"> 启用推送</label>
+      <div class="nt-help" id="ntHelp"></div>
+      <div class="form-msg" id="ntMsg" role="status"></div>
+    </div>
+    <div class="modal-foot">
+      <button type="button" class="btn" id="ntTest">发送测试消息</button><span class="spacer"></span>
+      <button type="button" class="btn" id="ntCancel">取消</button><button type="submit" class="btn primary" id="ntSave">保存</button>
+    </div>
+  </form>
+</div>
 
 <script src="/vendor/echarts.min.js"></script>
 <script src="app.js"></script>

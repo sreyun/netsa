@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/netip"
+	"net/url"
 	"os"
 	"strings"
 	"time"
@@ -16,17 +17,20 @@ import (
 
 type Config struct {
 	// Timezone 是不带时区信息的日志时间所采用的时区，例如 Asia/Shanghai；为空使用系统时区（容器内通常为 UTC）。
-	Timezone string         `yaml:"timezone"`
-	Server   ServerConfig   `yaml:"server"`
-	Home     HomeConfig     `yaml:"home"`
-	Sources  []SourceConfig `yaml:"sources"`
-	Syslog   SyslogConfig   `yaml:"syslog"`
-	RealIP   RealIPConfig   `yaml:"real_ip"`
-	Geo      GeoConfig      `yaml:"geo"`
-	Intel    IntelConfig    `yaml:"intel"`
-	Detect   DetectConfig   `yaml:"detect"`
-	Alert    AlertConfig    `yaml:"alert"`
-	Storage  StorageConfig  `yaml:"storage"`
+	Timezone string `yaml:"timezone"`
+	// TimeCorrection 为 auto（默认）时，自动识别实时日志与实际时间之间的整时区偏差并校正（例如日志按 UTC 记录、
+	// 却按 timezone 解析导致时间慢 8 小时）；off 关闭。
+	TimeCorrection string         `yaml:"time_correction"`
+	Server         ServerConfig   `yaml:"server"`
+	Home           HomeConfig     `yaml:"home"`
+	Sources        []SourceConfig `yaml:"sources"`
+	Syslog         SyslogConfig   `yaml:"syslog"`
+	RealIP         RealIPConfig   `yaml:"real_ip"`
+	Geo            GeoConfig      `yaml:"geo"`
+	Intel          IntelConfig    `yaml:"intel"`
+	Detect         DetectConfig   `yaml:"detect"`
+	Alert          AlertConfig    `yaml:"alert"`
+	Storage        StorageConfig  `yaml:"storage"`
 }
 
 type ServerConfig struct {
@@ -140,14 +144,26 @@ type Thresholds struct {
 }
 
 type AlertConfig struct {
-	Webhooks []WebhookConfig `yaml:"webhooks"`
+	// BaseURL 为大屏的访问地址（如 http://10.0.0.5:8080），设置后告警消息附带“查看溯源详情”链接
+	BaseURL string `yaml:"base_url"`
+	// DedupWindow 同一 IP、同一规则、同一研判结果的告警在该时间内只推送一次
+	DedupWindow time.Duration `yaml:"dedup_window"`
+	// RobotsFile 保存在界面中添加的机器人；为空时放在 storage.snapshot 所在目录（alert-robots.json）
+	RobotsFile string          `yaml:"robots_file"`
+	Webhooks   []WebhookConfig `yaml:"webhooks"`
 }
 
+// WebhookConfig 是配置文件中的告警推送机器人。
 type WebhookConfig struct {
-	Name        string `yaml:"name"`
-	URL         string `yaml:"url"`
-	Type        string `yaml:"type"` // generic | dingtalk | wecom | feishu
+	Name   string `yaml:"name"`
+	URL    string `yaml:"url"`
+	Type   string `yaml:"type"`   // dingtalk | wecom | feishu | generic
+	Secret string `yaml:"secret"` // 钉钉 / 飞书机器人安全设置为“加签”时的密钥
+	// Levels 推送的告警等级，可多选：medium（中危）/ high（高危）/ critical（严重）
+	Levels []string `yaml:"levels"`
+	// MinSeverity 兼容旧配置：推送不低于该等级的告警（设置了 levels 时忽略）
 	MinSeverity string `yaml:"min_severity"`
+	Disabled    bool   `yaml:"disabled"`
 }
 
 type StorageConfig struct {
@@ -202,6 +218,7 @@ func Default() *Config {
 				FloodEvents:   5000,
 			},
 		},
+		Alert: AlertConfig{DedupWindow: 10 * time.Minute},
 		Storage: StorageConfig{
 			Interval:  time.Minute,
 			MaxIPs:    200000,
@@ -246,6 +263,11 @@ func (c *Config) Validate() error {
 	if _, err := c.Location(); err != nil {
 		return fmt.Errorf("timezone %q 无效: %w", c.Timezone, err)
 	}
+	switch c.TimeCorrection {
+	case "", "auto", "off":
+	default:
+		return fmt.Errorf("time_correction 只能为 auto 或 off: %q", c.TimeCorrection)
+	}
 	for i, cl := range c.Geo.Custom {
 		if _, err := netip.ParsePrefix(strings.TrimSpace(cl.CIDR)); err != nil {
 			if _, err2 := netip.ParseAddr(strings.TrimSpace(cl.CIDR)); err2 != nil {
@@ -289,11 +311,37 @@ func (c *Config) Validate() error {
 			return fmt.Errorf("real_ip.trusted_presets 不支持 %q（可选: cloudflare）", p)
 		}
 	}
-	for _, w := range c.Alert.Webhooks {
+	if b := c.Alert.BaseURL; b != "" {
+		if u, err := url.Parse(b); err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+			return fmt.Errorf("alert.base_url 必须是 http(s) 地址: %q", b)
+		}
+	}
+	for i, w := range c.Alert.Webhooks {
+		name := w.Name
+		if name == "" {
+			name = fmt.Sprintf("#%d", i+1)
+		}
 		switch strings.ToLower(w.Type) {
 		case "", "generic", "dingtalk", "wecom", "wechat", "feishu", "lark":
 		default:
-			return fmt.Errorf("webhook %s 的 type 不支持: %s", w.Name, w.Type)
+			return fmt.Errorf("alert.webhooks %s 的 type 不支持: %s（可选 dingtalk / wecom / feishu / generic）", name, w.Type)
+		}
+		if u, err := url.Parse(w.URL); err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+			return fmt.Errorf("alert.webhooks %s 的 url 无效", name)
+		}
+		for _, l := range w.Levels {
+			switch strings.ToLower(l) {
+			case "medium", "high", "critical":
+			default:
+				return fmt.Errorf("alert.webhooks %s 的 levels 不支持 %q（可选 medium / high / critical）", name, l)
+			}
+		}
+		if w.MinSeverity != "" {
+			switch strings.ToLower(w.MinSeverity) {
+			case "low", "medium", "high", "critical":
+			default:
+				return fmt.Errorf("alert.webhooks %s 的 min_severity 不支持 %q", name, w.MinSeverity)
+			}
 		}
 	}
 	return nil
@@ -323,6 +371,9 @@ func (c *Config) fill() {
 		if *p.v <= 0 {
 			*p.v = p.def
 		}
+	}
+	if c.Alert.DedupWindow <= 0 {
+		c.Alert.DedupWindow = d.Alert.DedupWindow
 	}
 	if c.Storage.Interval <= 0 {
 		c.Storage.Interval = d.Storage.Interval

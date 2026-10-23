@@ -123,6 +123,9 @@ func (s *Store) Load(path string) error {
 		if p.Attacks > 0 {
 			p.ensureAttackMaps() // 兼容旧版本快照中缺失的字段
 		}
+		if p.Attacks > 0 || len(p.Intel) > 0 {
+			p.recompute() // 评分规则可能已更新，按当前规则重新计算等级
+		}
 		s.rebuildSketch(p)
 	}
 	if len(snap.Alerts) > s.maxAlerts {

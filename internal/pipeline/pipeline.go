@@ -5,17 +5,15 @@ import (
 	"context"
 	"net/netip"
 	"runtime"
-	"strconv"
-	"strings"
 	"sync"
 	"sync/atomic"
-	"time"
 
 	"netsa/internal/alert"
 	"netsa/internal/detect"
 	"netsa/internal/geo"
 	"netsa/internal/intel"
 	"netsa/internal/model"
+	"netsa/internal/safe"
 	"netsa/internal/store"
 )
 
@@ -38,7 +36,6 @@ type Pipeline struct {
 
 	whitelist []netip.Prefix
 	processed atomic.Int64
-	notified  map[string]time.Time // 通知去重（仅聚合协程访问）
 }
 
 // SetWhitelist 设置白名单（这些来源只统计流量，不做攻击检测）。
@@ -98,7 +95,7 @@ func (p *Pipeline) Run(ctx context.Context, in <-chan []*model.Event, workers in
 				}
 				items := make([]item, len(batch))
 				for j, ev := range batch {
-					items[j] = p.inspect(ev)
+					items[j] = p.safeInspect(ev)
 				}
 				select {
 				case agg <- items:
@@ -116,10 +113,31 @@ func (p *Pipeline) Run(ctx context.Context, in <-chan []*model.Event, workers in
 	go func() {
 		defer close(done)
 		for items := range agg {
-			p.aggregate(items)
+			p.safeAggregate(items)
 		}
 	}()
 	return done
+}
+
+// safeInspect 对单条事件做异常保护：畸形日志触发的异常只丢弃该条的检测结果（事件仍会计入统计）。
+func (p *Pipeline) safeInspect(ev *model.Event) (it item) {
+	defer func() {
+		if r := recover(); r != nil {
+			safe.Report("检测事件 "+ev.SrcIP, r)
+			it = item{ev: ev}
+		}
+	}()
+	return p.inspect(ev)
+}
+
+// safeAggregate 对一批事件的入库与后续处理做异常保护，聚合协程不会因个别数据退出。
+func (p *Pipeline) safeAggregate(items []item) {
+	defer func() {
+		if r := recover(); r != nil {
+			safe.Report("汇总事件", r)
+		}
+	}()
+	p.aggregate(items)
 }
 
 // inspect 是无状态处理：真实 IP 还原、白名单判断与特征检测。
@@ -159,25 +177,40 @@ func (p *Pipeline) aggregate(items []item) {
 			if p.OnAlert != nil {
 				p.OnAlert(a)
 			}
-			if p.Notifier != nil && a.Result == model.ResultSuccess && a.Severity >= model.SevHigh && p.shouldNotify(a.SrcIP+"|"+a.RuleID) {
-				p.Notifier.Send(alert.Message{
-					Title: "攻击疑似成功: " + a.Name, Severity: a.Severity, IP: a.SrcIP, Location: a.Location, Time: a.Time,
-					Text: "目标: " + a.Target + "\n\n证据: " + a.Evidence,
+			// 告警事件推送：按各机器人选择的等级过滤，同一 IP、规则、研判结果在去重窗口内只推送一次
+			if p.Notifier.Wants(a.Severity) {
+				p.Notifier.Notify(a.SrcIP+"|"+a.RuleID+"|"+a.Result, alert.Event{
+					Kind: "alert", Severity: a.Severity, Title: a.Name, Category: a.Category, Result: a.Result, Phase: a.Phase,
+					IP: a.SrcIP, Location: a.Location, Target: a.Target, Method: a.Method, Status: a.Status, Evidence: a.Evidence,
+					Score: res.Score, Source: a.Source, Time: a.Time,
 				})
 			}
 		}
 		if (res.LevelUp || res.NewIP) && res.Level >= p.EnrichLevel && res.Level > model.SevInfo && p.Geo != nil {
 			p.Geo.Enrich(ev.SrcIP)
 		}
-		if res.LevelUp && res.Level >= model.SevHigh && p.Notifier != nil {
+		// 攻击源威胁等级升级：仅在等级因多次攻击累积而高于本次命中的最高等级时推送
+		// （由单条高危 / 严重告警直接触发的升级已由该告警本身推送，不重复）
+		if res.LevelUp && res.Level >= model.SevMedium && res.Level > maxHitSev(hits[i]) && p.Notifier.Wants(res.Level) {
 			if s, ok := p.Store.Summary(ev.SrcIP); ok {
-				p.Notifier.Send(alert.Message{
-					Title: "攻击源威胁等级升至" + s.Level.Label(), Severity: s.Level, IP: s.IP, Location: s.Location, Score: s.Score, Time: s.LastSeen,
-					Text: "攻击类型: " + strings.Join(s.Categories, "、") + "\n\n累计攻击 " + strconv.FormatInt(s.Attacks, 10) + " 次",
+				p.Notifier.Notify("escalation|"+s.IP+"|"+s.Level.String(), alert.Event{
+					Kind: "escalation", Severity: s.Level, Title: "攻击源威胁等级升至" + s.Level.Label(), IP: s.IP, Location: s.Location,
+					Score: s.Score, Attacks: s.Attacks, Categories: s.Categories, Time: s.LastSeen,
 				})
 			}
 		}
 	}
+}
+
+// maxHitSev 返回命中中的最高攻击等级（不含仅打标签的命中）。
+func maxHitSev(hits []model.Hit) model.Severity {
+	m := model.SevInfo
+	for _, h := range hits {
+		if !h.TagOnly && h.Severity > m {
+			m = h.Severity
+		}
+	}
+	return m
 }
 
 // OnGeoUpdate 在在线溯源 / rDNS 完成后更新画像，并根据 rDNS 识别测绘机构与搜索引擎。
@@ -197,24 +230,4 @@ func (p *Pipeline) OnGeoUpdate(ip string, info *geo.Info) {
 	if info.Hosting {
 		p.Store.Tag(ip, "IDC/云主机", info.ISP)
 	}
-}
-
-// shouldNotify 对同一 IP 同一规则的“疑似成功”通知 1 小时内只推送一次。
-func (p *Pipeline) shouldNotify(key string) bool {
-	now := time.Now()
-	if p.notified == nil {
-		p.notified = map[string]time.Time{}
-	}
-	if t, ok := p.notified[key]; ok && now.Sub(t) < time.Hour {
-		return false
-	}
-	if len(p.notified) > 10000 {
-		for k, t := range p.notified {
-			if now.Sub(t) >= time.Hour {
-				delete(p.notified, k)
-			}
-		}
-	}
-	p.notified[key] = now
-	return true
 }

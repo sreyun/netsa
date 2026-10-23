@@ -100,6 +100,7 @@ func build(cfg *config.Config) (*app, error) {
 		return nil, err
 	}
 	parser.Location = loc
+	alert.Location = loc // 告警消息中的时间按同一时区展示
 	gaz, err := geo.LoadGazetteer(staticFS(cfg))
 	if err != nil {
 		return nil, fmt.Errorf("加载地图地名库失败: %w", err)
@@ -147,7 +148,9 @@ func build(cfg *config.Config) (*app, error) {
 	a.store = store.New(cfg.Storage.MaxIPs, cfg.Storage.MaxAlerts, cfg.Detect.AlertsPerRule, cfg.Storage.Retention)
 	a.store.GeoLookup = a.geo.Lookup
 	a.store.IntelMatch = a.intel.Match
-	a.notifier = alert.New(cfg.Alert)
+	if a.notifier, err = alert.New(cfg.Alert, robotsFile(cfg)); err != nil {
+		return nil, err
+	}
 	a.broker = api.NewBroker()
 	a.pipe = &pipeline.Pipeline{
 		Engine: a.engine, Behavior: detect.NewBehavior(cfg.Detect.Thresholds), Store: a.store, Geo: a.geo,
@@ -157,13 +160,14 @@ func build(cfg *config.Config) (*app, error) {
 	a.pipe.SetWhitelist(cfg.Detect.Whitelist)
 	a.geo.OnUpdate = a.pipe.OnGeoUpdate
 	a.ingest = ingest.NewManager(20000)
+	a.ingest.AutoTime = cfg.TimeCorrection != "off"
 	return a, nil
 }
 
 func (a *app) server(listen string) *http.Server {
 	s := &api.Server{
 		Cfg: a.cfg, Store: a.store, Ingest: a.ingest, Pipeline: a.pipe, Geo: a.geo, Engine: a.engine,
-		RDAP: a.rdap, Static: staticFS(a.cfg), Version: version, Broker: a.broker,
+		RDAP: a.rdap, Static: staticFS(a.cfg), Version: version, Broker: a.broker, Notifier: a.notifier,
 	}
 	// 不设置 Read/WriteTimeout：SSE 长连接会被其超时中断
 	return &http.Server{Addr: listen, Handler: s.Handler(), ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 120 * time.Second, MaxHeaderBytes: 64 << 10}
@@ -284,6 +288,17 @@ func (a *app) reloadGeo(ctx context.Context, cfgPath string) {
 		n := a.store.RefreshGeo(a.geo.Relocate)
 		log.Printf("[geo] 定位库已热更新: %s，%d 个攻击源归属地发生变化", strings.Join(changed, ", "), n)
 	}
+}
+
+// robotsFile 返回界面添加的告警机器人的保存位置：alert.robots_file，或 storage.snapshot 所在目录。
+func robotsFile(cfg *config.Config) string {
+	if cfg.Alert.RobotsFile != "" {
+		return cfg.Alert.RobotsFile
+	}
+	if cfg.Storage.Snapshot != "" {
+		return filepath.Join(filepath.Dir(cfg.Storage.Snapshot), "alert-robots.json")
+	}
+	return ""
 }
 
 // anyReady 判断是否至少有一个离线定位库已加载。
@@ -415,7 +430,7 @@ func printReport(a *app, files []string, elapsed time.Duration, top int) {
 
 	fmt.Println()
 	fmt.Println("==================== 态势总览 ====================")
-	fmt.Printf("时间范围: %s ~ %s\n", o.From.Format("2006-01-02 15:04:05"), o.To.Format("2006-01-02 15:04:05"))
+	fmt.Printf("时间范围: %s ~ %s\n", o.From.In(parser.Location).Format("2006-01-02 15:04:05"), o.To.In(parser.Location).Format("2006-01-02 15:04:05"))
 	fmt.Printf("Web 请求 %d | 防火墙事件 %d | 独立来源 IP %d | 攻击 IP %d\n", o.Totals.Web, o.Totals.Firewall, o.UniqueIPs, o.Attackers)
 	fmt.Printf("攻击事件 %d | 已拦截 %d (%.1f%%) | 疑似成功 %d | 攻击面风险指数 %d/100\n",
 		o.Totals.Attacks, o.Totals.Blocked, o.BlockRate, o.Totals.Success, o.SurfaceScore)

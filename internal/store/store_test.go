@@ -1,6 +1,7 @@
 package store
 
 import (
+	"fmt"
 	"path/filepath"
 	"testing"
 	"time"
@@ -89,5 +90,60 @@ func TestAlertRingBuffer(t *testing.T) {
 	list := s.Alerts(AlertQuery{Limit: 100})
 	if len(list) != 10 || list[0].ID != 25 || list[9].ID != 16 {
 		t.Fatalf("环形缓冲区应保留最新 10 条且按新到旧排列: n=%d first=%d last=%d", len(list), list[0].ID, list[len(list)-1].ID)
+	}
+}
+
+// 攻击源等级不低于其触发过的最高告警等级：告警事件中出现高危时，总览的“高危以上攻击源”必须包含该 IP。
+func TestLevelFollowsAlertSeverity(t *testing.T) {
+	s := newTestStore()
+	now := time.Now()
+	s.Record(&model.Event{Kind: model.KindWeb, SrcIP: "203.0.113.1", Method: "GET", URI: "/a", Status: 404, Time: now},
+		[]model.Hit{attackHit("rce-probe", "命令执行", model.SevHigh, model.ResultFailed)})
+	s.Record(&model.Event{Kind: model.KindWeb, SrcIP: "203.0.113.2", Method: "GET", URI: "/b", Status: 403, Time: now},
+		[]model.Hit{attackHit("log4shell", "表达式注入", model.SevCritical, model.ResultBlocked)})
+	s.Record(&model.Event{Kind: model.KindWeb, SrcIP: "203.0.113.3", Method: "GET", URI: "/c", Status: 404, Time: now},
+		[]model.Hit{attackHit("xss", "XSS", model.SevMedium, model.ResultPassed)})
+	for ip, want := range map[string]model.Severity{"203.0.113.1": model.SevHigh, "203.0.113.2": model.SevCritical, "203.0.113.3": model.SevMedium} {
+		p := s.Profile(ip)
+		if p.Level != want || p.Score < levelFloor[want] {
+			t.Errorf("%s level=%s score=%.1f want %s", ip, p.Level, p.Score, want)
+		}
+	}
+	o := s.Overview()
+	if o.LevelCounts["high"] != 1 || o.LevelCounts["critical"] != 1 || o.SevCounts["high"] != 1 {
+		t.Fatalf("总览统计与告警等级不一致: levels=%v sev=%v", o.LevelCounts, o.SevCounts)
+	}
+	sum := s.AlertSummary()
+	if sum.Retained["high"] != 1 || sum.HitsTotal != 3 || sum.RetainedTotal != 3 {
+		t.Fatalf("告警汇总错误: %+v", sum)
+	}
+}
+
+// 画像数硬上限：大量不同来源的正常访问不会无限创建画像，攻击者仍能建立画像。
+func TestProfileHardCap(t *testing.T) {
+	s := New(8, 100, 5, time.Hour) // 硬上限 8 + 8/4 = 10
+	now := time.Now()
+	for i := 0; i < 30; i++ {
+		s.Record(&model.Event{Kind: model.KindWeb, SrcIP: fmt.Sprintf("192.0.2.%d", i), Status: 200, Time: now}, nil)
+	}
+	if n := len(s.ips); n != 10 || s.totals.Untracked != 20 || s.totals.Web != 30 {
+		t.Fatalf("profiles=%d untracked=%d web=%d", n, s.totals.Untracked, s.totals.Web)
+	}
+	s.Record(&model.Event{Kind: model.KindWeb, SrcIP: "203.0.113.66", Method: "GET", URI: "/x", Status: 404, Time: now},
+		[]model.Hit{attackHit("sqli", "SQL注入", model.SevHigh, model.ResultFailed)})
+	if p := s.Profile("203.0.113.66"); p == nil || p.Attacks != 1 || len(s.ips) > 10 {
+		t.Fatalf("超过上限时攻击者应能建立画像: %v, profiles=%d", p, len(s.ips))
+	}
+}
+
+// 未来时间的异常日志不能把统计窗口推到未来（否则趋势数据会被保留期清理）。
+func TestFutureTimestampClamped(t *testing.T) {
+	s := newTestStore()
+	now := time.Now()
+	s.Record(&model.Event{Kind: model.KindWeb, SrcIP: "198.51.100.1", Status: 200, Time: now}, nil)
+	s.Record(&model.Event{Kind: model.KindWeb, SrcIP: "198.51.100.2", Status: 200, Time: now.AddDate(70, 0, 0)}, nil)
+	s.Maintain()
+	if s.maxTime.After(time.Now().Add(time.Minute)) || len(s.buckets) == 0 {
+		t.Fatalf("maxTime=%v buckets=%d", s.maxTime, len(s.buckets))
 	}
 }
