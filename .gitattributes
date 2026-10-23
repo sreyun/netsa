@@ -1,0 +1,7 @@
+# 统一以 LF 存储文本；离线定位库与地图数据按二进制处理，避免换行转换损坏文件
+* text=auto eol=lf
+*.xdb binary
+*.mmdb binary
+*.gz binary
+*.png binary
+*.ico binary

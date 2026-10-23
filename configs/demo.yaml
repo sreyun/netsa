@@ -1,0 +1,41 @@
+# 演示配置：配合 `netsa simulate -o demo-logs` 生成的模拟日志使用
+server:
+  listen: ":8080"
+
+home:
+  name: "上海数据中心"
+  lat: 31.23
+  lon: 121.47
+
+sources:
+  - name: nginx
+    type: auto
+    paths: ["demo-logs/access.log"]
+    from_beginning: true
+    host: www.example.com
+  - name: ufw
+    type: auto
+    paths: ["demo-logs/ufw.log"]
+    from_beginning: true
+  - name: fortigate
+    type: auto
+    paths: ["demo-logs/fortigate.log"]
+    from_beginning: true
+
+syslog:
+  enabled: true
+  udp: ":5514"
+  tcp: ":5514"
+
+geo:
+  reverse_dns: false   # 演示数据为随机 IP，反向解析意义不大
+  enrich_level: low
+  online:
+    enabled: true      # 演示 IP 为随机生成，开启在线溯源以便在地图上显示坐标
+    rdap: true
+
+detect:
+  rules_file: configs/rules.example.yaml
+
+storage:
+  snapshot: ""         # 演示环境不保存快照

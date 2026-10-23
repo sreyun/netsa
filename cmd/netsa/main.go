@@ -1,0 +1,536 @@
+// netsa —— 基于 nginx / 防火墙日志的网络安全态势感知与攻击面分析系统。
+package main
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"flag"
+	"fmt"
+	"io/fs"
+	"log"
+	"net/http"
+	"os"
+	"os/signal"
+	"path/filepath"
+	"reflect"
+	"sort"
+	"strings"
+	"syscall"
+	"text/tabwriter"
+	"time"
+	_ "time/tzdata" // 内嵌时区数据，精简容器镜像中也能使用 timezone 配置
+
+	"netsa/internal/alert"
+	"netsa/internal/api"
+	"netsa/internal/config"
+	"netsa/internal/demo"
+	"netsa/internal/detect"
+	"netsa/internal/geo"
+	"netsa/internal/ingest"
+	"netsa/internal/intel"
+	"netsa/internal/model"
+	"netsa/internal/parser"
+	"netsa/internal/pipeline"
+	"netsa/internal/store"
+	"netsa/web"
+)
+
+const version = "1.0.0"
+
+func usage() {
+	fmt.Fprintf(os.Stderr, `netsa %s —— 网络安全态势感知与攻击面分析系统
+
+用法:
+  netsa serve    -c config.yaml                 启动实时态势感知服务（文件跟踪 + syslog + Web 大屏）
+  netsa analyze  [选项] <日志文件...>            离线分析日志（自动识别格式，支持通配符与 .gz）
+  netsa simulate -o demo-logs [-live]            生成演示日志
+  netsa rules    [-rules custom.yaml]            列出检测规则
+  netsa version
+
+运行 "netsa <命令> -h" 查看各命令选项。
+`, version)
+}
+
+func main() {
+	log.SetFlags(log.LstdFlags)
+	if len(os.Args) < 2 {
+		usage()
+		os.Exit(2)
+	}
+	var err error
+	switch os.Args[1] {
+	case "serve":
+		err = cmdServe(os.Args[2:])
+	case "analyze":
+		err = cmdAnalyze(os.Args[2:])
+	case "simulate":
+		err = cmdSimulate(os.Args[2:])
+	case "rules":
+		err = cmdRules(os.Args[2:])
+	case "version", "-v", "--version":
+		fmt.Println("netsa", version)
+	default:
+		usage()
+		os.Exit(2)
+	}
+	if err != nil {
+		log.Fatalf("错误: %v", err)
+	}
+}
+
+// app 是装配好的系统组件。
+type app struct {
+	cfg      *config.Config
+	geo      *geo.Resolver
+	intel    *intel.DB
+	engine   *detect.Engine
+	store    *store.Store
+	notifier *alert.Notifier
+	broker   *api.Broker
+	pipe     *pipeline.Pipeline
+	ingest   *ingest.Manager
+	rdap     *geo.RDAPClient
+}
+
+func build(cfg *config.Config) (*app, error) {
+	a := &app{cfg: cfg}
+	loc, err := cfg.Location()
+	if err != nil {
+		return nil, err
+	}
+	parser.Location = loc
+	gaz, err := geo.LoadGazetteer(staticFS(cfg))
+	if err != nil {
+		return nil, fmt.Errorf("加载地图地名库失败: %w", err)
+	}
+	var providers []geo.Provider
+	i2r, err := geo.OpenIP2Region(cfg.Geo.IP2RegionV4, cfg.Geo.IP2RegionV6)
+	if err != nil {
+		return nil, fmt.Errorf("加载 ip2region 失败: %w", err)
+	}
+	if i2r != nil {
+		providers = append(providers, i2r)
+	}
+	mm, err := geo.OpenMaxMind(cfg.Geo.MaxMindCity, cfg.Geo.MaxMindASN)
+	if err != nil {
+		return nil, fmt.Errorf("加载 MaxMind 失败: %w", err)
+	}
+	if mm != nil {
+		providers = append(providers, mm)
+	}
+	opt := geo.Options{
+		Providers: providers, ReverseDNS: cfg.Geo.ReverseDNS, CacheSize: cfg.Geo.CacheSize,
+		HomeLat: cfg.Home.Lat, HomeLon: cfg.Home.Lon, Gazetteer: gaz, Custom: geo.NewCustom(cfg.Geo.Custom),
+	}
+	if cfg.Geo.Online.Enabled {
+		opt.Online = geo.NewIPAPI(cfg.Geo.Online.URL, cfg.Geo.Online.Lang)
+	}
+	a.geo = geo.NewResolver(opt)
+	log.Printf("[geo] 定位数据源: %s", strings.Join(a.geo.ProviderNames(), ", "))
+	if n := opt.Custom.Len(); n > 0 {
+		log.Printf("[geo] 自定义网段: %d 条", n)
+	}
+	if !anyReady(providers) {
+		log.Printf("[geo] 警告: 未找到离线定位库，IP 归属地只能依赖在线查询（库文件就绪后将自动加载）")
+	}
+	if cfg.Geo.Online.RDAP {
+		a.rdap = geo.NewRDAPClient()
+	}
+
+	if a.intel, err = intel.Load(cfg.Intel); err != nil {
+		return nil, err
+	}
+	if a.engine, err = detect.NewEngine(cfg.Detect.RulesFile, cfg.Detect.SuccessMinBytes); err != nil {
+		return nil, err
+	}
+	a.store = store.New(cfg.Storage.MaxIPs, cfg.Storage.MaxAlerts, cfg.Detect.AlertsPerRule, cfg.Storage.Retention)
+	a.store.GeoLookup = a.geo.Lookup
+	a.store.IntelMatch = a.intel.Match
+	a.notifier = alert.New(cfg.Alert)
+	a.broker = api.NewBroker()
+	a.pipe = &pipeline.Pipeline{
+		Engine: a.engine, Behavior: detect.NewBehavior(cfg.Detect.Thresholds), Store: a.store, Geo: a.geo,
+		RealIP: pipeline.NewRealIP(cfg.RealIP), Notifier: a.notifier,
+		EnrichLevel: model.ParseSeverity(cfg.Geo.EnrichLevel), OnAlert: a.broker.Publish,
+	}
+	a.pipe.SetWhitelist(cfg.Detect.Whitelist)
+	a.geo.OnUpdate = a.pipe.OnGeoUpdate
+	a.ingest = ingest.NewManager(20000)
+	return a, nil
+}
+
+func (a *app) server(listen string) *http.Server {
+	s := &api.Server{
+		Cfg: a.cfg, Store: a.store, Ingest: a.ingest, Pipeline: a.pipe, Geo: a.geo, Engine: a.engine,
+		RDAP: a.rdap, Static: staticFS(a.cfg), Version: version, Broker: a.broker,
+	}
+	// 不设置 Read/WriteTimeout：SSE 长连接会被其超时中断
+	return &http.Server{Addr: listen, Handler: s.Handler(), ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 120 * time.Second, MaxHeaderBytes: 64 << 10}
+}
+
+func cmdServe(args []string) error {
+	fs := flag.NewFlagSet("serve", flag.ExitOnError)
+	cfgPath := fs.String("c", "configs/config.yaml", "配置文件")
+	listen := fs.String("listen", "", "监听地址（覆盖配置）")
+	webDir := fs.String("web", "", "从该目录加载前端页面（覆盖 server.web_dir，用于定制或开发界面）")
+	fs.Parse(args)
+
+	cfg, err := config.Load(*cfgPath)
+	if err != nil {
+		return err
+	}
+	if *listen != "" {
+		cfg.Server.Listen = *listen
+	}
+	if *webDir != "" {
+		cfg.Server.WebDir = *webDir
+	}
+	a, err := build(cfg)
+	if err != nil {
+		return err
+	}
+	if err := a.store.Load(cfg.Storage.Snapshot); err != nil {
+		log.Printf("[store] 加载快照失败（将从空状态开始）: %v", err)
+	}
+	// 快照中的定位结果可能来自旧版定位库或旧的自定义网段，按当前库重新定位
+	if n := a.store.RefreshGeo(a.geo.Relocate); n > 0 {
+		log.Printf("[geo] 已按当前定位库更新 %d 个历史攻击源的归属地", n)
+	}
+
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	a.geo.Start(ctx)
+	go a.reloadGeo(ctx, *cfgPath)
+	go a.notifier.Run(ctx)
+	a.intel.StartTor(ctx, cfg.Intel.TorExitURL)
+	done := a.pipe.Run(ctx, a.ingest.Out, 0)
+
+	for _, src := range cfg.Sources {
+		if err := a.ingest.StartSource(ctx, src); err != nil {
+			return fmt.Errorf("数据源 %s: %w", src.Name, err)
+		}
+		log.Printf("[ingest] 数据源 %s (%s): %s", src.Name, src.Type, strings.Join(src.Paths, ", "))
+	}
+	if err := a.ingest.StartSyslog(ctx, cfg.Syslog); err != nil {
+		return fmt.Errorf("启动 syslog 失败: %w", err)
+	}
+
+	srv := a.server(cfg.Server.Listen)
+	go func() {
+		log.Printf("[web] 态势感知大屏: http://%s", displayAddr(cfg.Server.Listen))
+		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			log.Printf("[web] %v", err)
+			stop()
+		}
+	}()
+
+	tick := time.NewTicker(cfg.Storage.Interval)
+	defer tick.Stop()
+	for {
+		select {
+		case <-tick.C:
+			a.store.Maintain()
+			if err := a.store.Save(cfg.Storage.Snapshot); err != nil {
+				log.Printf("[store] 保存快照失败: %v", err)
+			}
+		case <-ctx.Done():
+			log.Printf("正在退出...")
+			shutdown, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			srv.Shutdown(shutdown)
+			cancel()
+			select {
+			case <-done:
+			case <-time.After(3 * time.Second):
+			}
+			if err := a.store.Save(cfg.Storage.Snapshot); err != nil {
+				log.Printf("[store] 保存快照失败: %v", err)
+			}
+			return nil
+		}
+	}
+}
+
+// reloadGeo 按 geo.reload_interval 检查定位库文件与配置中的自定义网段，有变化时热更新，
+// 并刷新所有攻击源画像的归属地，无需重启服务。
+func (a *app) reloadGeo(ctx context.Context, cfgPath string) {
+	if a.cfg.Geo.ReloadInterval <= 0 {
+		return
+	}
+	custom := a.cfg.Geo.Custom
+	tick := time.NewTicker(a.cfg.Geo.ReloadInterval)
+	defer tick.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-tick.C:
+		}
+		changed, err := a.geo.Reload()
+		if err != nil {
+			log.Printf("[geo] 重新加载定位库失败（继续使用旧库）: %v", err)
+		}
+		if cfg, err := config.Load(cfgPath); err != nil {
+			log.Printf("[geo] 读取配置失败，自定义网段保持不变: %v", err)
+		} else if !reflect.DeepEqual(cfg.Geo.Custom, custom) {
+			custom = cfg.Geo.Custom
+			c := geo.NewCustom(custom)
+			a.geo.SetCustom(c)
+			changed = append(changed, fmt.Sprintf("custom(%d)", c.Len()))
+		}
+		if len(changed) == 0 {
+			continue
+		}
+		n := a.store.RefreshGeo(a.geo.Relocate)
+		log.Printf("[geo] 定位库已热更新: %s，%d 个攻击源归属地发生变化", strings.Join(changed, ", "), n)
+	}
+}
+
+// anyReady 判断是否至少有一个离线定位库已加载。
+func anyReady(ps []geo.Provider) bool {
+	for _, p := range ps {
+		if rd, ok := p.(geo.Readier); !ok || rd.Ready() {
+			return true
+		}
+	}
+	return false
+}
+
+func displayAddr(listen string) string {
+	if strings.HasPrefix(listen, ":") {
+		return "localhost" + listen
+	}
+	return listen
+}
+
+// expandArgs 展开通配符（Windows 命令行不会自动展开）。
+func expandArgs(args []string) []string {
+	var out []string
+	for _, a := range args {
+		if strings.ContainsAny(a, "*?[") {
+			m, _ := filepath.Glob(a)
+			out = append(out, m...)
+		} else {
+			out = append(out, a)
+		}
+	}
+	return out
+}
+
+func cmdAnalyze(args []string) error {
+	fs := flag.NewFlagSet("analyze", flag.ExitOnError)
+	cfgPath := fs.String("c", "", "配置文件（可选，用于定位库路径、可信代理、规则等）")
+	typ := fs.String("type", "auto", "日志类型: auto | nginx | firewall | 具体解析器名")
+	logFormat := fs.String("format", "", "自定义 nginx log_format 字符串")
+	host := fs.String("host", "", "站点名（日志中无 $host 时使用）")
+	out := fs.String("o", "", "输出 JSON 报告路径")
+	online := fs.Bool("online", false, "启用在线溯源（ip-api + rDNS），会将攻击 IP 发送至第三方接口")
+	wait := fs.Duration("wait", 60*time.Second, "在线溯源最长等待时间")
+	listen := fs.String("listen", "", "分析完成后启动 Web 大屏，例如 :8080")
+	top := fs.Int("top", 20, "控制台输出的攻击者数量")
+	fs.Usage = func() {
+		fmt.Fprintln(os.Stderr, "用法: netsa analyze [选项] <日志文件...>")
+		fs.PrintDefaults()
+	}
+	fs.Parse(args)
+	files := expandArgs(fs.Args())
+	if len(files) == 0 {
+		fs.Usage()
+		return errors.New("未指定日志文件")
+	}
+
+	cfg, err := config.Load(*cfgPath)
+	if err != nil {
+		return err
+	}
+	cfg.Geo.Online.Enabled = *online
+	if !*online {
+		cfg.Geo.ReverseDNS = false
+	}
+	a, err := build(cfg)
+	if err != nil {
+		return err
+	}
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	a.geo.Start(ctx)
+
+	start := time.Now()
+	done := a.pipe.Run(ctx, a.ingest.Out, 0)
+	for _, f := range files {
+		if err := a.ingest.ReadFile(ctx, f, *typ, *logFormat, *host); err != nil {
+			log.Printf("跳过 %s: %v", f, err)
+		}
+	}
+	go func() {
+		a.ingest.Wait()
+		close(a.ingest.Out)
+	}()
+	<-done
+	elapsed := time.Since(start)
+
+	if *online {
+		deadline := time.Now().Add(*wait)
+		log.Printf("[geo] 等待在线溯源完成（最长 %s）...", *wait)
+		for time.Now().Before(deadline) && a.geo.QueueLen() > 0 && ctx.Err() == nil {
+			time.Sleep(500 * time.Millisecond)
+		}
+		time.Sleep(5 * time.Second) // 等待最后一批请求返回
+	}
+
+	printReport(a, files, elapsed, *top)
+	if *out != "" {
+		b, _ := json.MarshalIndent(api.Report(a.store, 500), "", "  ")
+		if err := os.WriteFile(*out, b, 0o644); err != nil {
+			return err
+		}
+		fmt.Printf("\nJSON 报告已写入 %s\n", *out)
+	}
+	if *listen != "" {
+		srv := a.server(*listen)
+		go func() {
+			<-ctx.Done()
+			srv.Close()
+		}()
+		fmt.Printf("\nWeb 大屏: http://%s  (Ctrl+C 退出)\n", displayAddr(*listen))
+		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			return err
+		}
+	}
+	return nil
+}
+
+func printReport(a *app, files []string, elapsed time.Duration, top int) {
+	o := a.store.Overview()
+	fmt.Println()
+	fmt.Println("==================== 数据源 ====================")
+	tw := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
+	fmt.Fprintln(tw, "文件\t识别格式\t行数\t解析成功\t失败")
+	for _, s := range a.ingest.Stats() {
+		fmt.Fprintf(tw, "%s\t%s\t%d\t%d\t%d\n", s.Path, s.Detected, s.Lines, s.Parsed, s.Failed)
+	}
+	tw.Flush()
+	rate := float64(o.Totals.Events) / max(elapsed.Seconds(), 0.001)
+	fmt.Printf("耗时 %s，处理 %d 条事件（%.0f 条/秒）\n", elapsed.Round(time.Millisecond), o.Totals.Events, rate)
+
+	fmt.Println()
+	fmt.Println("==================== 态势总览 ====================")
+	fmt.Printf("时间范围: %s ~ %s\n", o.From.Format("2006-01-02 15:04:05"), o.To.Format("2006-01-02 15:04:05"))
+	fmt.Printf("Web 请求 %d | 防火墙事件 %d | 独立来源 IP %d | 攻击 IP %d\n", o.Totals.Web, o.Totals.Firewall, o.UniqueIPs, o.Attackers)
+	fmt.Printf("攻击事件 %d | 已拦截 %d (%.1f%%) | 疑似成功 %d | 攻击面风险指数 %d/100\n",
+		o.Totals.Attacks, o.Totals.Blocked, o.BlockRate, o.Totals.Success, o.SurfaceScore)
+	fmt.Printf("攻击源等级: 严重 %d / 高危 %d / 中危 %d / 低危 %d\n",
+		o.LevelCounts["critical"], o.LevelCounts["high"], o.LevelCounts["medium"], o.LevelCounts["low"])
+
+	fmt.Println()
+	fmt.Println("---- 攻击类型分布 ----")
+	for i, kv := range o.Categories {
+		if i >= 15 {
+			break
+		}
+		fmt.Printf("  %-22s %d\n", kv.Name, kv.Value)
+	}
+	if len(o.TopCountries) > 0 {
+		fmt.Println("---- 攻击来源国家/地区 ----")
+		var parts []string
+		for _, kv := range o.TopCountries {
+			parts = append(parts, fmt.Sprintf("%s(%d)", kv.Name, kv.Value))
+		}
+		fmt.Println("  " + strings.Join(parts, "  "))
+	}
+
+	fmt.Println()
+	fmt.Printf("==================== 攻击源 TOP %d ====================\n", top)
+	list, _ := a.store.Attackers(store.AttackerQuery{Sort: "score", Limit: top})
+	tw = tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
+	fmt.Fprintln(tw, "IP\t评分\t等级\t攻击次数\t归属地\t网络类型\t置信度\t攻击类型")
+	for _, s := range list {
+		ip := s.IP
+		if s.ViaProxy {
+			ip += "(经代理)"
+		}
+		fmt.Fprintf(tw, "%s\t%.0f\t%s\t%d\t%s\t%s\t%s\t%s\n", ip, s.Score, s.Level.Label(), s.Attacks,
+			s.Location, s.NetType, s.Confidence, strings.Join(s.Categories, ","))
+	}
+	tw.Flush()
+
+	sf := a.store.Surface()
+	fmt.Println()
+	fmt.Println("==================== 攻击面风险发现 ====================")
+	if len(sf.Findings) == 0 {
+		fmt.Println("  未发现明显暴露面风险")
+	}
+	for i, f := range sf.Findings {
+		if i >= 15 {
+			fmt.Printf("  ... 共 %d 项\n", len(sf.Findings))
+			break
+		}
+		fmt.Printf("  [%s] %s — %s\n      证据: %s\n      建议: %s\n", f.Severity.Label(), f.Title, f.Asset, f.Evidence, f.Remediation)
+	}
+	if len(sf.Tech) > 0 {
+		var parts []string
+		for _, kv := range sf.Tech {
+			parts = append(parts, kv.Name)
+		}
+		fmt.Println("识别到的技术栈: " + strings.Join(parts, ", "))
+	}
+	exposed := 0
+	for _, s := range sf.Services {
+		if s.Exposed {
+			exposed++
+		}
+	}
+	fmt.Printf("观测到网络服务 %d 个（对公网放行 %d 个），Web 入口 %d 个\n", len(sf.Services), exposed, sf.EndpointTotal)
+}
+
+func cmdSimulate(args []string) error {
+	fs := flag.NewFlagSet("simulate", flag.ExitOnError)
+	dir := fs.String("o", "demo-logs", "输出目录")
+	hours := fs.Int("hours", 6, "生成多少小时的历史日志")
+	intensity := fs.Int("intensity", 4, "流量强度")
+	live := fs.Bool("live", false, "生成历史日志后持续追加实时日志")
+	interval := fs.Duration("interval", 2*time.Second, "实时模式追加间隔")
+	seed := fs.Int64("seed", 20261022, "随机种子")
+	fs.Parse(args)
+
+	if *hours > 0 {
+		if err := demo.Generate(*dir, *hours, *intensity, *seed); err != nil {
+			return err
+		}
+		fmt.Printf("已生成 %d 小时演示日志到 %s/ (access.log, ufw.log, fortigate.log)\n", *hours, *dir)
+	}
+	if !*live {
+		return nil
+	}
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	fmt.Printf("实时模式：每 %s 追加一批日志，Ctrl+C 结束\n", *interval)
+	return demo.Live(ctx, *dir, *interval, *intensity, *seed)
+}
+
+func cmdRules(args []string) error {
+	fs := flag.NewFlagSet("rules", flag.ExitOnError)
+	file := fs.String("rules", "", "自定义规则文件")
+	fs.Parse(args)
+	rules, err := detect.LoadRules(*file)
+	if err != nil {
+		return err
+	}
+	sort.SliceStable(rules, func(i, j int) bool { return rules[i].Category < rules[j].Category })
+	tw := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
+	fmt.Fprintln(tw, "ID\t分类\t等级\t名称")
+	for _, r := range rules {
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\n", r.ID, r.Category, r.Severity, r.Name)
+	}
+	tw.Flush()
+	fmt.Printf("共 %d 条特征规则（另有 CC/目录扫描/暴力破解/端口扫描/主机探测/洪水等行为检测）\n", len(rules))
+	return nil
+}
+
+// staticFS 返回前端资源：配置了 server.web_dir 时使用磁盘目录，否则使用编译内嵌的资源。
+func staticFS(cfg *config.Config) fs.FS {
+	if cfg.Server.WebDir != "" {
+		return os.DirFS(cfg.Server.WebDir)
+	}
+	return web.Static()
+}

@@ -1,0 +1,808 @@
+'use strict';
+
+// ---------------- 工具 ----------------
+const $ = (s, el = document) => el.querySelector(s);
+const $$ = (s, el = document) => [...el.querySelectorAll(s)];
+// 日志中的攻击载荷（如 <script>）必须转义后再插入页面
+const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+
+const LV = { critical: '严重', high: '高危', medium: '中危', low: '低危', info: '信息' };
+const LV_COLOR = { critical: '#ff4d4f', high: '#ff7a45', medium: '#ffc53d', low: '#40a9ff', info: '#8c9ab8' };
+const LEVELS = ['critical', 'high', 'medium', 'low', 'info'];
+const PHASE = { recon: '侦察扫描', credential: '凭证攻击', exploit: '漏洞利用', persistence: '后门控制', impact: '拒绝服务' };
+const PHASES = ['recon', 'credential', 'exploit', 'persistence', 'impact'];
+const RESULT = { blocked: '已拦截', failed: '失败', error: '服务异常', success: '疑似成功', passed: '未拦截', allowed: '防火墙放行', unknown: '未知' };
+const CONF = { high: '高', medium: '中', low: '低' };
+const SRC = { custom: '自定义网段', ip2region: 'ip2region 离线库', maxmind: 'MaxMind GeoLite2', 'ip-api': 'ip-api 在线库', private: '内网地址', rdns: '反向 DNS', gazetteer: '区划地名库（离线城市定位）' };
+const TEXT = '#a9b8db';
+const GRID_LINE = 'rgba(80,110,170,.18)';
+
+const api = async (path) => {
+  const r = await fetch(path, { headers: { Accept: 'application/json' } });
+  if (!r.ok) {
+    const text = await r.text();
+    let msg = text || r.statusText;
+    try { msg = JSON.parse(text).error || msg; } catch (_) { /* 非 JSON 错误 */ }
+    throw new Error(msg);
+  }
+  return r.json();
+};
+let meta = { china_maps: {}, geo_providers: [] };
+const num = (n) => (n ?? 0).toLocaleString('zh-CN');
+const zero = (t) => !t || t.startsWith('0001');
+const pad = (n) => String(n).padStart(2, '0');
+const fmtTime = (t) => {
+  if (zero(t)) return '-';
+  const d = new Date(t);
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+};
+const fmtShort = (t) => (zero(t) ? '-' : fmtTime(t).slice(5));
+const badge = (lv) => `<span class="badge lv-${esc(lv)} bg-${esc(lv)}">${esc(LV[lv] || lv)}</span>`;
+const resTag = (r) => `<span class="res-${esc(r)} nowrap">${esc(RESULT[r] || r)}</span>`;
+const scoreBar = (s, lv) => `<span class="scorebar"><i style="width:${Math.min(100, s)}%;background:${LV_COLOR[lv] || '#888'}"></i></span><b>${Math.round(s)}</b>`;
+const ipLink = (ip) => `<span class="ip clickable" data-ip="${esc(ip)}">${esc(ip)}</span>`;
+const empty = (cols, text = '暂无数据') => `<tr><td colspan="${cols}" class="empty">${esc(text)}</td></tr>`;
+const sortedEntries = (obj, n) => Object.entries(obj || {}).sort((a, b) => b[1] - a[1]).slice(0, n);
+
+// ---------------- 图表 ----------------
+const charts = {};
+// 图表实例创建后的一次性初始化（事件绑定等），实例重建时会重新执行
+const chartSetup = {};
+const isVisible = (el) => !!el && el.offsetWidth > 0 && el.offsetHeight > 0;
+// 图表容器尺寸变化（面板被拉伸、窗口缩放、切换标签页）时自动重绘，保证图表始终填满面板
+const chartObserver = new ResizeObserver((entries) => {
+  for (const e of entries) {
+    const c = echarts.getInstanceByDom(e.target);
+    if (c && e.contentRect.width > 0 && e.contentRect.height > 0) c.resize();
+  }
+});
+// 隐藏标签页中的容器宽高为 0：此时 resize 会把画布缩成 0 高度，地图飞线拖尾绘制 0 尺寸画布时抛出异常，
+// 实例会卡在 ECharts 内部处理流程中，之后所有 setOption / resize 都被拒绝，表现为切回后地图空白。
+// 因此只对可见图表 resize，并在取用实例时检查健康状态，异常实例直接重建。
+function resizeCharts() {
+  for (const c of Object.values(charts)) {
+    if (isVisible(c.getDom())) c.resize();
+  }
+}
+function chartHealthy(c) {
+  if (c.isDisposed()) return false;
+  const el = c.getDom();
+  if (!isVisible(el)) return true; // 隐藏时无法判断，等可见后再检查
+  if (c.__flagInMainProcess) return false; // 渲染异常后残留的内部标记（正常情况下调用方取实例时必为 false）
+  const cv = el.querySelector('canvas');
+  return !cv || (cv.offsetWidth > 0 && cv.offsetHeight > 0);
+}
+function chart(id) {
+  let c = charts[id];
+  if (c && !chartHealthy(c)) {
+    console.warn(`图表 ${id} 状态异常，已重建`);
+    chartObserver.unobserve(c.getDom());
+    try { c.dispose(); } catch (_) { /* 异常实例可能无法正常释放 */ }
+    c = null;
+  }
+  if (!c) {
+    const el = document.getElementById(id);
+    c = charts[id] = echarts.init(el, null, { renderer: 'canvas' });
+    chartObserver.observe(el);
+    chartSetup[id]?.(c);
+  }
+  return c;
+}
+const baseTooltip = { backgroundColor: 'rgba(8,16,34,.95)', borderColor: '#2b4a80', textStyle: { color: '#d6e2ff', fontSize: 12 } };
+
+function barChart(id, items, color, horizontal = true) {
+  const names = items.map((i) => i.name).reverse();
+  const vals = items.map((i) => i.value).reverse();
+  const cat = { type: 'category', data: names, axisLabel: { color: TEXT, fontSize: 11, width: 110, overflow: 'truncate' }, axisLine: { lineStyle: { color: GRID_LINE } }, axisTick: { show: false } };
+  const val = { type: 'value', axisLabel: { color: TEXT, fontSize: 10 }, splitLine: { lineStyle: { color: GRID_LINE } } };
+  chart(id).setOption({
+    tooltip: { ...baseTooltip, trigger: 'axis', axisPointer: { type: 'shadow' } },
+    grid: { left: 8, right: 30, top: 6, bottom: 4, containLabel: true },
+    xAxis: horizontal ? val : cat, yAxis: horizontal ? cat : val,
+    series: [{
+      type: 'bar', data: vals, barMaxWidth: 14,
+      itemStyle: { borderRadius: horizontal ? [0, 3, 3, 0] : [3, 3, 0, 0], color: new echarts.graphic.LinearGradient(0, 0, horizontal ? 1 : 0, horizontal ? 0 : 1, [{ offset: 0, color: color[0] }, { offset: 1, color: color[1] }]) },
+      label: { show: horizontal, position: 'right', color: TEXT, fontSize: 10 },
+    }],
+  }, true);
+}
+
+function gauge(id, value, title) {
+  chart(id).setOption({
+    series: [{
+      type: 'gauge', startAngle: 210, endAngle: -30, min: 0, max: 100, radius: '92%', center: ['50%', '58%'],
+      progress: { show: true, width: 12, itemStyle: { color: value >= 80 ? LV_COLOR.critical : value >= 60 ? LV_COLOR.high : value >= 35 ? LV_COLOR.medium : value >= 10 ? LV_COLOR.low : '#52c41a' } },
+      axisLine: { lineStyle: { width: 12, color: [[1, 'rgba(60,90,150,.3)']] } },
+      axisTick: { show: false }, splitLine: { length: 8, lineStyle: { color: '#2b4a80', width: 2 } },
+      axisLabel: { color: TEXT, fontSize: 10, distance: 16 }, pointer: { width: 4, itemStyle: { color: '#8fe9ff' } },
+      anchor: { show: true, size: 8, itemStyle: { color: '#8fe9ff' } },
+      title: { color: TEXT, fontSize: 12, offsetCenter: [0, '72%'] },
+      detail: { valueAnimation: true, fontSize: 28, fontWeight: 700, color: '#fff', offsetCenter: [0, '38%'], formatter: '{value}' },
+      data: [{ value, name: title }],
+    }],
+  }, true);
+}
+
+function pie(id, items, rose = false) {
+  chart(id).setOption({
+    tooltip: { ...baseTooltip, trigger: 'item', formatter: '{b}<br/>{c} ({d}%)' },
+    legend: { type: 'scroll', orient: 'vertical', right: 0, top: 'middle', textStyle: { color: TEXT, fontSize: 11 }, itemWidth: 10, itemHeight: 10, pageTextStyle: { color: TEXT } },
+    color: ['#3a8bff', '#36cfc9', '#ff7a45', '#ffc53d', '#ff4d4f', '#9254de', '#73d13d', '#f759ab', '#40a9ff', '#ffa940', '#5cdbd3', '#adc6ff'],
+    series: [{
+      type: 'pie', radius: rose ? ['15%', '78%'] : ['45%', '72%'], center: ['34%', '50%'], roseType: rose ? 'radius' : false,
+      itemStyle: { borderColor: '#0b1428', borderWidth: 2 }, label: { show: false }, data: items,
+    }],
+  }, true);
+}
+
+// ---------------- 顶栏 ----------------
+setInterval(() => { $('#clock').textContent = fmtTime(new Date().toISOString()); }, 1000);
+
+let currentTab = 'overview';
+$$('#tabs button').forEach((b) => b.addEventListener('click', () => switchTab(b.dataset.tab)));
+function switchTab(tab) {
+  currentTab = tab;
+  $$('#tabs button').forEach((b) => b.classList.toggle('active', b.dataset.tab === tab));
+  $$('.tab').forEach((s) => s.classList.toggle('active', s.id === 'tab-' + tab));
+  loaders[tab]?.();
+  // 等浏览器完成新标签页的布局后再校正尺寸；只处理可见图表，隐藏的图表保持原尺寸
+  requestAnimationFrame(() => requestAnimationFrame(resizeCharts));
+}
+
+// IP 点击统一打开溯源详情
+document.addEventListener('click', (e) => {
+  const el = e.target.closest('[data-ip]');
+  if (el) openIP(el.dataset.ip);
+});
+
+// ---------------- 态势总览 ----------------
+let lastOverview = null;
+async function loadOverview() {
+  const o = await api('/api/overview');
+  lastOverview = o;
+  const lc = o.level_counts || {};
+  const t = o.totals;
+  const kpis = [
+    ['总事件', num(t.events), `Web ${num(t.web)} · 防火墙 ${num(t.firewall)}`, '#8fe9ff'],
+    ['攻击事件', num(t.attacks), `近 1 小时 ${num(o.recent.attacks)}`, LV_COLOR.high],
+    ['攻击源 IP', num(o.attackers), `独立来源 ${num(o.unique_ips)} · 近 1 小时活跃 ${num(o.recent.attackers)}`, '#ffc53d'],
+    ['高危以上攻击源', num((lc.critical || 0) + (lc.high || 0)), `严重 ${lc.critical || 0} · 高危 ${lc.high || 0}`, LV_COLOR.critical],
+    ['攻击拦截率', `${o.block_rate}%`, `已拦截 ${num(t.blocked)}`, '#52c41a'],
+    ['疑似成功攻击', num(t.success), '需优先排查是否失陷', t.success > 0 ? LV_COLOR.critical : '#52c41a'],
+    ['攻击面风险指数', `${o.surface_score}`, `风险发现 ${num(o.findings)} 项`,
+      o.surface_score >= 60 ? LV_COLOR.critical : o.surface_score >= 30 ? LV_COLOR.high : o.surface_score > 0 ? LV_COLOR.medium : '#52c41a'],
+    ['攻击来源地域', num(o.country_count), `国家/地区 · 城市 ${num(o.city_count)}`, '#8fe9ff'],
+  ];
+  $('#kpis').innerHTML = kpis.map(([l, v, s, c]) => `<div class="kpi"><div class="label">${l}</div><div class="value" style="color:${c}">${v}</div><div class="sub" title="${esc(s)}">${esc(s)}</div></div>`).join('');
+  const tb = $('#threatBadge');
+  tb.innerHTML = `威胁等级 <b>${esc(LV[o.threat_level] === '信息' ? '安全' : LV[o.threat_level])}</b> · ${o.threat_index}`;
+  tb.style.color = LV_COLOR[o.threat_level] || '#52c41a';
+  tb.style.borderColor = tb.style.color;
+  $('#rangeText').textContent = zero(o.from) ? '' : `${fmtShort(o.from)} ~ ${fmtShort(o.to)}`;
+
+  gauge('cGauge', o.threat_index, '近 60 分钟');
+  pie('cCategory', (o.categories || []).slice(0, 12));
+  const ph = o.phases || {};
+  chart('cPhase').setOption({
+    tooltip: { ...baseTooltip, trigger: 'axis', axisPointer: { type: 'shadow' } },
+    grid: { left: 8, right: 30, top: 6, bottom: 4, containLabel: true },
+    xAxis: { type: 'value', axisLabel: { color: TEXT, fontSize: 10 }, splitLine: { lineStyle: { color: GRID_LINE } } },
+    yAxis: { type: 'category', inverse: true, data: PHASES.map((p) => PHASE[p]), axisLabel: { color: TEXT }, axisTick: { show: false }, axisLine: { lineStyle: { color: GRID_LINE } } },
+    series: [{ type: 'bar', barMaxWidth: 14, label: { show: true, position: 'right', color: TEXT, fontSize: 10 },
+      data: PHASES.map((p, i) => ({ value: ph[p] || 0, itemStyle: { color: ['#40a9ff', '#ffc53d', '#ff7a45', '#ff4d4f', '#9254de'][i], borderRadius: [0, 3, 3, 0] } })) }],
+  }, true);
+  barChart('cCountry', (o.top_countries || []).slice(0, 10), ['#1d4fa8', '#3a8bff']);
+  barChart('cCity', (o.top_cities || []).slice(0, 10), ['#126e6a', '#36cfc9']);
+  pie('cNetType', o.top_net_types || []);
+  $('#topTargets').innerHTML = (o.top_targets || []).length
+    ? `<colgroup><col><col style="width:72px"></colgroup><thead><tr><th>目标</th><th class="num">次数</th></tr></thead><tbody>${o.top_targets.map((k) => `<tr><td class="mono" title="${esc(k.name)}">${esc(k.name)}</td><td class="num">${num(k.value)}</td></tr>`).join('')}</tbody>`
+    : empty(2);
+}
+
+let trendMinutes = 360;
+$$('#trendRange button').forEach((b) => b.addEventListener('click', () => {
+  trendMinutes = +b.dataset.m;
+  $$('#trendRange button').forEach((x) => x.classList.toggle('active', x === b));
+  loadTrend();
+}));
+async function loadTrend() {
+  const data = (await api(`/api/timeline?minutes=${trendMinutes}`)) || [];
+  const x = data.map((b) => {
+    const d = new Date(b.t * 1000);
+    return trendMinutes > 1440 ? `${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}` : `${pad(d.getHours())}:${pad(d.getMinutes())}`;
+  });
+  const area = (c) => ({ color: new echarts.graphic.LinearGradient(0, 0, 0, 1, [{ offset: 0, color: c + '66' }, { offset: 1, color: c + '00' }]) });
+  chart('cTrend').setOption({
+    tooltip: { ...baseTooltip, trigger: 'axis' },
+    // 图例单独占一行，坐标轴名称放在其下方，避免与右侧轴名“攻击”重叠
+    legend: { top: 0, right: 0, textStyle: { color: TEXT, fontSize: 11 }, itemWidth: 12, itemHeight: 8, itemGap: 14 },
+    grid: { left: 8, right: 8, top: 44, bottom: 4, containLabel: true },
+    xAxis: { type: 'category', data: x, axisLabel: { color: TEXT, fontSize: 10 }, axisLine: { lineStyle: { color: GRID_LINE } } },
+    yAxis: [
+      { type: 'value', name: '流量', nameGap: 10, nameTextStyle: { color: TEXT, fontSize: 10 }, axisLabel: { color: TEXT, fontSize: 10 }, splitLine: { lineStyle: { color: GRID_LINE } } },
+      { type: 'value', name: '攻击', nameGap: 10, nameTextStyle: { color: TEXT, fontSize: 10 }, axisLabel: { color: TEXT, fontSize: 10 }, splitLine: { show: false } },
+    ],
+    series: [
+      { name: 'Web 请求', type: 'line', smooth: true, showSymbol: false, data: data.map((b) => b.web), lineStyle: { width: 1.5, color: '#3a8bff' }, itemStyle: { color: '#3a8bff' }, areaStyle: area('#3a8bff') },
+      { name: '防火墙事件', type: 'line', smooth: true, showSymbol: false, data: data.map((b) => b.fw), lineStyle: { width: 1.5, color: '#36cfc9' }, itemStyle: { color: '#36cfc9' } },
+      { name: '攻击事件', type: 'bar', yAxisIndex: 1, data: data.map((b) => b.attacks), itemStyle: { color: '#ff7a45' }, barMaxWidth: 6 },
+      { name: '高危/严重', type: 'line', yAxisIndex: 1, smooth: true, showSymbol: false, data: data.map((b) => b.sev[3] + b.sev[4]), lineStyle: { width: 1.5, color: '#ff4d4f' }, itemStyle: { color: '#ff4d4f' } },
+    ],
+  }, true);
+}
+
+// ---------------- 攻击来源地图 ----------------
+// 视图：world（世界）/ china（中国）/ china + province（省级下钻，地市着色）。
+// 刷新时只替换系列数据，保留用户的缩放与平移；切换视图或点击“重置”时恢复默认视角。
+const COORD = {
+  maxmind: '精确坐标（MaxMind）', 'ip-api': '精确坐标（在线库）', custom: '自定义网段坐标', private: '内网（资产所在地）',
+  city: '城市中心（近似）', province: '省级中心（近似）', country: '国家中心（近似）',
+};
+const isExact = (s) => s === 'maxmind' || s === 'ip-api' || s === 'custom';
+const mapCtl = { view: 'world', province: null, data: null, home: null, maps: {}, flashes: [], rendered: false };
+try { mapCtl.view = localStorage.getItem('netsa.mapView') === 'china' ? 'china' : 'world'; } catch (_) { /* 隐私模式 */ }
+
+function registerMap(name, url) {
+  if (!mapCtl.maps[name]) {
+    mapCtl.maps[name] = fetch(url)
+      .then((r) => { if (!r.ok) throw new Error(`加载地图 ${url} 失败`); return r.json(); })
+      .then((geo) => echarts.registerMap(name, geo))
+      .catch((e) => { delete mapCtl.maps[name]; throw e; });
+  }
+  return mapCtl.maps[name];
+}
+const mapName = () => (mapCtl.view === 'world' ? 'world' : mapCtl.province ? 'prov:' + mapCtl.province : 'china');
+const inChina = (lon, lat) => lon > 73 && lon < 136 && lat > 3 && lat < 54;
+const placeShort = (p) => p.label || p.city || p.province || p.country || '未知';
+// 内网攻击源（命中自定义网段）用菱形标注，与外部来源区分
+const pointSymbol = (p) => (p.internal ? 'diamond' : isExact(p.coord_source) ? 'circle' : 'emptyCircle');
+
+function visiblePoints() {
+  const pts = (mapCtl.data && mapCtl.data.points) || [];
+  if (mapCtl.view === 'world') return pts;
+  if (!mapCtl.province) return pts.filter((p) => p.world_name === 'China');
+  return pts.filter((p) => p.province_map === mapCtl.province);
+}
+
+function regionData() {
+  const d = mapCtl.data || {};
+  if (mapCtl.view === 'world') return (d.countries || []).map((r) => ({ name: r.map_name, label: r.name, value: r.attacks, attackers: r.attackers }));
+  if (!mapCtl.province) return (d.provinces || []).map((r) => ({ name: r.map_name, label: r.name, value: r.attacks, attackers: r.attackers }));
+  const agg = {};
+  for (const p of visiblePoints()) {
+    if (!p.city_map) continue;
+    const r = (agg[p.city_map] = agg[p.city_map] || { name: p.city_map, label: p.city_map, value: 0, attackers: 0 });
+    r.value += p.attacks;
+    r.attackers += p.attackers;
+  }
+  return Object.values(agg);
+}
+
+async function loadMap() {
+  const m = await api('/api/map');
+  mapCtl.data = m.data;
+  mapCtl.home = m.home;
+  await renderMap(!mapCtl.rendered);
+}
+
+function pointTip(p) {
+  return `<b>${esc(p.name || placeShort(p))}</b><br/>攻击源 ${p.attackers} 个 · 攻击 ${num(p.attacks)} 次<br/>最高等级 <span style="color:${LV_COLOR[p.level]}">${LV[p.level]}</span>`
+    + (p.internal ? '<br/><span style="color:#ffd666">内网攻击源 · 自定义网段</span>' : '')
+    + `<br/><span style="color:#7d8db3">${esc(COORD[p.coord_source] || '')} · 点击查看攻击源</span>`;
+}
+
+async function renderMap(reset) {
+  // 地图所在标签页隐藏时不渲染（容器尺寸为 0），切回态势总览时由 loadMap 补上
+  if (!isVisible($('#cMap'))) {
+    mapCtl.deferredReset = mapCtl.deferredReset || reset;
+    return;
+  }
+  // 实例刚创建或已损坏需重建时，按首次渲染处理（设置初始视角）
+  reset = reset || mapCtl.deferredReset || !charts.cMap || !chartHealthy(charts.cMap);
+  mapCtl.deferredReset = false;
+  const name = mapName();
+  try {
+    if (name === 'world') await registerMap('world', '/vendor/world.json');
+    else if (name === 'china') await registerMap('china', '/vendor/china/china.json');
+    else await registerMap(name, `/vendor/china/${encodeURIComponent(meta.china_maps[mapCtl.province])}.json`);
+  } catch (e) {
+    $('#mapNote').textContent = e.message;
+    return;
+  }
+  // 加载地图数据期间用户可能已切换到其他标签页
+  if (!isVisible($('#cMap'))) {
+    mapCtl.deferredReset = mapCtl.deferredReset || reset;
+    return;
+  }
+  const home = mapCtl.home || { lat: 0, lon: 0, name: '' };
+  const homeXY = [home.lon, home.lat];
+  const homeVisible = mapCtl.view === 'world' || inChina(home.lon, home.lat);
+  const pts = visiblePoints().slice(0, 400);
+  const regions = regionData();
+  const maxV = Math.max(1, ...regions.map((r) => r.value));
+  const maxA = Math.max(1, ...pts.map((p) => p.attacks));
+  const size = (a) => 7 + 18 * Math.sqrt(a / maxA);
+  const labelN = mapCtl.view === 'world' ? 16 : 30;
+  const geo = {
+    map: name, roam: true, scaleLimit: { min: 0.8, max: 40 },
+    label: { show: mapCtl.view !== 'world', color: 'rgba(170,195,240,.55)', fontSize: 10 },
+    itemStyle: { areaColor: '#10244a', borderColor: '#2b4a80', borderWidth: 0.7 },
+    emphasis: { label: { show: true, color: '#fff' }, itemStyle: { areaColor: '#25508f' } },
+    select: { disabled: true },
+  };
+  if (reset && mapCtl.view === 'world') Object.assign(geo, { center: [30, 22], zoom: 1.2 });
+  const option = {
+    tooltip: { ...baseTooltip, trigger: 'item' },
+    visualMap: {
+      type: 'continuous', seriesIndex: 0, min: 0, max: maxV, show: regions.length > 0, right: 10, bottom: 10,
+      itemWidth: 10, itemHeight: 90, text: ['攻击多', '少'], textStyle: { color: TEXT, fontSize: 10 }, calculable: false,
+      inRange: { color: ['#173566', '#1f5fae', '#c89a1c', '#e8532f'] },
+    },
+    geo,
+    series: [
+      {
+        type: 'map', geoIndex: 0, data: regions,
+        tooltip: {
+          formatter: (x) => (x.data
+            ? `<b>${esc(x.data.label || x.name)}</b><br/>攻击源 ${x.data.attackers} 个 · 攻击 ${num(x.data.value)} 次`
+              + (mapCtl.view === 'china' && !mapCtl.province ? '<br/><span style="color:#7d8db3">点击查看地市分布</span>' : '')
+            : esc(x.name)),
+        },
+      },
+      {
+        type: 'lines', coordinateSystem: 'geo', zlevel: 1, silent: true,
+        effect: { show: true, period: 4, trailLength: 0.35, symbol: 'arrow', symbolSize: 5 },
+        lineStyle: { width: 1, opacity: 0.45, curveness: 0.25 },
+        data: homeVisible ? pts.slice(0, 150).map((p) => ({ coords: [[p.lon, p.lat], homeXY], lineStyle: { color: LV_COLOR[p.level] } })) : [],
+      },
+      {
+        type: 'effectScatter', coordinateSystem: 'geo', zlevel: 2, rippleEffect: { scale: 3, brushType: 'stroke' },
+        labelLayout: { hideOverlap: true },
+        data: pts.map((p, i) => ({
+          name: placeShort(p), value: [p.lon, p.lat, p.attacks], p,
+          symbol: pointSymbol(p), symbolSize: size(p.attacks),
+          itemStyle: { color: LV_COLOR[p.level] },
+          label: {
+            show: i < labelN, formatter: placeShort(p) + (p.attackers > 1 ? ` ×${p.attackers}` : ''),
+            position: 'right', distance: 6, color: '#e6f0ff', fontSize: 11, textBorderColor: '#06101f', textBorderWidth: 2,
+          },
+        })),
+        tooltip: { formatter: (x) => pointTip(x.data.p) },
+      },
+      {
+        type: 'effectScatter', coordinateSystem: 'geo', zlevel: 3, silent: true, rippleEffect: { scale: 6, brushType: 'fill' },
+        data: mapCtl.flashes.map((f) => ({ value: [f.lon, f.lat], symbolSize: 8, itemStyle: { color: LV_COLOR[f.severity] } })),
+      },
+      {
+        type: 'scatter', coordinateSystem: 'geo', zlevel: 4, symbol: 'pin', symbolSize: 30, itemStyle: { color: '#36cfc9' },
+        label: { show: true, formatter: home.name, position: 'top', color: '#8fe9ff', fontSize: 12 },
+        data: homeVisible ? [{ name: home.name, value: homeXY }] : [],
+        tooltip: { formatter: () => `受保护资产：${esc(home.name)}` },
+      },
+    ],
+  };
+  // 切换视图时先清空画布：飞线拖尾使用独立图层，不清空会残留上一个视图的轨迹
+  if (reset) chart('cMap').clear();
+  chart('cMap').setOption(option, reset ? { notMerge: true } : { replaceMerge: ['series'] });
+  mapCtl.rendered = true;
+  updateMapChrome(pts, regions);
+}
+
+function updateMapChrome(pts, regions) {
+  const d = mapCtl.data || {};
+  const exact = pts.filter((p) => isExact(p.coord_source)).length;
+  const attackers = pts.reduce((s, p) => s + p.attackers, 0);
+  let stats;
+  if (mapCtl.view === 'world') stats = `来源国家/地区<b>${(d.countries || []).length}</b> 地点<b>${pts.length}</b> 攻击源<b>${attackers}</b>`;
+  else if (!mapCtl.province) stats = `国内来源省份<b>${(d.provinces || []).length}</b> 城市<b>${pts.length}</b> 攻击源<b>${attackers}</b>`;
+  else stats = `${esc(mapCtl.province)} 来源地市<b>${regions.length}</b> 攻击源<b>${attackers}</b>`;
+  if (pts.length) stats += `<br/>精确坐标占比<b>${Math.round((exact * 100) / pts.length)}%</b>`;
+  $('#mapStats').innerHTML = stats;
+  const notes = [];
+  if (d.no_coord > 0) notes.push(`${d.no_coord} 个攻击源无法定位（未配置自定义网段的内网地址或定位库中无记录）`);
+  if (pts.some((p) => p.internal)) notes.push('菱形为命中自定义网段的内网攻击源');
+  if (pts.length && exact < pts.length) notes.push('空心点为按城市/省份/国家中心换算的近似位置，配置 MaxMind 或开启在线溯源可获得精确坐标');
+  $('#mapNote').textContent = notes.join('；');
+  $('#mapCrumb').innerHTML = mapCtl.view === 'china' && mapCtl.province ? `<a id="crumbBack">中国</a> › <b>${esc(mapCtl.province)}</b>` : '';
+  const back = $('#crumbBack');
+  if (back) back.onclick = () => { mapCtl.province = null; hidePop(); renderMap(true); };
+  $$('#mapView button').forEach((b) => b.classList.toggle('active', b.dataset.v === mapCtl.view));
+}
+
+function hidePop() { $('#mapPop').hidden = true; }
+function showPop(p) {
+  const pop = $('#mapPop');
+  const ips = p.ips || [];
+  pop.innerHTML = `<div class="pt">${badge(p.level)} ${esc(p.name || placeShort(p))}<span class="x" id="popClose">✕</span></div>
+    <div class="meta">${esc(COORD[p.coord_source] || '')} · ${(+p.lat).toFixed(3)}, ${(+p.lon).toFixed(3)}<br/>攻击源 ${p.attackers} 个 · 攻击 ${num(p.attacks)} 次</div>
+    <table>${ips.map((x) => `<tr class="clickable" data-ip="${esc(x.ip)}"><td class="ip">${esc(x.ip)}</td><td>${badge(x.level)}</td><td>${Math.round(x.score)}</td><td class="muted">${esc(x.isp || '')}</td></tr>`).join('')}</table>
+    ${p.attackers > ips.length ? `<div class="muted" style="font-size:11px;margin-top:4px">仅显示威胁评分最高的 ${ips.length} 个</div>` : ''}`;
+  pop.hidden = false;
+  $('#popClose').onclick = hidePop;
+}
+
+function switchMapView(v) {
+  mapCtl.view = v;
+  mapCtl.province = null;
+  try { localStorage.setItem('netsa.mapView', v); } catch (_) { /* 隐私模式 */ }
+  hidePop();
+  renderMap(true);
+}
+
+// 地图点击事件随实例创建绑定，实例重建后自动恢复
+chartSetup.cMap = (c) => c.on('click', (x) => {
+  if (x.seriesType === 'effectScatter' && x.data && x.data.p) { showPop(x.data.p); return; }
+  if (x.seriesType !== 'map') return;
+  if (mapCtl.view === 'world' && x.name === 'China') { switchMapView('china'); return; }
+  if (mapCtl.view === 'china' && !mapCtl.province && meta.china_maps && meta.china_maps[x.name]) {
+    mapCtl.province = x.name;
+    hidePop();
+    renderMap(true);
+  }
+});
+function initMapEvents() {
+  $$('#mapView button').forEach((b) => b.addEventListener('click', () => switchMapView(b.dataset.v)));
+  $('#mapReset').addEventListener('click', () => { hidePop(); renderMap(true); });
+}
+
+async function loadTopAttackers() {
+  const r = await api('/api/attackers?limit=10');
+  $('#topAttackers').innerHTML = r.items.length
+    ? `<colgroup><col style="width:36%"><col><col style="width:112px"></colgroup><thead><tr><th>IP</th><th>归属地</th><th class="num">评分</th></tr></thead><tbody>${r.items.map((a) => {
+      const loc = [a.country, a.province, a.city].filter(Boolean).filter((v, i, x) => x.indexOf(v) === i).join(' ');
+      return `<tr class="clickable" data-ip="${esc(a.ip)}"><td class="ip" title="${esc(a.ip)}">${esc(a.ip)}</td><td title="${esc(loc)}">${esc(loc)}</td><td class="num">${scoreBar(a.score, a.level)}</td></tr>`;
+    }).join('')}</tbody>`
+    : empty(3);
+}
+
+// 实时告警
+let feedSeen = 0;
+function feedItem(a) {
+  return `<li data-ip="${esc(a.src_ip)}" title="${esc(a.name)}：${esc(a.target)}"><span class="lv">${badge(a.severity)}</span>`
+    + `<span class="title">${esc(a.name)}</span><span class="time">${esc(fmtShort(a.time).slice(6))}</span>`
+    + `<div class="row2"><span class="ip">${esc(a.src_ip)}</span> ${esc(a.location || '')} → ${esc(a.target)}</div></li>`;
+}
+async function loadFeed() {
+  const list = await api('/api/alerts?limit=40&severity=low');
+  $('#feed').innerHTML = list.map(feedItem).join('') || '<li class="empty">暂无告警</li>';
+}
+// 用户向下翻看告警时，新告警插入顶部不应把正在阅读的内容挤走：保持滚动位置并提示新告警数量。
+let feedUnseen = 0;
+function pushFeed(a) {
+  if (a.severity === 'info') return;
+  const ul = $('#feed');
+  if (ul.firstElementChild?.classList.contains('empty')) ul.innerHTML = '';
+  const reading = ul.scrollTop > 4;
+  ul.insertAdjacentHTML('afterbegin', feedItem(a));
+  if (reading) {
+    ul.scrollTop += ul.firstElementChild.offsetHeight;
+    feedUnseen++;
+    const pill = $('#feedNew');
+    pill.textContent = `↑ ${feedUnseen} 条新告警`;
+    pill.hidden = false;
+  }
+  while (ul.children.length > 80) ul.lastElementChild.remove();
+  feedSeen++;
+  $('#feedCount').textContent = `本次会话推送 ${feedSeen} 条`;
+  if (a.lat || a.lon) {
+    mapCtl.flashes.push({ lat: a.lat, lon: a.lon, severity: a.severity, t: Date.now() });
+    if (currentTab === 'overview') throttledMap();
+  }
+}
+let mapTimer = null;
+function throttledMap() {
+  if (mapTimer || !mapCtl.rendered) return;
+  mapTimer = setTimeout(() => {
+    mapTimer = null;
+    mapCtl.flashes = mapCtl.flashes.filter((f) => Date.now() - f.t < 6000).slice(-30);
+    renderMap(false).catch(console.error);
+  }, 800);
+}
+
+function resetFeedUnseen() {
+  feedUnseen = 0;
+  $('#feedNew').hidden = true;
+}
+$('#feedNew').addEventListener('click', () => { $('#feed').scrollTo({ top: 0, behavior: 'smooth' }); resetFeedUnseen(); });
+$('#feed').addEventListener('scroll', () => { if ($('#feed').scrollTop <= 4) resetFeedUnseen(); }, { passive: true });
+
+function connectStream() {
+  const es = new EventSource('/api/stream');
+  es.onopen = () => $('#liveDot').classList.add('on');
+  es.onerror = () => $('#liveDot').classList.remove('on');
+  es.addEventListener('alert', (e) => { try { pushFeed(JSON.parse(e.data)); } catch (_) { /* ignore */ } });
+}
+
+// ---------------- 攻击溯源 ----------------
+let atkOffset = 0;
+const ATK_PAGE = 50;
+async function loadAttackers() {
+  const q = new URLSearchParams({ q: $('#atkSearch').value, level: $('#atkLevel').value, sort: $('#atkSort').value, limit: ATK_PAGE, offset: atkOffset });
+  const r = await api('/api/attackers?' + q);
+  $('#atkTotal').textContent = `共 ${r.total} 个攻击源`;
+  const rows = r.items.map((a) => `<tr class="clickable" data-ip="${esc(a.ip)}">
+    <td class="nowrap">${ipLink(a.ip)}<div class="cell-chips">${a.via_proxy ? '<span class="chip">经代理还原</span>' : ''}${(a.intel || []).length ? '<span class="chip warn">情报命中</span>' : ''}</div></td>
+    <td class="nowrap">${scoreBar(a.score, a.level)}</td><td class="nowrap">${badge(a.level)}</td>
+    <td><div class="clamp2" title="${esc(a.location || '')}">${esc(a.location || '未知')}</div></td>
+    <td class="nowrap">${a.asn ? 'AS' + a.asn : '-'}</td>
+    <td class="nowrap">${esc(a.net_type || '-')}</td>
+    <td class="nowrap">${esc(CONF[a.confidence] || '-')}</td>
+    <td><div class="cell-chips wide">${(a.categories || []).map((c) => `<span class="chip">${esc(c)}</span>`).join('')}</div></td>
+    <td><div class="cell-chips">${(a.phases || []).map((p) => `<span class="chip">${esc(PHASE[p] || p)}</span>`).join('')}</div></td>
+    <td class="num">${num(a.attacks)}${a.successes ? `<div class="res-success" style="font-size:11px">${a.successes} 次疑似成功</div>` : ''}</td>
+    <td class="nowrap muted">${esc(fmtShort(a.last_seen))}</td></tr>`).join('');
+  $('#atkTable').innerHTML = `<thead><tr><th>来源 IP</th><th>威胁评分</th><th>等级</th><th>归属地 / 运营商</th><th>ASN</th><th>网络类型</th><th>定位置信度</th><th>攻击类型</th><th>攻击阶段</th><th class="num">攻击次数</th><th>最近活动</th></tr></thead><tbody>${rows || empty(11)}</tbody>`;
+  const pages = Math.max(1, Math.ceil(r.total / ATK_PAGE));
+  const page = Math.floor(atkOffset / ATK_PAGE) + 1;
+  $('#atkPager').innerHTML = `<a class="btn" id="atkPrev" ${page <= 1 ? 'disabled' : ''}>上一页</a><span class="muted">${page} / ${pages}</span><a class="btn" id="atkNext" ${page >= pages ? 'disabled' : ''}>下一页</a>`;
+  $('#atkPrev').onclick = () => { atkOffset = Math.max(0, atkOffset - ATK_PAGE); loadAttackers(); };
+  $('#atkNext').onclick = () => { atkOffset += ATK_PAGE; loadAttackers(); };
+}
+let atkDebounce;
+$('#atkSearch').addEventListener('input', () => { clearTimeout(atkDebounce); atkDebounce = setTimeout(() => { atkOffset = 0; loadAttackers(); }, 300); });
+['#atkLevel', '#atkSort'].forEach((s) => $(s).addEventListener('change', () => { atkOffset = 0; loadAttackers(); }));
+
+// ---------------- 告警事件 ----------------
+function fillAlertFilters() {
+  const cat = $('#alCat');
+  if (cat.options.length <= 1 && lastOverview) {
+    (lastOverview.categories || []).forEach((c) => cat.add(new Option(c.name, c.name)));
+  }
+  const res = $('#alResult');
+  if (res.options.length <= 1) Object.entries(RESULT).forEach(([k, v]) => res.add(new Option(v, k)));
+}
+async function loadAlerts() {
+  fillAlertFilters();
+  const q = new URLSearchParams({ q: $('#alSearch').value, severity: $('#alSev').value, category: $('#alCat').value, result: $('#alResult').value, kind: $('#alKind').value, limit: 300 });
+  const list = await api('/api/alerts?' + q);
+  const rows = list.map((a) => `<tr>
+    <td class="nowrap muted">${esc(fmtShort(a.time))}</td><td>${badge(a.severity)}</td>
+    <td><b>${esc(a.name)}</b><div class="muted">${esc(a.category)} · ${esc(PHASE[a.phase] || a.phase)}</div></td>
+    <td>${ipLink(a.src_ip)}<div class="muted">${esc(a.location || '')}</div></td>
+    <td class="mono">${a.method ? esc(a.method) + ' ' : ''}${esc(a.target)}${a.status ? ` <span class="muted">[${a.status}]</span>` : ''}</td>
+    <td>${resTag(a.result)}</td><td class="evidence">${esc(a.evidence)}</td></tr>`).join('');
+  $('#alTable').innerHTML = `<thead><tr><th>时间</th><th>等级</th><th>攻击类型</th><th>来源</th><th>目标</th><th>结果研判</th><th>证据 / 载荷</th></tr></thead><tbody>${rows || empty(7)}</tbody>`;
+}
+let alDebounce;
+$('#alSearch').addEventListener('input', () => { clearTimeout(alDebounce); alDebounce = setTimeout(loadAlerts, 300); });
+['#alSev', '#alCat', '#alResult', '#alKind'].forEach((s) => $(s).addEventListener('change', loadAlerts));
+
+// ---------------- 攻击面分析 ----------------
+async function loadSurface() {
+  const s = await api('/api/surface');
+  gauge('cSurfaceGauge', s.score, '风险指数');
+  pie('cWaf', [{ name: '已拦截', value: s.exploit_blocked, itemStyle: { color: '#52c41a' } }, { name: '未拦截/到达后端', value: s.exploit_passed, itemStyle: { color: '#ff7a45' } }]);
+  barChart('cPorts', (s.top_ports || []).slice(0, 10), ['#7a2a2a', '#ff4d4f']);
+  $('#techChips').innerHTML = ((s.tech || []).map((t) => `<span class="chip">${esc(t.name)} · ${t.value}</span>`).join('') || '<span class="muted">暂无</span>')
+    + '<br>' + (s.hosts || []).map((h) => `<span class="chip">站点 ${esc(h.name)} · ${num(h.value)} 次</span>`).join('');
+  const sc = s.severity_count || {};
+  $('#findingCount').textContent = `共 ${(s.findings || []).length} 项 · 严重 ${sc.critical || 0} · 高危 ${sc.high || 0} · 中危 ${sc.medium || 0}`;
+  $('#findings').innerHTML = (s.findings || []).slice(0, 120).map((f) => `<div class="finding" style="border-left-color:${LV_COLOR[f.severity]}">
+      <div class="ft">${badge(f.severity)}<span>${esc(f.title)}</span><span class="spacer"></span><span class="muted">${esc(f.category)} · ${num(f.count)} 次</span></div>
+      <div class="asset">${esc(f.asset)}</div><div class="ev">${esc(f.evidence)}</div>
+      <div class="fix">处置建议：${esc(f.remediation)}</div>
+      <div class="muted" style="font-size:11px">${esc(fmtShort(f.first_seen))} ~ ${esc(fmtShort(f.last_seen))}</div></div>`).join('') || '<div class="empty">未发现明显暴露面风险</div>';
+  $('#svcTable').innerHTML = `<thead><tr><th>目标</th><th>服务</th><th>风险</th><th>公网放行</th><th class="num">放行/拦截</th><th class="num">来源数</th><th>最近</th></tr></thead><tbody>${
+    (s.services || []).map((v) => `<tr><td class="mono">${esc(v.dst_ip || '*')}:${v.port}/${esc(v.proto)}</td><td>${esc(v.name)}</td><td>${badge(v.risk)}</td>
+      <td>${v.exposed ? '<span class="res-success">是</span>' : '<span class="muted">否</span>'}</td><td class="num">${num(v.allowed)} / ${num(v.denied)}</td>
+      <td class="num">${num(v.sources)}</td><td class="muted nowrap">${esc(fmtShort(v.last_seen))}</td></tr>`).join('') || empty(7)}</tbody>`;
+  $('#epTable').innerHTML = `<thead><tr><th>站点</th><th>路径</th><th>方法</th><th class="num">访问</th><th class="num">攻击</th><th class="num">攻击者</th><th>状态码</th><th>标记</th></tr></thead><tbody>${
+    (s.endpoints || []).map((e) => `<tr><td>${esc(e.host)}</td><td class="mono">${esc(e.path)}</td><td class="nowrap">${esc(Object.keys(e.methods || {}).join(','))}</td>
+      <td class="num">${num(e.hits)}</td><td class="num">${e.attacks ? `<span class="lv-high">${num(e.attacks)}</span>` : 0}</td><td class="num">${num(e.attackers)}</td>
+      <td class="nowrap muted">${esc(sortedEntries(e.status, 3).map(([k, v]) => `${k}:${v}`).join(' '))}</td>
+      <td>${e.sensitive ? `<span class="chip warn">${esc(e.sensitive)}</span>` : ''}${(e.tech || []).map((t) => `<span class="chip">${esc(t)}</span>`).join('')}</td></tr>`).join('') || empty(8)}</tbody>`;
+}
+
+// ---------------- 数据源 ----------------
+const SRC_STATUS = { tailing: '实时跟踪', reading: '读取中', done: '已完成', waiting: '等待文件', listening: '监听中', error: '错误', starting: '启动中' };
+async function loadSources() {
+  const r = await api('/api/sources');
+  const rt = r.runtime || {};
+  $('#procCount').textContent = `已处理 ${num(r.processed)} 条事件 · 运行 ${rt.uptime || '-'} · 内存 ${rt.heap_mb ?? '-'} MB · 待溯源 ${r.geo_pending ?? 0}`;
+  $('#srcTable').innerHTML = `<thead><tr><th>名称</th><th>路径/地址</th><th>配置类型</th><th>自动识别格式</th><th>状态</th><th class="num">行数</th><th class="num">解析成功</th><th class="num">失败</th><th>最近事件时间</th><th>最近失败样例</th></tr></thead><tbody>${
+    (r.sources || []).map((s) => `<tr><td>${esc(s.name)}</td><td class="mono">${esc(s.path)}</td><td>${esc(s.type)}</td><td><span class="chip">${esc(s.detected || '-')}</span></td>
+      <td>${esc(SRC_STATUS[s.status] || s.status)}${s.last_error ? `<div class="lv-high" style="font-size:11px">${esc(s.last_error)}</div>` : ''}</td>
+      <td class="num">${num(s.lines)}</td><td class="num">${num(s.parsed)}</td><td class="num">${s.failed ? `<span class="lv-medium">${num(s.failed)}</span>` : 0}</td>
+      <td class="nowrap muted">${esc(fmtShort(s.last_event))}</td><td class="evidence">${esc(s.sample_failed || '')}</td></tr>`).join('') || empty(10, '未配置数据源')}</tbody>`;
+  const sl = r.syslog || {};
+  $('#caps').innerHTML = `<div class="kv">
+    <div class="k">IP 溯源数据源</div><div>${(meta.geo_providers || []).map((p) => `<span class="chip">${esc(SRC[p] || p)}</span>`).join('') || '<span class="lv-high">未配置</span>'}</div>
+    <div class="k">WHOIS / RDAP</div><div>${meta.rdap ? '已启用（IP 详情中按需查询）' : '未启用'}</div>
+    <div class="k">特征规则</div><div>${meta.rules} 条 + 行为检测（CC / 目录扫描 / 暴力破解 / 端口扫描 / 主机探测 / 洪水）</div>
+    <div class="k">Syslog 接收</div><div>${sl.enabled ? `UDP ${esc(sl.udp || '-')} · TCP ${esc(sl.tcp || '-')}` : '未启用'}</div>
+    <div class="k">支持的日志格式</div><div>nginx/Apache combined、main(XFF)、vhost、JSON、自定义 log_format；iptables/UFW/firewalld、pfSense/OPNsense、Windows 防火墙、Cisco ASA、FortiGate/华为/H3C/深信服等 key=value、JSON 防火墙日志</div>
+    <div class="k">日志时区</div><div>${esc(meta.timezone || '系统时区')}</div>
+    <div class="k">版本</div><div>netsa ${esc(meta.version)} · ${esc(rt.go || '')} · 启动于 ${esc(fmtTime(meta.started))}</div></div>`;
+}
+$$('.exports .btn[data-fmt]').forEach((b) => b.addEventListener('click', () => {
+  window.location.href = `/api/export/blocklist?format=${b.dataset.fmt}&level=${$('#blLevel').value}`;
+}));
+
+// ---------------- IP 溯源详情 ----------------
+const drawer = $('#drawer');
+const mask = $('#drawerMask');
+let miniChart = null;
+function closeDrawer() { drawer.classList.remove('open'); mask.classList.remove('open'); }
+$('#drawerClose').onclick = closeDrawer;
+mask.onclick = closeDrawer;
+document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeDrawer(); });
+
+async function openIP(ip) {
+  let d;
+  try { d = await api('/api/ip/' + encodeURIComponent(ip)); } catch (e) { return; }
+  const s = d.summary;
+  const p = d.profile;
+  const g = p.geo || {};
+  drawer.classList.add('open');
+  mask.classList.add('open');
+  const tags = Object.keys(p.tags || {}).map((t) => `<span class="chip">${esc(t)}</span>`).join('');
+  const intel = (p.intel || []).map((t) => `<span class="chip warn">情报: ${esc(t)}</span>`).join('');
+  $('#drawerTitle').innerHTML = `<div class="ipbig">${esc(ip)} ${badge(s.level)} <span style="font-size:14px">威胁评分 <b style="color:${LV_COLOR[s.level]}">${Math.round(s.score)}</b></span></div><div>${intel}${tags}</div>`;
+
+  const loc = [g.country, g.province, g.city, g.district].filter(Boolean).filter((v, i, a) => a.indexOf(v) === i).join(' / ') || '未知';
+  const coord = g.has_coord
+    ? `${(+g.lat || 0).toFixed(4)}, ${(+g.lon || 0).toFixed(4)}${g.accuracy_km ? ` (±${g.accuracy_km} km)` : ''} <span class="muted">${esc(COORD[g.coord_source] || '')}</span>`
+    : '<span class="muted">无（定位库中无该地址）</span>';
+  const proxies = Object.keys(p.proxies || {});
+  const sources = (g.sources || []).map((r) => `<tr><td>${esc(SRC[r.source] || r.source)}</td><td>${esc(r.country)}${r.country_code ? ` (${esc(r.country_code)})` : ''}</td><td>${esc(r.province || '-')}</td><td>${esc(r.city || '-')}${r.district ? ' ' + esc(r.district) : ''}</td><td>${esc(r.isp || r.as_org || '-')}</td><td>${r.asn ? 'AS' + r.asn : '-'}</td><td class="mono">${r.lat || r.lon ? `${r.lat.toFixed(3)}, ${r.lon.toFixed(3)}` : '-'}</td></tr>`).join('');
+
+  const chainSteps = PHASES.map((ph) => {
+    const c = (d.chain || []).find((x) => x.phase === ph);
+    return `<div class="step ${c ? 'on' : ''}"><div>${PHASE[ph]}</div><div class="n">${c ? num(c.count) : 0}</div><div class="t">${c ? esc(fmtShort(c.first)) : '未出现'}</div></div>`;
+  }).join('');
+  const rules = (d.rules || []).map((r) => `<tr><td>${esc(r.name)}<div class="muted mono">${esc(r.id)}</div></td><td>${badge(r.severity)}</td><td>${num(r.count)}</td></tr>`).join('');
+  const targets = sortedEntries(p.targets, 15).map(([k, v]) => `<tr><td class="mono">${esc(k)}</td><td>${num(v)}</td></tr>`).join('');
+  const ports = sortedEntries(p.ports, 30).map(([k, v]) => `<span class="chip">${esc(k)} × ${v}</span>`).join('');
+  const status = sortedEntries(p.status, 10).map(([k, v]) => `<span class="chip">${esc(k)} × ${v}</span>`).join('');
+  const uas = sortedEntries(p.uas, 8).map(([k, v]) => `<div class="mono">${esc(k)} <span class="muted">× ${v}</span></div>`).join('');
+  const recent = (p.recent || []).slice().reverse().map((a) => `<tr><td class="nowrap muted">${esc(fmtShort(a.time))}</td><td>${badge(a.severity)} ${esc(a.name)}</td><td>${resTag(a.result)}</td><td class="mono">${esc(a.target)}</td><td class="evidence">${esc(a.evidence)}</td></tr>`).join('');
+
+  const v6 = ip.includes(':');
+  const advice = [];
+  if (s.successes > 0) advice.push('存在疑似成功的攻击，请优先排查被攻击资产是否已失陷（检查进程、计划任务、WebShell 与异常外连）。');
+  if ((s.categories || []).includes('暴力破解')) advice.push('存在暴力破解行为：检查相关账号登录记录，启用登录失败锁定与多因素认证。');
+  if (g.hosting) advice.push('来源为 IDC/云主机，通常为被控肉鸡或攻击者租用的 VPS，可向其云厂商提交滥用投诉（见 WHOIS 中的 abuse 邮箱）。');
+  if (g.proxy) advice.push('来源被标记为代理/VPN 出口，攻击者真实位置可能在其后方，需结合其他线索综合研判。');
+  if (proxies.length) advice.push(`该 IP 经 ${proxies.join('、')} 转发，已根据 X-Forwarded-For 还原真实来源，封禁请在 CDN/WAF 或应用层基于真实 IP 进行。`);
+  const rel = d.related;
+  if (rel && rel.strong > 0) advice.push(`发现 ${rel.strong} 个强关联攻击源（疑似同一攻击者或团伙），建议与该 IP 一并处置。`);
+  if (rel && rel.subnet_count >= 2) advice.push(`同网段 ${rel.subnet} 内另有 ${rel.subnet_count} 个攻击源，可考虑按网段封禁。`);
+  advice.push(s.level === 'critical' || s.level === 'high' ? '建议立即封禁，并持续关注同网段/同 ASN 的关联攻击。' : '建议加入观察名单，若持续出现攻击行为再进行封禁。');
+  const relRows = (rel?.related || []).map((r) => `<tr class="clickable" data-ip="${esc(r.ip)}"><td class="ip nowrap">${esc(r.ip)}</td>`
+    + `<td class="nowrap">${scoreBar(r.score, r.score >= 60 ? 'high' : 'medium')}</td><td>${badge(r.level)}</td>`
+    + `<td class="reasons">${r.reasons.map((x) => `<span class="chip">${esc(x)}</span>`).join('')}</td><td class="muted">${esc(r.location || '')}</td></tr>`).join('');
+  const relHTML = rel ? `
+    <h4>同源关联分析 <span class="muted" style="font-weight:400">比对 ${num(rel.scanned)} 个攻击源</span></h4>
+    <div class="kv">
+      <div class="k">所在网段</div><div><span class="mono">${esc(rel.subnet || '-')}</span> <span class="muted">同网段攻击源 ${num(rel.subnet_count)} 个</span></div>
+      <div class="k">自治系统</div><div>${rel.asn ? `AS${rel.asn} <span class="muted">同 ASN 攻击源 ${num(rel.asn_count)} 个</span>` : '-'}</div>
+      <div class="k">关联结论</div><div>${rel.strong
+        ? `<b style="color:${LV_COLOR.high}">${rel.strong} 个强关联攻击源，疑似同一攻击者或团伙</b>`
+        : relRows ? `${num(rel.total)} 个弱关联攻击源，需结合其他线索研判` : '未发现同源攻击者'}${rel.total > rel.related.length ? ` <span class="muted">（共 ${num(rel.total)} 个，列出关联度最高的 ${rel.related.length} 个）</span>` : ''}</div>
+    </div>
+    ${relRows ? `<div class="scroll"><table class="table"><thead><tr><th>IP</th><th>关联度</th><th>等级</th><th>关联依据</th><th>归属地</th></tr></thead><tbody>${relRows}</tbody></table></div>` : ''}` : '';
+
+  $('#drawerBody').innerHTML = `
+    <h4>溯源定位</h4>
+    <div class="kv">
+      ${g.label ? `<div class="k">所属网段</div><div><span class="chip warn">${esc(g.label)}</span>${g.private ? ' <span class="muted">内网攻击源</span>' : ''}</div>` : ''}
+      <div class="k">归属地</div><div><b>${esc(loc)}</b></div>
+      <div class="k">运营商</div><div>${esc(g.isp || '-')}</div>
+      <div class="k">自治系统</div><div>${g.asn ? `AS${g.asn} ${esc(g.as_org || '')}` : '-'}</div>
+      <div class="k">网络类型</div><div>${esc(g.net_type || '-')}</div>
+      <div class="k">经纬度</div><div>${coord}</div>
+      <div class="k">时区</div><div>${esc(g.timezone || '-')}</div>
+      <div class="k">反向解析</div><div class="mono">${esc(g.rdns || '-')}</div>
+      <div class="k">定位置信度</div><div>${esc(CONF[g.confidence] || '-')}${g.enriched ? '' : ' <span class="muted">（仅离线库，等级达到阈值后自动进行在线深度溯源）</span>'}</div>
+      ${proxies.length ? `<div class="k">转发链路</div><div>经 <span class="mono">${esc(proxies.join(', '))}</span> 转发<div class="mono muted">X-Forwarded-For: ${esc(p.last_xff || '')}</div></div>` : ''}
+    </div>
+    ${(g.notes || []).map((n) => `<div class="note">• ${esc(n)}</div>`).join('')}
+    <h4>多源定位比对</h4>
+    <table class="table"><thead><tr><th>数据源</th><th>国家</th><th>省/州</th><th>城市</th><th>运营商/组织</th><th>ASN</th><th>坐标</th></tr></thead><tbody>${sources || empty(7)}</tbody></table>
+    ${g.has_coord ? '<div class="chart mini-map" id="cMiniMap"></div>' : ''}
+    <div style="margin-top:8px"><a class="btn" id="rdapBtn">查询 WHOIS / RDAP 注册信息</a></div>
+    <div id="rdapBox"></div>
+
+    <h4>攻击画像</h4>
+    <div class="kv">
+      <div class="k">首次出现</div><div>${esc(fmtTime(p.first_seen))}</div>
+      <div class="k">最近活动</div><div>${esc(fmtTime(p.last_seen))}</div>
+      <div class="k">事件统计</div><div>总计 ${num(p.events)} · Web 请求 ${num(p.web_reqs)} · 防火墙 ${num(p.fw_events)}（拒绝 ${num(p.denied)}）</div>
+      <div class="k">攻击统计</div><div>攻击 ${num(p.attacks)} 次 · <span class="res-success">疑似成功 ${num(p.successes)}</span> · 结果分布 ${sortedEntries(p.results, 6).map(([k, v]) => `${esc(RESULT[k] || k)} ${v}`).join(' / ')}</div>
+    </div>
+    <h4>攻击链</h4><div class="chain">${chainSteps}</div>
+    <h4>命中规则</h4><table class="table"><thead><tr><th>规则</th><th>等级</th><th>次数</th></tr></thead><tbody>${rules || empty(3)}</tbody></table>
+    <h4>攻击目标 TOP</h4><table class="table"><thead><tr><th>目标</th><th>次数</th></tr></thead><tbody>${targets || empty(2)}</tbody></table>
+    ${ports ? `<h4>探测端口</h4><div class="chips">${ports}</div>` : ''}
+    ${status ? `<h4>响应状态码</h4><div class="chips">${status}</div>` : ''}
+    ${uas ? `<h4>User-Agent</h4>${uas}` : ''}
+    <h4>最近告警</h4><div class="scroll"><table class="table"><thead><tr><th>时间</th><th>规则</th><th>结果</th><th>目标</th><th>证据</th></tr></thead><tbody>${recent || empty(5)}</tbody></table></div>
+    ${relHTML}
+    <h4>处置建议</h4>
+    ${advice.map((a) => `<div class="note" style="color:#b7eb8f">• ${esc(a)}</div>`).join('')}
+    <pre class="cmd"># Linux iptables
+${v6 ? 'ip6tables' : 'iptables'} -I INPUT -s ${esc(ip)} -j DROP
+# nginx
+deny ${esc(ip)};
+# firewalld
+firewall-cmd --permanent --add-rich-rule='rule family="${v6 ? 'ipv6' : 'ipv4'}" source address="${esc(ip)}" drop' &amp;&amp; firewall-cmd --reload
+# Windows
+netsh advfirewall firewall add rule name="netsa-block-${esc(ip)}" dir=in action=block remoteip=${esc(ip)}</pre>`;
+
+  if (miniChart) { miniChart.dispose(); miniChart = null; }
+  if (g.has_coord) {
+    // 国内地址使用中国地图（含省界与省名），境外使用世界地图
+    const cn = g.world_name === 'China';
+    try {
+      await (cn ? registerMap('china', '/vendor/china/china.json') : registerMap('world', '/vendor/world.json'));
+      miniChart = echarts.init($('#cMiniMap'));
+      miniChart.setOption({
+        geo: {
+          map: cn ? 'china' : 'world', roam: true, center: [g.lon, g.lat], zoom: cn ? 3 : 5, silent: true,
+          label: { show: cn, color: 'rgba(170,195,240,.6)', fontSize: 10 }, itemStyle: { areaColor: '#10244a', borderColor: '#2b4a80' },
+        },
+        series: [{
+          type: 'effectScatter', coordinateSystem: 'geo', symbol: isExact(g.coord_source) ? 'circle' : 'emptyCircle',
+          data: [{ value: [g.lon, g.lat], label: { show: true, formatter: g.label || g.city || g.province || g.country || '', position: 'right', color: '#fff' } }],
+          symbolSize: 12, itemStyle: { color: LV_COLOR[s.level] }, rippleEffect: { scale: 4 },
+        }],
+      });
+    } catch (e) { console.error(e); }
+  }
+  $('#rdapBtn').onclick = async () => {
+    const box = $('#rdapBox');
+    box.innerHTML = '<div class="muted">查询中...</div>';
+    try {
+      const r = await api('/api/ip/' + encodeURIComponent(ip) + '/rdap');
+      box.innerHTML = `<div class="kv" style="margin-top:8px">
+        <div class="k">网络名称</div><div>${esc(r.name || '-')} <span class="muted">${esc(r.handle || '')}</span></div>
+        <div class="k">地址范围</div><div class="mono">${esc(r.range)}</div>
+        <div class="k">CIDR</div><div class="mono">${esc((r.cidr || []).join(', ') || '-')}</div>
+        <div class="k">注册国家</div><div>${esc(r.country || '-')}</div>
+        <div class="k">所属组织</div><div>${esc(r.org || '-')}</div>
+        <div class="k">滥用投诉</div><div class="mono">${esc((r.abuse_email || []).join(', ') || '-')}</div>
+        <div class="k">注册/更新</div><div>${esc(r.registered || '-')} / ${esc(r.updated || '-')}</div>
+        <div class="k">描述</div><div>${esc((r.description || []).join(' '))}</div>
+        <div class="k">数据来源</div><div>${esc(r.source)}</div></div>`;
+    } catch (e) {
+      box.innerHTML = `<div class="note">查询失败：${esc(e.message)}</div>`;
+    }
+  };
+}
+
+// ---------------- 调度 ----------------
+const loaders = {
+  overview: () => Promise.all([loadOverview(), loadTrend(), loadMap(), loadTopAttackers()]).catch(console.error),
+  attackers: () => loadAttackers().catch(console.error),
+  alerts: () => loadAlerts().catch(console.error),
+  surface: () => loadSurface().catch(console.error),
+  sources: () => loadSources().catch(console.error),
+};
+
+$('#fullscreen').addEventListener('click', () => {
+  if (document.fullscreenElement) document.exitFullscreen();
+  else document.documentElement.requestFullscreen().catch(() => {});
+});
+document.addEventListener('fullscreenchange', () => setTimeout(resizeCharts, 200));
+
+(async function init() {
+  try { meta = await api('/api/meta'); } catch (e) { console.error(e); }
+  initMapEvents();
+  loaders.overview();
+  loadFeed().catch(console.error);
+  connectStream();
+})();
+
+setInterval(() => {
+  if (document.hidden) return;
+  if (currentTab === 'overview') {
+    loadOverview().catch(console.error);
+    loadTrend().catch(console.error);
+    loadTopAttackers().catch(console.error);
+  } else if (currentTab === 'alerts' && $('#alAuto').checked) {
+    loadAlerts().catch(console.error);
+  } else if (currentTab === 'sources') {
+    loadSources().catch(console.error);
+  }
+}, 5000);
+setInterval(() => { if (!document.hidden && currentTab === 'overview') loadMap().catch(console.error); }, 15000);
