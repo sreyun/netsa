@@ -58,8 +58,12 @@ type Behavior struct {
 	th        config.Thresholds
 	web       map[string]*webWin
 	fw        map[string]*fwWin
-	lastPrune time.Time
+	latest    time.Time // 已处理事件的最新时间（排除未来时间的异常日志），作为窗口过期的基准
+	lastPrune time.Time // 上次清理的系统时间
 }
+
+// maxWindows 是同时跟踪的行为窗口上限：大量不同来源（如伪造源地址的扫描）时不再为新来源建窗口，防止内存耗尽。
+const maxWindows = 300000
 
 func NewBehavior(th config.Thresholds) *Behavior {
 	return &Behavior{th: th, web: map[string]*webWin{}, fw: map[string]*fwWin{}}
@@ -72,8 +76,14 @@ func (b *Behavior) Observe(ev *model.Event) []model.Hit {
 	}
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	if ev.Time.Sub(b.lastPrune) > time.Minute {
-		b.prune(ev.Time)
+	now := time.Now()
+	if ev.Time.After(b.latest) && !ev.Time.After(now.Add(time.Hour)) {
+		b.latest = ev.Time
+	}
+	// 按系统时间定期清理：若按日志时间调度，一条未来时间的异常日志会使清理长期不再执行
+	if now.Sub(b.lastPrune) > 30*time.Second || len(b.web)+len(b.fw) >= maxWindows {
+		b.prune(b.latest)
+		b.lastPrune = now
 	}
 	if ev.Kind == model.KindWeb {
 		return b.observeWeb(ev)
@@ -83,6 +93,9 @@ func (b *Behavior) Observe(ev *model.Event) []model.Hit {
 
 func (b *Behavior) observeWeb(ev *model.Event) []model.Hit {
 	w := b.web[ev.SrcIP]
+	if w == nil && len(b.web)+len(b.fw) >= maxWindows {
+		return nil
+	}
 	if w == nil || outside(ev.Time, w.start, b.th.WebWindow) {
 		w = &webWin{start: ev.Time}
 		b.web[ev.SrcIP] = w
@@ -175,6 +188,9 @@ func looksLikeLoginSuccess(prev map[int]int, status int) bool {
 
 func (b *Behavior) observeFw(ev *model.Event) []model.Hit {
 	w := b.fw[ev.SrcIP]
+	if w == nil && len(b.web)+len(b.fw) >= maxWindows {
+		return nil
+	}
 	if w == nil || outside(ev.Time, w.start, b.th.FwWindow) {
 		w = &fwWin{start: ev.Time}
 		b.fw[ev.SrcIP] = w
@@ -264,7 +280,6 @@ func (b *Behavior) Size() int {
 }
 
 func (b *Behavior) prune(now time.Time) {
-	b.lastPrune = now
 	for ip, w := range b.web {
 		if now.Sub(w.start) > 2*b.th.WebWindow || w.start.Sub(now) > 2*b.th.WebWindow {
 			delete(b.web, ip)

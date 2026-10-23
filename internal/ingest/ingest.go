@@ -19,6 +19,7 @@ import (
 	"netsa/internal/config"
 	"netsa/internal/model"
 	"netsa/internal/parser"
+	"netsa/internal/safe"
 )
 
 // BatchSize 是单批投递的最大事件数。
@@ -38,6 +39,8 @@ type Stat struct {
 	LastEvent time.Time `json:"last_event"`
 	LastError string    `json:"last_error,omitempty"`
 	Sample    string    `json:"sample_failed,omitempty"` // 最近一条无法解析的日志，便于排查格式
+	// TimeOffset 为自动校正的时区偏差（如 "+8 小时"），syslog 按发送端列出
+	TimeOffset string `json:"time_offset,omitempty"`
 }
 
 type source struct {
@@ -53,6 +56,9 @@ type source struct {
 	sample    string
 
 	batch    []*model.Event // 仅由该数据源的读取协程（或 syslog 汇聚协程）访问
+	live     atomic.Bool    // 已追上文件末尾，之后读到的都是实时写入的日志
+	tf       timeFix        // 时区偏差自动校正
+	offsetFn func() string  // 非空时用于展示时区校正情况（syslog 汇总多个发送端）
 	detectFn func() string  // 非空时用于展示识别出的格式（syslog 汇总多个发送端）
 }
 
@@ -75,15 +81,22 @@ func (s *source) stat() Stat {
 	} else {
 		st.Detected = s.parser.Detected()
 	}
+	if s.offsetFn != nil {
+		st.TimeOffset = s.offsetFn()
+	} else {
+		st.TimeOffset = describeOffset(s.tf.current())
+	}
 	return st
 }
 
 // Manager 管理所有数据源，并把解析后的事件批量写入 Out。
 type Manager struct {
-	Out     chan []*model.Event
-	mu      sync.Mutex
-	sources []*source
-	wg      sync.WaitGroup
+	Out chan []*model.Event
+	// AutoTime 开启实时日志的时区偏差自动校正（配置项 time_correction）
+	AutoTime bool
+	mu       sync.Mutex
+	sources  []*source
+	wg       sync.WaitGroup
 }
 
 // NewManager 创建管理器，buffer 为输出通道可缓存的批数。
@@ -97,6 +110,7 @@ func (m *Manager) add(name, path, typ, logFormat, host string) (*source, error) 
 		return nil, err
 	}
 	s := &source{name: name, path: path, typ: typ, host: host, parser: p, status: "starting"}
+	s.tf.name = name
 	m.mu.Lock()
 	m.sources = append(m.sources, s)
 	m.mu.Unlock()
@@ -125,7 +139,15 @@ func (m *Manager) Close() { close(m.Out) }
 func (s *source) parseLine(line string) *model.Event { return s.parseLineWith(s.parser, line) }
 
 // parseLineWith 使用指定解析器解析（syslog 按发送端分别识别格式）。
-func (s *source) parseLineWith(p *parser.Auto, line string) *model.Event {
+func (s *source) parseLineWith(p *parser.Auto, line string) (ev *model.Event) {
+	// 畸形日志触发解析异常时按解析失败处理，不影响后续日志
+	defer func() {
+		if r := recover(); r != nil {
+			safe.Report("解析 "+s.name, r)
+			s.failed.Add(1)
+			ev = nil
+		}
+	}()
 	s.lines.Add(1)
 	if strings.HasPrefix(line, "#Fields:") {
 		p.Directive(line) // W3C（IIS）字段声明
@@ -159,6 +181,9 @@ func (s *source) parseLineWith(p *parser.Auto, line string) *model.Event {
 // handle 解析一行并放入当前批次，批次满时投递。
 func (m *Manager) handle(ctx context.Context, s *source, line string) {
 	if ev := s.parseLine(line); ev != nil {
+		if m.AutoTime && s.live.Load() {
+			s.tf.apply(ev, time.Now())
+		}
 		s.batch = append(s.batch, ev)
 		if len(s.batch) >= BatchSize {
 			m.flush(ctx, s)
@@ -233,6 +258,7 @@ func (m *Manager) StartSource(ctx context.Context, sc config.SourceConfig) error
 		return err
 	}
 	started := map[string]bool{}
+	seen := &fileSet{}
 	scan := func(first bool) {
 		for _, pattern := range sc.Paths {
 			matches, _ := filepath.Glob(pattern)
@@ -245,6 +271,10 @@ func (m *Manager) StartSource(ctx context.Context, sc config.SourceConfig) error
 					continue
 				}
 				started[path] = true
+				// 轮转后被重命名的旧文件（如 access.log → access.log.1）已经读过，再次被通配符匹配时跳过
+				if !first && seen.contains(path) {
+					continue
+				}
 				name := sc.Name
 				if len(matches) > 1 || strings.ContainsAny(pattern, "*?[") {
 					name = sc.Name + ":" + filepath.Base(path)
@@ -255,7 +285,7 @@ func (m *Manager) StartSource(ctx context.Context, sc config.SourceConfig) error
 					continue
 				}
 				// 首轮发现的文件按配置决定是否从头读取；之后新出现的文件总是从头读取
-				go m.tail(ctx, s, path, sc.FromBeginning || !first)
+				go m.tail(ctx, s, path, sc.FromBeginning || !first, seen)
 			}
 		}
 	}
@@ -277,17 +307,22 @@ func (m *Manager) StartSource(ctx context.Context, sc config.SourceConfig) error
 
 // tail 以轮询方式跟踪文件（跨平台），处理 logrotate 的重命名与 copytruncate 两种轮转方式。
 // 持续有数据时连续读取并按批投递；读到末尾时先投递未满的批次再等待，保证实时性。
-func (m *Manager) tail(ctx context.Context, s *source, path string, fromStart bool) {
+func (m *Manager) tail(ctx context.Context, s *source, path string, fromStart bool, seen *fileSet) {
 	var (
 		f      *os.File
 		fi     os.FileInfo
 		lr     *lineReader
 		offset int64
 		first  = true
+		old    *rotated // 已被轮转、仍在收尾读取的旧文件
+		busy   int
 	)
 	defer func() {
 		if f != nil {
 			f.Close()
+		}
+		if old != nil {
+			old.f.Close()
 		}
 	}()
 	sleep := func(d time.Duration) bool {
@@ -296,6 +331,32 @@ func (m *Manager) tail(ctx context.Context, s *source, path string, fromStart bo
 			return false
 		case <-time.After(d):
 			return true
+		}
+	}
+	// drainOld 读取旧文件中新写入的内容；旧文件安静 5 秒或已过 30 秒宽限期时读完剩余内容并关闭。
+	drainOld := func(final bool) {
+		if old == nil {
+			return
+		}
+		got := false
+		for {
+			line, _, ok, _ := old.lr.next()
+			if !ok {
+				break
+			}
+			m.handle(ctx, s, line)
+			got = true
+		}
+		now := time.Now()
+		if got {
+			old.lastData = now
+		}
+		if final || now.After(old.deadline) || now.Sub(old.lastData) > rotateQuiet {
+			if line, has := old.lr.flush(); has {
+				m.handle(ctx, s, line)
+			}
+			old.f.Close()
+			old = nil
 		}
 	}
 	idle := 250 * time.Millisecond
@@ -307,12 +368,15 @@ func (m *Manager) tail(ctx context.Context, s *source, path string, fromStart bo
 				s.setStatus("waiting", err.Error())
 				// 启动时文件尚不存在：之后创建的文件内容全部是新数据，需要从头读取
 				fromStart = true
+				drainOld(false)
+				m.flush(ctx, s)
 				if !sleep(2 * time.Second) {
 					return
 				}
 				continue
 			}
 			fi, _ = f.Stat()
+			seen.add(fi)
 			offset = 0
 			if first && !fromStart {
 				offset, _ = f.Seek(0, io.SeekEnd)
@@ -326,11 +390,17 @@ func (m *Manager) tail(ctx context.Context, s *source, path string, fromStart bo
 		if ok {
 			m.handle(ctx, s, line)
 			idle = 250 * time.Millisecond
+			// 持续有新数据时也定期收尾旧文件，避免轮转后旧文件的内容长时间得不到处理
+			if busy++; old != nil && busy%2048 == 0 {
+				drainOld(false)
+			}
 			continue
 		}
 		if err != nil && !errors.Is(err, io.EOF) {
 			s.setStatus("tailing", err.Error())
 		}
+		s.live.Store(true) // 已读到末尾：此后读到的行都是新写入的
+		drainOld(false)
 		m.flush(ctx, s)
 		// 空闲时逐步拉长轮询间隔（最长 1 秒），有新数据时立即恢复
 		if !sleep(idle) {
@@ -344,16 +414,10 @@ func (m *Manager) tail(ctx context.Context, s *source, path string, fromStart bo
 		case err != nil:
 			// 文件被移走，等待新文件出现
 		case !os.SameFile(fi, nfi):
-			// 文件被轮转（重命名后新建）：先读完旧文件在轮转前写入的剩余内容，再切换到新文件从头读取
-			for {
-				line, _, ok, _ := lr.next()
-				if !ok {
-					break
-				}
-				m.handle(ctx, s, line)
-			}
-			m.flush(ctx, s)
-			f.Close()
+			// 文件被轮转（重命名后新建）。nginx 等程序在收到重新打开日志的信号之前仍会向旧文件写入，
+			// 因此旧文件不立即关闭，而是在宽限期内继续读取，同时从头读取新文件。
+			drainOld(true)
+			old = &rotated{f: f, lr: lr, deadline: time.Now().Add(rotateGrace), lastData: time.Now()}
 			f = nil
 		case nfi.Size() < offset:
 			// copytruncate：文件被截断，从头读取
@@ -362,4 +426,51 @@ func (m *Manager) tail(ctx context.Context, s *source, path string, fromStart bo
 			offset = 0
 		}
 	}
+}
+
+const (
+	rotateGrace = 30 * time.Second // 轮转后继续读取旧文件的最长时间
+	rotateQuiet = 5 * time.Second  // 旧文件持续无新内容达到该时间即关闭
+)
+
+// rotated 是已被轮转但仍在收尾读取的旧文件。
+type rotated struct {
+	f        *os.File
+	lr       *lineReader
+	deadline time.Time
+	lastData time.Time
+}
+
+// fileSet 记录一个数据源已跟踪过的文件，避免轮转后的旧文件（如 access.log.1）被通配符再次发现时重复读取。
+type fileSet struct {
+	mu    sync.Mutex
+	infos []os.FileInfo
+}
+
+func (fs *fileSet) add(fi os.FileInfo) {
+	if fi == nil {
+		return
+	}
+	fs.mu.Lock()
+	defer fs.mu.Unlock()
+	fs.infos = append(fs.infos, fi)
+	if len(fs.infos) > 256 {
+		fs.infos = fs.infos[len(fs.infos)-256:]
+	}
+}
+
+// contains 判断 path 是否为已跟踪过的文件（按文件身份而非文件名判断，重命名后仍能识别）。
+func (fs *fileSet) contains(path string) bool {
+	fi, err := os.Stat(path)
+	if err != nil {
+		return false
+	}
+	fs.mu.Lock()
+	defer fs.mu.Unlock()
+	for _, x := range fs.infos {
+		if os.SameFile(x, fi) {
+			return true
+		}
+	}
+	return false
 }

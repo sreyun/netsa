@@ -97,7 +97,6 @@ func (g *gzipWriter) WriteHeader(code int) {
 		if g.compress {
 			g.Header().Del("Content-Length")
 			g.Header().Set("Content-Encoding", "gzip")
-			g.Header().Add("Vary", "Accept-Encoding")
 		}
 	}
 	g.ResponseWriter.WriteHeader(code)
@@ -116,6 +115,9 @@ func (g *gzipWriter) Write(b []byte) (int, error) {
 // gzipHandler 压缩 JSON 与静态资源（ECharts、地图数据压缩后约为原来的 1/3~1/5），SSE 与分段请求除外。
 func gzipHandler(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/stream" {
+			w.Header().Add("Vary", "Accept-Encoding") // 无论是否压缩都声明，避免共享缓存把未压缩版本发给所有客户端
+		}
 		if !strings.Contains(r.Header.Get("Accept-Encoding"), "gzip") || r.Header.Get("Range") != "" ||
 			r.URL.Path == "/api/stream" || r.Method == http.MethodHead {
 			next.ServeHTTP(w, r)

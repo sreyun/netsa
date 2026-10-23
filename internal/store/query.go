@@ -413,6 +413,33 @@ type AlertQuery struct {
 	Limit       int
 }
 
+// AlertSummary 说明告警列表与攻击命中计数之间的关系：同一 IP 同一规则在节流窗口内只记录前若干条告警，
+// 其余重复命中只累加计数，因此“告警条数”少于“攻击命中次数”。
+type AlertSummary struct {
+	Retained      map[string]int   `json:"retained"`       // 当前保留的告警（按等级）
+	RetainedTotal int              `json:"retained_total"` // 当前保留的告警条数（受 max_alerts 限制）
+	Recorded      int64            `json:"recorded"`       // 累计生成的告警条数
+	Hits          map[string]int64 `json:"hits"`           // 攻击命中次数（按等级，含被节流的重复命中）
+	HitsTotal     int64            `json:"hits_total"`
+	PerRule       int              `json:"per_rule"` // 同一 IP 同一规则在窗口内最多记录的告警数
+	Window        string           `json:"window"`
+	MaxAlerts     int              `json:"max_alerts"`
+}
+
+func (s *Store) AlertSummary() *AlertSummary {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	res := &AlertSummary{Retained: map[string]int{}, Hits: map[string]int64{}, Recorded: s.totals.Alerts, HitsTotal: s.totals.Attacks,
+		PerRule: s.perRule, Window: throttleWindow.String(), MaxAlerts: s.maxAlerts, RetainedTotal: len(s.alerts)}
+	for _, a := range s.alerts {
+		res.Retained[a.Severity.String()]++
+	}
+	for sev, n := range s.sevCount {
+		res.Hits[model.Severity(sev).String()] = n
+	}
+	return res
+}
+
 func (s *Store) Alerts(q AlertQuery) []*model.Alert {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
