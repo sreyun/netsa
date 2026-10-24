@@ -220,3 +220,21 @@ func TestBehaviorMemoryBounded(t *testing.T) {
 		t.Fatalf("窗口状态未受限: ports=%d sweep=%d", len(w.ports), len(w.sweep))
 	}
 }
+
+// 未来时间的异常日志不能成为窗口过期的基准，否则清理逻辑会失效、窗口无限增长。
+func TestBehaviorIgnoresFutureTime(t *testing.T) {
+	b := NewBehavior(config.Default().Detect.Thresholds)
+	now := time.Now()
+	b.Observe(&model.Event{Kind: model.KindWeb, SrcIP: "198.51.100.1", Status: 404, URI: "/a", Time: now.AddDate(50, 0, 0)})
+	b.Observe(&model.Event{Kind: model.KindWeb, SrcIP: "198.51.100.2", Status: 404, URI: "/a", Time: now})
+	if b.latest.After(now.Add(time.Hour)) {
+		t.Fatalf("latest 被未来时间污染: %v", b.latest)
+	}
+	b.prune(b.latest)
+	if _, ok := b.web["198.51.100.1"]; ok {
+		t.Fatal("未来时间的窗口应被清理")
+	}
+	if _, ok := b.web["198.51.100.2"]; !ok {
+		t.Fatal("正常窗口不应被清理")
+	}
+}

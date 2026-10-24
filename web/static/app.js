@@ -17,24 +17,72 @@ const SRC = { custom: '自定义网段', ip2region: 'ip2region 离线库', maxmi
 const TEXT = '#a9b8db';
 const GRID_LINE = 'rgba(80,110,170,.18)';
 
-const api = async (path) => {
-  const r = await fetch(path, { headers: { Accept: 'application/json' } });
+const api = async (path, method = 'GET', body) => {
+  const opt = { method, headers: { Accept: 'application/json' } };
+  if (body !== undefined) {
+    opt.headers['Content-Type'] = 'application/json';
+    opt.body = JSON.stringify(body);
+  }
+  const r = await fetch(path, opt);
   if (!r.ok) {
     const text = await r.text();
     let msg = text || r.statusText;
-    try { msg = JSON.parse(text).error || msg; } catch (_) { /* 非 JSON 错误 */ }
-    throw new Error(msg);
+    let code = '';
+    try {
+      const j = JSON.parse(text);
+      msg = j.error || msg;
+      code = j.code || '';
+    } catch (_) { /* 非 JSON 错误 */ }
+    if (r.status === 401) goLogin(); // 登录已过期或被管理员注销
+    else if (code === 'must_change_password') openPasswordForm(true);
+    const err = new Error(msg);
+    err.status = r.status;
+    err.code = code;
+    throw err;
   }
   return r.json();
 };
+
+// 跳转登录页（保留 #ip=… 等页面内定位，登录后回到原处）
+let leaving = false;
+function goLogin() {
+  if (leaving) return;
+  leaving = true;
+  location.href = '/login.html' + location.hash;
+}
+
+// 当前登录账号；未开启登录认证时为管理员
+let me = { user: '', role: 'admin', auth: false, must_change: false };
+const isAdmin = () => me.role === 'admin';
 let meta = { china_maps: {}, geo_providers: [] };
 const num = (n) => (n ?? 0).toLocaleString('zh-CN');
 const zero = (t) => !t || t.startsWith('0001');
 const pad = (n) => String(n).padStart(2, '0');
+// 时间统一按服务端配置的 timezone 展示（未配置时用浏览器本地时区）：值班电脑的系统时区设置不同
+// （例如跳板机为 UTC）时，页面上的时间也与日志、告警推送保持一致，不会出现相差 8 小时的情况。
+let tzFmt = null;
+function setDisplayTimezone(tz) {
+  tzFmt = null;
+  if (!tz) return;
+  try {
+    tzFmt = new Intl.DateTimeFormat('en-CA', {
+      timeZone: tz, hourCycle: 'h23', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit',
+    });
+  } catch (_) { /* 浏览器不认识该时区时退回本地时区 */ }
+}
+// timeParts 返回指定时刻在展示时区下的年月日时分秒（均为两位数字符串，年为四位）。
+function timeParts(d) {
+  if (!tzFmt) {
+    return { y: String(d.getFullYear()), mo: pad(d.getMonth() + 1), d: pad(d.getDate()), h: pad(d.getHours()), mi: pad(d.getMinutes()), s: pad(d.getSeconds()) };
+  }
+  const o = {};
+  for (const p of tzFmt.formatToParts(d)) o[p.type] = p.value;
+  return { y: o.year, mo: o.month, d: o.day, h: o.hour === '24' ? '00' : o.hour, mi: o.minute, s: o.second };
+}
 const fmtTime = (t) => {
   if (zero(t)) return '-';
-  const d = new Date(t);
-  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+  const p = timeParts(new Date(t));
+  return `${p.y}-${p.mo}-${p.d} ${p.h}:${p.mi}:${p.s}`;
 };
 const fmtShort = (t) => (zero(t) ? '-' : fmtTime(t).slice(5));
 const badge = (lv) => `<span class="badge lv-${esc(lv)} bg-${esc(lv)}">${esc(LV[lv] || lv)}</span>`;
@@ -43,6 +91,12 @@ const scoreBar = (s, lv) => `<span class="scorebar"><i style="width:${Math.min(1
 const ipLink = (ip) => `<span class="ip clickable" data-ip="${esc(ip)}">${esc(ip)}</span>`;
 const empty = (cols, text = '暂无数据') => `<tr><td colspan="${cols}" class="empty">${esc(text)}</td></tr>`;
 const sortedEntries = (obj, n) => Object.entries(obj || {}).sort((a, b) => b[1] - a[1]).slice(0, n);
+// fmtDur 把 Go 的时长字符串（如 10m0s）转为中文
+const fmtDur = (s) => {
+  const m = /^(?:(\d+)h)?(?:(\d+)m)?(?:([\d.]+)s)?$/.exec(s || '');
+  if (!m) return s || '';
+  return [m[1] && `${m[1]} 小时`, +m[2] ? `${m[2]} 分钟` : '', +m[3] ? `${m[3]} 秒` : ''].filter(Boolean).join('') || s;
+};
 
 // ---------------- 图表 ----------------
 const charts = {};
@@ -149,6 +203,16 @@ function switchTab(tab) {
   requestAnimationFrame(() => requestAnimationFrame(resizeCharts));
 }
 
+// KPI 卡片下钻到对应列表，便于核对数字
+$('#kpis').addEventListener('click', (e) => {
+  const k = e.target.closest('[data-go]');
+  if (!k) return;
+  const [tab, arg] = k.dataset.go.split(':');
+  if (tab === 'attackers') { $('#atkLevel').value = arg || ''; atkOffset = 0; }
+  if (tab === 'alerts') { fillAlertFilters(); $('#alSev').value = ''; $('#alResult').value = arg || ''; }
+  switchTab(tab);
+});
+
 // IP 点击统一打开溯源详情
 document.addEventListener('click', (e) => {
   const el = e.target.closest('[data-ip]');
@@ -162,18 +226,23 @@ async function loadOverview() {
   lastOverview = o;
   const lc = o.level_counts || {};
   const t = o.totals;
+  const sc = o.sev_counts || {};
+  // 两类“等级”含义不同：攻击事件按单次攻击的告警等级统计；攻击源按 IP 的综合威胁等级统计
+  // （不低于其触发过的最高告警等级）。一个同时触发高危与严重告警的 IP 计为严重攻击源。
   const kpis = [
     ['总事件', num(t.events), `Web ${num(t.web)} · 防火墙 ${num(t.firewall)}`, '#8fe9ff'],
-    ['攻击事件', num(t.attacks), `近 1 小时 ${num(o.recent.attacks)}`, LV_COLOR.high],
-    ['攻击源 IP', num(o.attackers), `独立来源 ${num(o.unique_ips)} · 近 1 小时活跃 ${num(o.recent.attackers)}`, '#ffc53d'],
-    ['高危以上攻击源', num((lc.critical || 0) + (lc.high || 0)), `严重 ${lc.critical || 0} · 高危 ${lc.high || 0}`, LV_COLOR.critical],
-    ['攻击拦截率', `${o.block_rate}%`, `已拦截 ${num(t.blocked)}`, '#52c41a'],
-    ['疑似成功攻击', num(t.success), '需优先排查是否失陷', t.success > 0 ? LV_COLOR.critical : '#52c41a'],
+    ['攻击事件', num(t.attacks), `严重 ${num(sc.critical || 0)} · 高危 ${num(sc.high || 0)} · 中危 ${num(sc.medium || 0)}`, LV_COLOR.high,
+      `按告警等级统计的攻击命中次数：严重 ${num(sc.critical || 0)} · 高危 ${num(sc.high || 0)} · 中危 ${num(sc.medium || 0)} · 低危 ${num(sc.low || 0)}；近 1 小时 ${num(o.recent.attacks)} 次`, 'alerts:'],
+    ['攻击源 IP', num(o.attackers), `独立来源 ${num(o.unique_ips)} · 近 1 小时活跃 ${num(o.recent.attackers)}`, '#ffc53d', '', 'attackers:'],
+    ['高危以上攻击源', num((lc.critical || 0) + (lc.high || 0)), `严重 ${lc.critical || 0} · 高危 ${lc.high || 0}`, LV_COLOR.critical,
+      `按攻击源 IP 的综合威胁等级统计：严重 ${lc.critical || 0} · 高危 ${lc.high || 0} · 中危 ${lc.medium || 0} · 低危 ${lc.low || 0}。触发过高危告警的 IP 至少为高危`, 'attackers:high'],
+    ['攻击拦截率', `${o.block_rate}%`, `已拦截 ${num(t.blocked)}`, '#52c41a', '', 'alerts:'],
+    ['疑似成功攻击', num(t.success), '需优先排查是否失陷', t.success > 0 ? LV_COLOR.critical : '#52c41a', '', 'alerts:success'],
     ['攻击面风险指数', `${o.surface_score}`, `风险发现 ${num(o.findings)} 项`,
-      o.surface_score >= 60 ? LV_COLOR.critical : o.surface_score >= 30 ? LV_COLOR.high : o.surface_score > 0 ? LV_COLOR.medium : '#52c41a'],
+      o.surface_score >= 60 ? LV_COLOR.critical : o.surface_score >= 30 ? LV_COLOR.high : o.surface_score > 0 ? LV_COLOR.medium : '#52c41a', '', 'surface:'],
     ['攻击来源地域', num(o.country_count), `国家/地区 · 城市 ${num(o.city_count)}`, '#8fe9ff'],
   ];
-  $('#kpis').innerHTML = kpis.map(([l, v, s, c]) => `<div class="kpi"><div class="label">${l}</div><div class="value" style="color:${c}">${v}</div><div class="sub" title="${esc(s)}">${esc(s)}</div></div>`).join('');
+  $('#kpis').innerHTML = kpis.map(([l, v, s, c, tip, go]) => `<div class="kpi${go ? ' clickable' : ''}"${go ? ` data-go="${go}"` : ''} title="${esc(tip || s)}"><div class="label">${l}</div><div class="value" style="color:${c}">${v}</div><div class="sub">${esc(s)}</div></div>`).join('');
   const tb = $('#threatBadge');
   tb.innerHTML = `威胁等级 <b>${esc(LV[o.threat_level] === '信息' ? '安全' : LV[o.threat_level])}</b> · ${o.threat_index}`;
   tb.style.color = LV_COLOR[o.threat_level] || '#52c41a';
@@ -209,7 +278,8 @@ async function loadTrend() {
   const data = (await api(`/api/timeline?minutes=${trendMinutes}`)) || [];
   const x = data.map((b) => {
     const d = new Date(b.t * 1000);
-    return trendMinutes > 1440 ? `${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}` : `${pad(d.getHours())}:${pad(d.getMinutes())}`;
+    const p = timeParts(d);
+    return trendMinutes > 1440 ? `${p.mo}-${p.d} ${p.h}:${p.mi}` : `${p.h}:${p.mi}`;
   });
   const area = (c) => ({ color: new echarts.graphic.LinearGradient(0, 0, 0, 1, [{ offset: 0, color: c + '66' }, { offset: 1, color: c + '00' }]) });
   chart('cTrend').setOption({
@@ -554,7 +624,11 @@ function fillAlertFilters() {
 async function loadAlerts() {
   fillAlertFilters();
   const q = new URLSearchParams({ q: $('#alSearch').value, severity: $('#alSev').value, category: $('#alCat').value, result: $('#alResult').value, kind: $('#alKind').value, limit: 300 });
-  const list = await api('/api/alerts?' + q);
+  const [list, sum] = await Promise.all([api('/api/alerts?' + q), api('/api/alerts/summary')]);
+  const rt = sum.retained || {}, hits = sum.hits || {};
+  $('#alSummary').innerHTML = `当前保留告警 <b>${num(sum.retained_total)}</b> 条（严重 ${num(rt.critical || 0)} · 高危 ${num(rt.high || 0)} · 中危 ${num(rt.medium || 0)} · 低危 ${num(rt.low || 0)}），`
+    + `攻击命中共 <b>${num(sum.hits_total)}</b> 次（严重 ${num(hits.critical || 0)} · 高危 ${num(hits.high || 0)} · 中危 ${num(hits.medium || 0)}）。`
+    + `<span class="muted">同一 IP 同一规则 ${esc(fmtDur(sum.window))}内最多记录 ${sum.per_rule} 条告警，其余重复命中只累加计数；最多保留最近 ${num(sum.max_alerts)} 条。当前列表最多显示 300 条。</span>`;
   const rows = list.map((a) => `<tr>
     <td class="nowrap muted">${esc(fmtShort(a.time))}</td><td>${badge(a.severity)}</td>
     <td><b>${esc(a.name)}</b><div class="muted">${esc(a.category)} · ${esc(PHASE[a.phase] || a.phase)}</div></td>
@@ -601,7 +675,8 @@ async function loadSources() {
   $('#procCount').textContent = `已处理 ${num(r.processed)} 条事件 · 运行 ${rt.uptime || '-'} · 内存 ${rt.heap_mb ?? '-'} MB · 待溯源 ${r.geo_pending ?? 0}`;
   $('#srcTable').innerHTML = `<thead><tr><th>名称</th><th>路径/地址</th><th>配置类型</th><th>自动识别格式</th><th>状态</th><th class="num">行数</th><th class="num">解析成功</th><th class="num">失败</th><th>最近事件时间</th><th>最近失败样例</th></tr></thead><tbody>${
     (r.sources || []).map((s) => `<tr><td>${esc(s.name)}</td><td class="mono">${esc(s.path)}</td><td>${esc(s.type)}</td><td><span class="chip">${esc(s.detected || '-')}</span></td>
-      <td>${esc(SRC_STATUS[s.status] || s.status)}${s.last_error ? `<div class="lv-high" style="font-size:11px">${esc(s.last_error)}</div>` : ''}</td>
+      <td>${esc(SRC_STATUS[s.status] || s.status)}${s.last_error ? `<div class="lv-high" style="font-size:11px">${esc(s.last_error)}</div>` : ''}${s.time_offset
+        ? `<div class="lv-medium" style="font-size:11px" title="日志时间与实际时间相差整时区，已自动校正。通常是日志产生方（服务器 / 设备）按 UTC 等其他时区记录，而 timezone 配置为 ${esc(meta.timezone || '本地时区')}。可将日志产生方的时区改为一致，或忽略（已自动校正）。">时区已自动校正 ${esc(s.time_offset)}</div>` : ''}</td>
       <td class="num">${num(s.lines)}</td><td class="num">${num(s.parsed)}</td><td class="num">${s.failed ? `<span class="lv-medium">${num(s.failed)}</span>` : 0}</td>
       <td class="nowrap muted">${esc(fmtShort(s.last_event))}</td><td class="evidence">${esc(s.sample_failed || '')}</td></tr>`).join('') || empty(10, '未配置数据源')}</tbody>`;
   const sl = r.syslog || {};
@@ -609,6 +684,7 @@ async function loadSources() {
     <div class="k">IP 溯源数据源</div><div>${(meta.geo_providers || []).map((p) => `<span class="chip">${esc(SRC[p] || p)}</span>`).join('') || '<span class="lv-high">未配置</span>'}</div>
     <div class="k">WHOIS / RDAP</div><div>${meta.rdap ? '已启用（IP 详情中按需查询）' : '未启用'}</div>
     <div class="k">特征规则</div><div>${meta.rules} 条 + 行为检测（CC / 目录扫描 / 暴力破解 / 端口扫描 / 主机探测 / 洪水）</div>
+    <div class="k">时区</div><div>${esc(meta.timezone || '服务器本地时区')}${meta.time_correction ? ' · <span class="muted">实时日志与实际时间相差整时区时自动校正（time_correction: auto）</span>' : ' · <span class="muted">未开启时区自动校正</span>'}</div>
     <div class="k">Syslog 接收</div><div>${sl.enabled ? `UDP ${esc(sl.udp || '-')} · TCP ${esc(sl.tcp || '-')}` : '未启用'}</div>
     <div class="k">支持的日志格式</div><div>nginx/Apache combined、main(XFF)、vhost、JSON、自定义 log_format；iptables/UFW/firewalld、pfSense/OPNsense、Windows 防火墙、Cisco ASA、FortiGate/华为/H3C/深信服等 key=value、JSON 防火墙日志</div>
     <div class="k">日志时区</div><div>${esc(meta.timezone || '系统时区')}</div>
@@ -625,7 +701,13 @@ let miniChart = null;
 function closeDrawer() { drawer.classList.remove('open'); mask.classList.remove('open'); }
 $('#drawerClose').onclick = closeDrawer;
 mask.onclick = closeDrawer;
-document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeDrawer(); });
+document.addEventListener('keydown', (e) => {
+  if (e.key !== 'Escape') return;
+  if (!$('#pwModal').hidden) { if (!pwForced) closePasswordForm(); return; }
+  if (!$('#userModal').hidden) { closeUserForm(); return; }
+  if (!$('#ntModal').hidden) closeRobotForm();
+  else closeDrawer();
+});
 
 async function openIP(ip) {
   let d;
@@ -770,12 +852,356 @@ netsh advfirewall firewall add rule name="netsa-block-${esc(ip)}" dir=in action=
   };
 }
 
+// ---------------- 告警推送 ----------------
+const NT_TYPES = {
+  dingtalk: {
+    label: '钉钉', secret: true, ph: 'https://oapi.dingtalk.com/robot/send?access_token=…',
+    help: '钉钉群 → 群设置 → 机器人 → 添加机器人 → 自定义，复制 Webhook 地址。安全设置选择「加签」时填写上方密钥；选择「自定义关键词」时填写“告警”。',
+  },
+  wecom: {
+    label: '企业微信', secret: false, ph: 'https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=…',
+    help: '企业微信群 → 右上角「…」→ 添加群机器人 → 新创建一个机器人，复制 Webhook 地址。企业微信机器人没有加签设置。',
+  },
+  feishu: {
+    label: '飞书', secret: true, ph: 'https://open.feishu.cn/open-apis/bot/v2/hook/…',
+    help: '飞书群 → 设置 → 群机器人 → 添加机器人 → 自定义机器人，复制 Webhook 地址。安全设置开启「签名校验」时填写上方密钥；开启「自定义关键词」时填写“告警”。',
+  },
+};
+const ntState = { info: null, editing: null, type: 'dingtalk' };
+const levelChips = (levels) => ['critical', 'high', 'medium'].filter((l) => (levels || []).includes(l)).map(badge).join(' ');
+
+async function loadNotify() {
+  const info = await api('/api/alert/robots');
+  ntState.info = info;
+  const on = info.robots.filter((r) => r.enabled).length;
+  $('#ntCount').textContent = info.robots.length ? `共 ${info.robots.length} 个 · 启用 ${on} 个` : '';
+  const rows = info.robots.map((r) => {
+    const st = r.stats || {};
+    const failing = !zero(st.last_error_at) && (zero(st.last_ok) || st.last_error_at > st.last_ok);
+    const status = (r.enabled ? '<span class="nt-on">● 启用</span>' : '<span class="muted">○ 停用</span>')
+      + (failing ? `<div class="nt-err" title="${esc(st.last_error)}">最近失败：${esc(st.last_error)}</div>` : '');
+    const stats = `消息 ${num(st.messages || 0)} · 告警 ${num(st.events || 0)}${st.failed ? ` · <span class="nt-err-inline">失败 ${num(st.failed)}</span>` : ''}`
+      + `<div class="muted">${zero(st.last_ok) ? '尚未成功推送' : '最近成功 ' + esc(fmtShort(st.last_ok))}${st.suppressed ? ` · 合并 ${num(st.suppressed)} 条` : ''}${st.queued ? ` · 待发送 ${st.queued}` : ''}</div>`;
+    const ui = r.source === 'ui';
+    const acts = !isAdmin() ? '<span class="muted">只读</span>' : `<button class="btn" data-act="test" data-id="${esc(r.id)}">测试</button>`
+      + (ui ? ` <button class="btn" data-act="toggle" data-id="${esc(r.id)}">${r.enabled ? '停用' : '启用'}</button>`
+        + ` <button class="btn" data-act="edit" data-id="${esc(r.id)}">编辑</button>`
+        + ` <button class="btn danger" data-act="del" data-id="${esc(r.id)}">删除</button>`
+        : ' <span class="chip" title="来自配置文件 alert.webhooks，请在配置文件中修改">配置文件</span>');
+    return `<tr><td><b>${esc(r.name)}</b>${r.has_secret ? '<div class="muted">已启用加签</div>' : ''}</td>
+      <td class="nowrap">${esc(r.type_label)}</td><td class="nowrap">${levelChips(r.levels)}</td>
+      <td class="mono nt-url" title="${esc(r.url)}">${esc(r.url)}</td><td>${status}</td><td>${stats}</td><td class="nowrap num">${acts}</td></tr>`;
+  }).join('');
+  $('#ntTable').innerHTML = '<thead><tr><th>名称</th><th>类型</th><th>推送等级</th><th>Webhook</th><th>状态</th><th>推送统计</th><th class="num">操作</th></tr></thead>'
+    + `<tbody>${rows || '<tr><td colspan="7" class="empty">尚未添加告警推送机器人，点击右上角「添加机器人」开始配置</td></tr>'}</tbody>`;
+  const notes = [info.persist
+    ? `界面中添加的机器人保存在 <span class="mono">${esc(info.file)}</span>（含 Webhook 令牌，文件权限 0600）。`
+    : '<span class="nt-warn">未配置 storage.snapshot 或 alert.robots_file：界面中添加的机器人只保存在内存中，服务重启后需重新添加。</span>'];
+  if (!info.base_url) notes.push('在配置文件中设置 <span class="mono">alert.base_url</span>（大屏访问地址）后，告警消息将附带“查看溯源详情”链接。');
+  $('#ntNote').innerHTML = notes.join('<br>');
+  $('#ntRules').innerHTML = `<ul>
+    <li><b>推送内容</b>：等级在所选范围内的告警事件，包括规则名称、研判结果（疑似成功会特别标注）、来源 IP 与归属地、攻击目标、攻击证据与威胁评分；以及攻击源因多次攻击累积导致的威胁等级升级。</li>
+    <li><b>去重</b>：同一 IP、同一规则、同一研判结果在 ${esc(fmtDur(info.dedup_window))}内只推送一次（<span class="mono">alert.dedup_window</span>）。</li>
+    <li><b>合并</b>：2 秒内的多条告警合并为一条消息，最多逐条列出 10 条。</li>
+    <li><b>限速</b>：钉钉、企业微信每个机器人每分钟最多 18 条，飞书 60 条（低于平台限制）；超出部分在下一条消息中汇总为“另有 N 条”，不会静默丢失。</li>
+    <li><b>失败重试</b>：网络错误或平台限流时 10 秒后自动重试一次；失败原因显示在机器人状态中。</li>
+    <li><b>安全</b>：日志中的攻击载荷与链接已做转义，不会在群聊中显示为可点击的链接或图片；界面只允许填写钉钉、企业微信、飞书的官方 Webhook 地址，令牌与密钥不会回显到页面。</li>
+  </ul>`;
+  $('#ntHistory').innerHTML = `<thead><tr><th>时间</th><th>机器人</th><th>内容</th><th>结果</th></tr></thead><tbody>${info.history.map((h) => `<tr>
+    <td class="nowrap muted">${esc(fmtShort(h.time))}</td><td class="nowrap">${esc(h.robot)}</td><td>${esc(h.title)}${h.events > 1 ? ` <span class="muted">(${h.events} 条)</span>` : ''}</td>
+    <td>${h.ok ? '<span class="nt-on">成功</span>' : `<span class="nt-err-inline">失败</span><div class="muted">${esc(h.error)}</div>`}</td></tr>`).join('') || empty(4, '暂无推送记录')}</tbody>`;
+}
+
+function ntSetType(t) {
+  ntState.type = t;
+  const cfg = NT_TYPES[t];
+  $$('#ntType button').forEach((b) => b.classList.toggle('active', b.dataset.t === t));
+  $('#ntSecretRow').hidden = !cfg.secret;
+  $('#ntHelp').textContent = cfg.help;
+  const ed = ntState.editing;
+  $('#ntUrl').placeholder = ed ? `已保存：${ed.url}（不修改请留空）` : cfg.ph;
+  $('#ntUrlHint').textContent = ed ? '' : `只能填写${cfg.label}官方机器人地址；私有化部署等其他地址请在配置文件 alert.webhooks 中配置。`;
+}
+
+function ntMsg(text, ok) {
+  const m = $('#ntMsg');
+  m.textContent = text || '';
+  m.className = 'form-msg' + (text ? (ok ? ' ok' : ' err') : '');
+}
+
+function openRobotForm(r) {
+  ntState.editing = r || null;
+  $('#ntFormTitle').textContent = r ? `编辑机器人 · ${r.name}` : '添加告警推送机器人';
+  $('#ntName').value = r ? r.name : '';
+  $('#ntUrl').value = '';
+  $('#ntSecret').value = '';
+  $('#ntSecret').placeholder = r && r.has_secret ? '已设置（不修改请留空）' : '机器人安全设置选择“加签”时填写，以 SEC 开头';
+  $('#ntClearRow').hidden = !(r && r.has_secret);
+  $('#ntClear').checked = false;
+  const levels = r ? r.levels : ['critical', 'high'];
+  $$('#ntLevels input').forEach((c) => { c.checked = levels.includes(c.value); });
+  $('#ntEnabled').checked = r ? r.enabled : true;
+  $$('#ntType button').forEach((b) => { b.disabled = !!r; }); // 编辑时不能更改类型
+  ntSetType(r ? r.type : 'dingtalk');
+  ntMsg('');
+  $('#ntModal').hidden = false;
+  $('#ntName').focus();
+}
+
+function closeRobotForm() {
+  $('#ntModal').hidden = true;
+  ntState.editing = null;
+}
+
+function ntCollect() {
+  return {
+    name: $('#ntName').value.trim(), type: ntState.type, url: $('#ntUrl').value.trim(),
+    secret: NT_TYPES[ntState.type].secret ? $('#ntSecret').value.trim() : '', clear_secret: $('#ntClear').checked,
+    levels: $$('#ntLevels input').filter((c) => c.checked).map((c) => c.value), enabled: $('#ntEnabled').checked,
+  };
+}
+
+function ntCheck(f) {
+  if (!f.levels.length) return '请至少选择一个推送等级';
+  if (!ntState.editing && !f.url) return '请填写 Webhook 地址';
+  return '';
+}
+
+async function ntBusy(btn, fn) {
+  btn.disabled = true;
+  try { await fn(); } finally { btn.disabled = false; }
+}
+
+$('#ntAdd').addEventListener('click', () => openRobotForm(null));
+$('#ntClose').addEventListener('click', closeRobotForm);
+$('#ntCancel').addEventListener('click', closeRobotForm);
+$('#ntModal').addEventListener('mousedown', (e) => { if (e.target.id === 'ntModal') closeRobotForm(); });
+$$('#ntType button').forEach((b) => b.addEventListener('click', () => ntSetType(b.dataset.t)));
+$('#ntForm').addEventListener('submit', (e) => {
+  e.preventDefault();
+  const f = ntCollect();
+  const bad = ntCheck(f);
+  if (bad) { ntMsg(bad); return; }
+  ntBusy($('#ntSave'), async () => {
+    try {
+      const ed = ntState.editing;
+      const r = ed ? await api('/api/alert/robots/' + encodeURIComponent(ed.id), 'PUT', f) : await api('/api/alert/robots', 'POST', f);
+      if (r.warning) alert('配置已生效，但' + r.warning);
+      closeRobotForm();
+      loadNotify().catch(console.error);
+    } catch (err) { ntMsg(err.message); }
+  });
+});
+$('#ntTest').addEventListener('click', () => {
+  const f = ntCollect();
+  const bad = ntCheck(f);
+  if (bad) { ntMsg(bad); return; }
+  ntMsg('正在发送测试消息…', true);
+  ntBusy($('#ntTest'), async () => {
+    try {
+      const ed = ntState.editing;
+      const r = await api(ed ? `/api/alert/robots/${encodeURIComponent(ed.id)}/test` : '/api/alert/test', 'POST', f);
+      ntMsg(r.ok ? '测试消息已发送，请在群中查看。' : '发送失败：' + r.error, r.ok);
+      loadNotify().catch(console.error);
+    } catch (err) { ntMsg(err.message); }
+  });
+});
+$('#ntTable').addEventListener('click', async (e) => {
+  const b = e.target.closest('button[data-act]');
+  const r = b && ntState.info.robots.find((x) => x.id === b.dataset.id);
+  if (!r) return;
+  const path = '/api/alert/robots/' + encodeURIComponent(r.id);
+  try {
+    switch (b.dataset.act) {
+      case 'edit':
+        openRobotForm(r);
+        return;
+      case 'test':
+        await ntBusy(b, async () => {
+          const res = await api(path + '/test', 'POST');
+          alert(res.ok ? `测试消息已发送到「${r.name}」，请在群中查看。` : `发送到「${r.name}」失败：${res.error}`);
+        });
+        break;
+      case 'toggle':
+        await api(path, 'PUT', { name: r.name, type: r.type, levels: r.levels, enabled: !r.enabled });
+        break;
+      case 'del':
+        if (!confirm(`确定删除机器人「${r.name}」？删除后将不再向该群推送告警。`)) return;
+        await api(path, 'DELETE');
+        break;
+      default:
+        return;
+    }
+  } catch (err) { alert(err.message); }
+  loadNotify().catch(console.error);
+});
+
+// ---------------- 账号与登录 ----------------
+const ROLE = { admin: '管理员', viewer: '只读' };
+
+function renderUserMenu() {
+  if (!me.auth) return; // 未开启登录认证
+  $('#userMenu').hidden = false;
+  $('#userName').textContent = me.user;
+  $('#userRole').textContent = ROLE[me.role] || me.role;
+  $('#tabSystem').hidden = !isAdmin();
+  $('#ntAdd').hidden = !isAdmin();
+}
+
+function toggleUserDrop(open) {
+  const d = $('#userDrop');
+  d.hidden = open === undefined ? !d.hidden : !open;
+  $('#userBtn').setAttribute('aria-expanded', String(!d.hidden));
+}
+$('#userBtn').addEventListener('click', (e) => { e.stopPropagation(); toggleUserDrop(); });
+document.addEventListener('click', (e) => { if (!e.target.closest('#userMenu')) toggleUserDrop(false); });
+$('#menuPassword').addEventListener('click', () => { toggleUserDrop(false); openPasswordForm(false); });
+$('#menuLogout').addEventListener('click', async () => {
+  toggleUserDrop(false);
+  try { await api('/api/auth/logout', 'POST'); } catch (_) { /* 已过期也直接回到登录页 */ }
+  leaving = true;
+  location.href = '/login.html';
+});
+
+// 修改密码；forced 为 true 时（初始密码 / 管理员重置后）不可关闭，修改成功后重新加载页面
+let pwForced = false;
+function openPasswordForm(forced) {
+  if (!$('#pwModal').hidden && pwForced) return;
+  pwForced = !!forced;
+  $('#pwTitle').textContent = forced ? '请设置新密码' : '修改密码';
+  $('#pwForce').hidden = !forced;
+  $('#pwClose').hidden = forced;
+  $('#pwCancel').hidden = forced;
+  $('#pwUser').value = me.user;
+  ['#pwCurrent', '#pwNew', '#pwNew2'].forEach((s) => { $(s).value = ''; });
+  $('#pwMsg').textContent = '';
+  $('#pwMsg').className = 'form-msg';
+  $('#pwModal').hidden = false;
+  $('#pwCurrent').focus();
+}
+function closePasswordForm() { $('#pwModal').hidden = true; }
+$('#pwClose').addEventListener('click', closePasswordForm);
+$('#pwCancel').addEventListener('click', closePasswordForm);
+$('#pwForm').addEventListener('submit', (e) => {
+  e.preventDefault();
+  const cur = $('#pwCurrent').value;
+  const next = $('#pwNew').value;
+  const msg = (t, ok) => { $('#pwMsg').textContent = t; $('#pwMsg').className = 'form-msg ' + (ok ? 'ok' : 'err'); };
+  if (!cur || !next) { msg('请填写当前密码与新密码'); return; }
+  if (next !== $('#pwNew2').value) { msg('两次输入的新密码不一致'); return; }
+  ntBusy($('#pwSave'), async () => {
+    try {
+      await api('/api/auth/password', 'POST', { current: cur, new: next });
+      if (pwForced) { location.reload(); return; }
+      msg('密码已修改，其他设备上的登录已失效', true);
+      setTimeout(closePasswordForm, 1200);
+    } catch (err) { msg(err.message); }
+  });
+});
+
+// 系统管理：账号与登录记录（仅管理员）
+let users = [];
+async function loadSystem() {
+  if (!isAdmin()) return;
+  const [u, audit] = await Promise.all([api('/api/auth/users'), api('/api/auth/audit?limit=100')]);
+  users = u.users || [];
+  const admins = users.filter((x) => x.role === 'admin').length;
+  $('#userCount').textContent = `共 ${users.length} 个 · 管理员 ${admins} 个`;
+  $('#userTable').innerHTML = `<thead><tr><th>用户名</th><th>角色</th><th>状态</th><th>最近登录</th><th>密码修改</th><th>创建时间</th><th class="num">操作</th></tr></thead><tbody>${users.map((x) => {
+    const cfg = x.source === 'config';
+    const self = x.name === u.me;
+    const acts = cfg ? '<span class="chip" title="来自配置文件 server.username，请在配置文件中修改">配置文件</span>'
+      : `<button class="btn" data-uact="reset" data-name="${esc(x.name)}">重置密码</button>`
+        + ` <button class="btn" data-uact="role" data-name="${esc(x.name)}">${x.role === 'admin' ? '设为只读' : '设为管理员'}</button>`
+        + ` <button class="btn danger" data-uact="del" data-name="${esc(x.name)}">删除</button>`;
+    return `<tr><td><b>${esc(x.name)}</b>${self ? ' <span class="muted">（当前账号）</span>' : ''}</td>
+      <td>${x.role === 'admin' ? '<span class="chip warn">管理员</span>' : '<span class="chip">只读</span>'}</td>
+      <td>${x.must_change ? '<span class="nt-warn">待修改初始密码</span>' : '<span class="nt-on">正常</span>'}</td>
+      <td class="nowrap muted">${esc(fmtShort(x.last_login))}</td><td class="nowrap muted">${esc(fmtShort(x.changed))}</td>
+      <td class="nowrap muted">${esc(fmtShort(x.created))}</td><td class="nowrap num">${acts}</td></tr>`;
+  }).join('')}</tbody>`;
+  $('#auditTable').innerHTML = `<thead><tr><th>时间</th><th>账号</th><th>来源 IP</th><th>结果</th><th>客户端</th></tr></thead><tbody>${audit.map((a) => `<tr>
+    <td class="nowrap muted">${esc(fmtShort(a.time))}</td><td>${esc(a.user)}</td><td class="mono">${esc(a.ip)}</td>
+    <td>${a.ok ? '<span class="nt-on">成功</span>' : `<span class="nt-err-inline">失败</span> <span class="muted">${esc(a.reason || '')}</span>`}</td>
+    <td class="muted evidence">${esc(a.agent || '')}</td></tr>`).join('') || empty(5, '暂无登录记录')}</tbody>`;
+}
+
+// 账号表单：mode 为 create（新增）或 reset（重置密码）
+let ufMode = 'create';
+let ufName = '';
+let ufRole = 'viewer';
+function setUfRole(r) {
+  ufRole = r;
+  $$('#ufRole button').forEach((b) => b.classList.toggle('active', b.dataset.r === r));
+}
+function openUserForm(mode, name) {
+  ufMode = mode;
+  ufName = name || '';
+  $('#userFormTitle').textContent = mode === 'create' ? '添加账号' : `重置密码 · ${name}`;
+  $('#ufName').value = ufName;
+  $('#ufName').disabled = mode !== 'create';
+  $('#ufRole').parentElement.hidden = mode !== 'create';
+  $('#ufPwLabel').textContent = mode === 'create' ? '初始密码' : '新密码';
+  $('#ufHint').textContent = mode === 'create'
+    ? '用户首次登录后须修改密码。至少 8 位，包含字母、数字、符号中的至少两类。'
+    : '重置后该账号已登录的会话立即失效，下次登录须修改密码。';
+  $('#ufPw').value = '';
+  $('#ufMsg').textContent = '';
+  setUfRole('viewer');
+  $('#userModal').hidden = false;
+  (mode === 'create' ? $('#ufName') : $('#ufPw')).focus();
+}
+function closeUserForm() { $('#userModal').hidden = true; }
+$('#userAdd').addEventListener('click', () => openUserForm('create'));
+$('#userClose').addEventListener('click', closeUserForm);
+$('#userCancel').addEventListener('click', closeUserForm);
+$$('#ufRole button').forEach((b) => b.addEventListener('click', () => setUfRole(b.dataset.r)));
+$('#userForm').addEventListener('submit', (e) => {
+  e.preventDefault();
+  const pw = $('#ufPw').value;
+  const msg = (t) => { $('#ufMsg').textContent = t; $('#ufMsg').className = 'form-msg err'; };
+  if (ufMode === 'create' && !$('#ufName').value.trim()) { msg('请填写用户名'); return; }
+  if (!pw) { msg('请填写密码'); return; }
+  ntBusy($('#userSave'), async () => {
+    try {
+      if (ufMode === 'create') await api('/api/auth/users', 'POST', { name: $('#ufName').value.trim(), role: ufRole, password: pw });
+      else await api('/api/auth/users/' + encodeURIComponent(ufName), 'PUT', { password: pw });
+      closeUserForm();
+      loadSystem().catch(console.error);
+    } catch (err) { msg(err.message); }
+  });
+});
+$('#userTable').addEventListener('click', async (e) => {
+  const b = e.target.closest('button[data-uact]');
+  if (!b) return;
+  const name = b.dataset.name;
+  const u = users.find((x) => x.name === name);
+  if (!u) return;
+  const path = '/api/auth/users/' + encodeURIComponent(name);
+  try {
+    if (b.dataset.uact === 'reset') { openUserForm('reset', name); return; }
+    if (b.dataset.uact === 'role') {
+      const role = u.role === 'admin' ? 'viewer' : 'admin';
+      if (!confirm(`确定将「${name}」设为${ROLE[role]}？该账号需重新登录后生效。`)) return;
+      await api(path, 'PUT', { role });
+    }
+    if (b.dataset.uact === 'del') {
+      if (!confirm(`确定删除账号「${name}」？其已登录的会话将立即失效。`)) return;
+      await api(path, 'DELETE');
+      if (name === me.user) { goLogin(); return; }
+    }
+  } catch (err) { alert(err.message); }
+  loadSystem().catch(console.error);
+});
+
 // ---------------- 调度 ----------------
 const loaders = {
   overview: () => Promise.all([loadOverview(), loadTrend(), loadMap(), loadTopAttackers()]).catch(console.error),
   attackers: () => loadAttackers().catch(console.error),
   alerts: () => loadAlerts().catch(console.error),
   surface: () => loadSurface().catch(console.error),
+  notify: () => loadNotify().catch(console.error),
+  system: () => loadSystem().catch(console.error),
   sources: () => loadSources().catch(console.error),
 };
 
@@ -786,12 +1212,32 @@ $('#fullscreen').addEventListener('click', () => {
 document.addEventListener('fullscreenchange', () => setTimeout(resizeCharts, 200));
 
 (async function init() {
+  // 先确认登录状态：未登录时 api() 会跳转登录页；使用初始密码时先强制修改密码
+  try {
+    const s = await api('/api/auth/session');
+    me = { user: s.user, role: s.role, auth: s.auth_enabled, must_change: s.must_change };
+  } catch (_) { return; }
+  renderUserMenu();
+  if (me.must_change) { openPasswordForm(true); return; }
   try { meta = await api('/api/meta'); } catch (e) { console.error(e); }
+  setDisplayTimezone(meta.timezone);
+  $('#clock').title = meta.timezone ? `时区：${meta.timezone}（与服务端配置一致）` : '时区：浏览器本地时区';
   initMapEvents();
   loaders.overview();
   loadFeed().catch(console.error);
   connectStream();
+  openFromHash();
 })();
+
+// 告警消息中的“查看溯源详情”链接形如 /#ip=1.2.3.4，打开后直接显示该 IP 的溯源详情
+function openFromHash() {
+  const m = /^#ip=(.+)$/.exec(location.hash);
+  if (!m) return;
+  let ip = '';
+  try { ip = decodeURIComponent(m[1]); } catch (_) { return; }
+  if (/^[0-9a-fA-F.:]{2,45}$/.test(ip)) openIP(ip);
+}
+window.addEventListener('hashchange', openFromHash);
 
 setInterval(() => {
   if (document.hidden) return;
@@ -801,6 +1247,8 @@ setInterval(() => {
     loadTopAttackers().catch(console.error);
   } else if (currentTab === 'alerts' && $('#alAuto').checked) {
     loadAlerts().catch(console.error);
+  } else if (currentTab === 'notify' && $('#ntModal').hidden) {
+    loadNotify().catch(console.error);
   } else if (currentTab === 'sources') {
     loadSources().catch(console.error);
   }

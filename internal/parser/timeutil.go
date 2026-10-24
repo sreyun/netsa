@@ -47,13 +47,17 @@ func ParseTime(s string) time.Time {
 			return time.Unix(sec, int64((f-float64(sec))*1e9))
 		}
 	}
+	loc := Location
+	if loc == nil {
+		loc = time.Local
+	}
 	for _, layout := range timeLayouts {
-		t, err := time.ParseInLocation(layout, s, Location)
+		t, err := time.ParseInLocation(layout, s, loc)
 		if err != nil {
 			continue
 		}
 		if t.Year() == 0 { // syslog 时间没有年份
-			now := time.Now().In(Location)
+			now := time.Now().In(loc)
 			t = t.AddDate(now.Year(), 0, 0)
 			if t.After(now.Add(48 * time.Hour)) {
 				t = t.AddDate(-1, 0, 0)

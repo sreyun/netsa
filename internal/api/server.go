@@ -3,19 +3,21 @@ package api
 
 import (
 	"context"
-	"crypto/subtle"
 	"encoding/csv"
 	"encoding/json"
 	"fmt"
 	"io/fs"
 	"net/http"
 	"net/netip"
+	"os"
 	"runtime"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
+	"netsa/internal/alert"
+	"netsa/internal/auth"
 	"netsa/internal/config"
 	"netsa/internal/detect"
 	"netsa/internal/geo"
@@ -37,16 +39,23 @@ type Server struct {
 	Static   fs.FS
 	Version  string
 	Broker   *Broker
+	Notifier *alert.Notifier
+	Auth     *auth.Manager // 为 nil 表示未开启登录
 
 	started time.Time
 	rdapSem chan struct{}
 	cache   *respCache
+	hashSem chan struct{} // 限制同时进行的密码哈希计算
 }
 
 func (s *Server) Handler() http.Handler {
 	s.started = time.Now()
 	s.rdapSem = make(chan struct{}, 4)
 	s.cache = newRespCache()
+	s.hashSem = make(chan struct{}, 4)
+	if s.Notifier == nil {
+		s.Notifier, _ = alert.New(config.AlertConfig{}, "")
+	}
 	// 聚合类接口短时缓存：多个大屏并发刷新时每个周期只计算一次
 	cached := s.cache.wrap
 	mux := http.NewServeMux()
@@ -59,6 +68,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/ip/{ip}", s.ipDetail)
 	mux.HandleFunc("GET /api/ip/{ip}/rdap", s.rdap)
 	mux.HandleFunc("GET /api/alerts", cached(time.Second, s.alerts))
+	mux.HandleFunc("GET /api/alerts/summary", cached(2*time.Second, func(w http.ResponseWriter, r *http.Request) { writeJSON(w, s.Store.AlertSummary()) }))
 	mux.HandleFunc("GET /api/map", cached(3*time.Second, func(w http.ResponseWriter, r *http.Request) {
 		res := s.Store.MapData(model.ParseSeverity(r.URL.Query().Get("level")))
 		writeJSON(w, map[string]any{"home": s.Cfg.Home, "data": res})
@@ -69,6 +79,23 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/stream", s.Broker.ServeHTTP)
 	mux.HandleFunc("GET /api/export/blocklist", s.blocklist)
 	mux.HandleFunc("GET /api/report", s.report)
+	// 登录与账号管理
+	mux.HandleFunc("POST /api/auth/login", s.authLogin)
+	mux.HandleFunc("GET /api/auth/session", s.authSession)
+	mux.HandleFunc("POST /api/auth/logout", s.authLogout)
+	mux.HandleFunc("POST /api/auth/password", s.authPassword)
+	mux.HandleFunc("GET /api/auth/users", s.authUsers)
+	mux.HandleFunc("POST /api/auth/users", s.authUserCreate)
+	mux.HandleFunc("PUT /api/auth/users/{name}", s.authUserUpdate)
+	mux.HandleFunc("DELETE /api/auth/users/{name}", s.authUserDelete)
+	mux.HandleFunc("GET /api/auth/audit", s.authAudit)
+	// 告警推送机器人管理
+	mux.HandleFunc("GET /api/alert/robots", s.alertInfo)
+	mux.HandleFunc("POST /api/alert/robots", s.robotCreate)
+	mux.HandleFunc("PUT /api/alert/robots/{id}", s.robotUpdate)
+	mux.HandleFunc("DELETE /api/alert/robots/{id}", s.robotDelete)
+	mux.HandleFunc("POST /api/alert/robots/{id}/test", s.robotTest)
+	mux.HandleFunc("POST /api/alert/test", s.robotTest)
 	if s.Static != nil {
 		files := http.FileServer(http.FS(s.Static))
 		mux.Handle("GET /", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -86,7 +113,7 @@ func (s *Server) Handler() http.Handler {
 	root.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, map[string]any{"status": "ok", "uptime": time.Since(s.started).Round(time.Second).String(), "processed": s.Pipeline.Processed()})
 	})
-	root.Handle("/", s.auth(mux))
+	root.Handle("/", s.authenticate(sameOrigin(mux)))
 	return securityHeaders(gzipHandler(root))
 }
 
@@ -97,23 +124,10 @@ func securityHeaders(next http.Handler) http.Handler {
 		h.Set("X-Content-Type-Options", "nosniff")
 		h.Set("X-Frame-Options", "DENY")
 		h.Set("Referrer-Policy", "no-referrer")
-		h.Set("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'")
-		next.ServeHTTP(w, r)
-	})
-}
-
-func (s *Server) auth(next http.Handler) http.Handler {
-	user, pass := s.Cfg.Server.Username, s.Cfg.Server.Password
-	if user == "" {
-		return next
-	}
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		u, p, ok := r.BasicAuth()
-		if !ok || subtle.ConstantTimeCompare([]byte(u), []byte(user)) != 1 || subtle.ConstantTimeCompare([]byte(p), []byte(pass)) != 1 {
-			w.Header().Set("WWW-Authenticate", `Basic realm="netsa", charset="UTF-8"`)
-			http.Error(w, "unauthorized", http.StatusUnauthorized)
-			return
+		if r.TLS != nil {
+			h.Set("Strict-Transport-Security", "max-age=31536000")
 		}
+		h.Set("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'")
 		next.ServeHTTP(w, r)
 	})
 }
@@ -139,14 +153,37 @@ func qint(r *http.Request, key string, def int) int {
 	return def
 }
 
+// displayTimezone 返回页面展示时间所用的 IANA 时区名：配置项 timezone，未配置时取进程的 TZ 环境变量
+// （容器镜像默认 Asia/Shanghai）；都没有时返回空，页面使用浏览器本地时区。
+func (s *Server) displayTimezone() string {
+	if s.Cfg.Timezone != "" {
+		return s.Cfg.Timezone
+	}
+	if tz := os.Getenv("TZ"); tz != "" && !strings.HasPrefix(tz, ":") {
+		if _, err := time.LoadLocation(tz); err == nil {
+			return tz
+		}
+	}
+	return ""
+}
+
+// now 返回配置时区下的当前时间（导出文件名、文件头中的时间）。
+func (s *Server) now() time.Time {
+	if loc, err := s.Cfg.Location(); err == nil {
+		return time.Now().In(loc)
+	}
+	return time.Now()
+}
+
 func clamp(v, lo, hi int) int {
 	return min(max(v, lo), hi)
 }
 
 func (s *Server) meta(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]any{
-		"version": s.Version, "home": s.Cfg.Home, "started": s.started, "timezone": s.Cfg.Timezone,
-		"geo_providers": s.Geo.ProviderNames(), "rdap": s.RDAP != nil, "rules": len(s.Engine.Rules()),
+		"version": s.Version, "home": s.Cfg.Home, "started": s.started, "timezone": s.displayTimezone(),
+		"time_correction": s.Cfg.TimeCorrection != "off",
+		"geo_providers":   s.Geo.ProviderNames(), "rdap": s.RDAP != nil, "rules": len(s.Engine.Rules()),
 		"china_maps": s.Geo.Gazetteer().ChinaMaps(),
 	})
 }
@@ -260,7 +297,7 @@ func (s *Server) blocklist(w http.ResponseWriter, r *http.Request) {
 		comment = "REM"
 	}
 	if format != "txt" {
-		fmt.Fprintf(&b, "%s netsa 封禁列表 生成时间 %s 等级>=%s 共 %d 个IP\n", comment, time.Now().Format("2006-01-02 15:04:05"), lvl, len(list))
+		fmt.Fprintf(&b, "%s netsa 封禁列表 生成时间 %s 等级>=%s 共 %d 个IP\n", comment, s.now().Format("2006-01-02 15:04:05"), lvl, len(list))
 	}
 	switch format {
 	case "ipset":
@@ -316,7 +353,7 @@ func (s *Server) blocklist(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) report(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Disposition", "attachment; filename=netsa-report-"+time.Now().Format("20060102-150405")+".json")
+	w.Header().Set("Content-Disposition", "attachment; filename=netsa-report-"+s.now().Format("20060102-150405")+".json")
 	writeJSON(w, Report(s.Store, 200))
 }
 

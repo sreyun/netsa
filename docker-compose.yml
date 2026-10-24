@@ -15,6 +15,8 @@ services:
     command: ["serve", "-c", "/app/configs/docker.yaml"]
     environment:
       TZ: Asia/Shanghai
+      # 可选：首次启动时管理员 admin 的初始密码；不设置则随机生成并输出在日志中（docker compose logs netsa | grep 初始密码）
+      # NETSA_ADMIN_PASSWORD: "请替换为强密码"
     ports:
       - "8080:8080"
       - "5514:5514/udp"
