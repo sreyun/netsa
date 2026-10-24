@@ -165,7 +165,7 @@ storage:
 # 告警异步批量写入（COPY），数据库暂不可用时在内存队列中缓冲并自动重连，不影响实时分析；按月自动分区，过期分区整表删除。
 archive:
   dsn: ""                       # 例如 postgres://netsa:密码@127.0.0.1:5432/netsa?sslmode=disable（跨网络连接建议 sslmode=require）
-  retention_months: 6           # 保留月数（含当月），-1 表示永久保留
+  retention_years: 0            # 保留周期（年）：0 表示永久保留（默认）；N 表示至少保留最近 N 年，更早的月分区自动删除
   # batch_size: 1000            # 每批写入条数
   # flush_interval: 2s          # 未凑满一批时的最长等待时间
   # queue_size: 100000          # 内存队列容量，数据库长时间不可用时超出部分丢弃并计数

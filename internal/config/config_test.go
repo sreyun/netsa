@@ -61,3 +61,25 @@ func TestValidate(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+// 告警归档：默认永久保留，按年设置保留周期，旧的按月配置项不再接受。
+func TestArchiveRetention(t *testing.T) {
+	dir := t.TempDir()
+	load := func(body string) (*Config, error) {
+		f := filepath.Join(dir, "c.yaml")
+		os.WriteFile(f, []byte(body), 0o644)
+		return Load(f)
+	}
+	c, err := load("archive:\n  dsn: postgres://u:p@127.0.0.1/db\n")
+	if err != nil || c.Archive.RetentionYears != 0 || c.Archive.BatchSize != 1000 {
+		t.Fatalf("默认应永久保留: %+v %v", c.Archive, err)
+	}
+	if c, err := load("archive:\n  retention_years: 3\n"); err != nil || c.Archive.RetentionYears != 3 {
+		t.Fatalf("按年设置: %+v %v", c, err)
+	}
+	for _, bad := range []string{"archive:\n  retention_years: -1\n", "archive:\n  retention_years: 101\n", "archive:\n  retention_months: 6\n"} {
+		if _, err := load(bad); err == nil {
+			t.Errorf("应报错: %q", bad)
+		}
+	}
+}

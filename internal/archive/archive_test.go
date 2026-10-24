@@ -57,13 +57,19 @@ func TestMonthsAndPartitionNames(t *testing.T) {
 	if partitionName(monthStart(now, 0)) != "netsa_alerts_p202612" {
 		t.Fatal(partitionName(monthStart(now, 0)))
 	}
-	a := &Archive{opt: Options{RetentionMonths: 6, Location: sh}}
-	if c := a.cutoff(now); !c.Equal(time.Date(2026, 7, 1, 0, 0, 0, 0, sh)) {
-		t.Fatalf("保留 6 个月（含本月）的起点应为 7 月 1 日: %v", c)
+	a := &Archive{opt: Options{RetentionYears: 1, Location: sh}}
+	if c := a.cutoff(now); !c.Equal(time.Date(2025, 12, 1, 0, 0, 0, 0, sh)) {
+		t.Fatalf("保留 1 年时应保留完整的 12 个月加当月，起点为 2025-12-01: %v", c)
 	}
-	a.opt.RetentionMonths = -1
-	if !a.cutoff(now).IsZero() {
-		t.Fatal("负数表示永久保留")
+	a.opt.RetentionYears = 3
+	if c := a.cutoff(now); !c.Equal(time.Date(2023, 12, 1, 0, 0, 0, 0, sh)) || now.AddDate(-3, 0, 0).Before(c) {
+		t.Fatalf("保留 3 年: %v", c)
+	}
+	for _, y := range []int{0, -1} {
+		a.opt.RetentionYears = y
+		if !a.cutoff(now).IsZero() || a.retentionText() != "永久保留" {
+			t.Fatal("0 表示永久保留")
+		}
 	}
 }
 
@@ -72,7 +78,7 @@ func TestCleanAndRow(t *testing.T) {
 		t.Fatalf("clean: %q", got)
 	}
 	sh, _ := time.LoadLocation("Asia/Shanghai")
-	a := &Archive{opt: Options{RetentionMonths: 6, Location: sh, Instance: "n1"}}
+	a := &Archive{opt: Options{RetentionYears: 1, Location: sh, Instance: "n1"}}
 	now := time.Now()
 	cut := a.cutoff(now)
 	// 未来时间按接收时间记录
@@ -81,7 +87,7 @@ func TestCleanAndRow(t *testing.T) {
 		t.Fatalf("row: %#v", r)
 	}
 	// 早于保留期的告警不写入
-	if _, ok := a.row(item{al: &model.Alert{Time: now.AddDate(-1, 0, 0), SrcIP: "1.1.1.1"}}, now, cut); ok {
+	if _, ok := a.row(item{al: &model.Alert{Time: now.AddDate(-2, 0, 0), SrcIP: "1.1.1.1"}}, now, cut); ok {
 		t.Fatal("过期告警应跳过")
 	}
 	// 来源不是合法 IP 时 src_ip 为空，原始字符串仍保留

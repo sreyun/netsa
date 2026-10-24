@@ -126,4 +126,4 @@ storage:
 # 连接串由 docker-compose.yml 中的环境变量 NETSA_ARCHIVE_DSN 提供（优先于此处的 dsn）。不启用时无需任何数据库。
 archive:
   dsn: ""
-  retention_months: 6           # 保留月数（含当月），-1 表示永久保留
+  retention_years: 0            # 保留周期（年）：0 表示永久保留（默认）；N 表示至少保留最近 N 年
