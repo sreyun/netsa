@@ -3,8 +3,10 @@ package store
 import (
 	"fmt"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"netsa/internal/geo"
 	"netsa/internal/model"
@@ -188,5 +190,85 @@ func TestSaveDoesNotBlockWriters(t *testing.T) {
 	}
 	if len(s2.ips) < 60000 || s2.totals.Attacks < 60000 || s2.Profile("10.0.0.5").Attacks != 1 {
 		t.Fatalf("快照恢复不完整: ips=%d attacks=%d", len(s2.ips), s2.totals.Attacks)
+	}
+}
+
+// 态势总览下钻：点击各排行 / 分布条目后列出的攻击源与告警必须与图表中的数量一致。
+func TestOverviewDrillDown(t *testing.T) {
+	s := newTestStore()
+	now := time.Now()
+	long := "/" + strings.Repeat("中", 120) // 超过 200 字节，排行中的目标会被截断
+	events := []struct {
+		ip, uri, cat, phase string
+		sev                 model.Severity
+		at                  time.Time
+	}{
+		{"198.51.100.1", "/login", "SQL注入", model.PhaseExploit, model.SevHigh, now.Add(-30 * time.Minute)},
+		{"198.51.100.2", "/login", "暴力破解", model.PhaseCredential, model.SevMedium, now.Add(-20 * time.Minute)},
+		{"203.0.113.9", long, "SQL注入", model.PhaseExploit, model.SevCritical, now.Add(-10 * time.Minute)},
+	}
+	for _, e := range events {
+		h := attackHit("r-"+e.cat, e.cat, e.sev, model.ResultBlocked)
+		h.Phase = e.phase
+		s.Record(&model.Event{Kind: model.KindWeb, SrcIP: e.ip, Host: "a.com", Method: "GET", URI: e.uri, Status: 403, Time: e.at}, []model.Hit{h})
+	}
+	o := s.Overview()
+	count := func(q AttackerQuery) int { _, n := s.Attackers(q); return n }
+	for _, kv := range o.TopCountries {
+		if n := count(AttackerQuery{Country: kv.Name}); int64(n) != kv.Value {
+			t.Errorf("国家 %s: 下钻 %d 个，图表 %d 个", kv.Name, n, kv.Value)
+		}
+	}
+	for _, kv := range o.TopCities {
+		if n := count(AttackerQuery{City: kv.Name}); int64(n) != kv.Value {
+			t.Errorf("城市 %s: 下钻 %d 个，图表 %d 个", kv.Name, n, kv.Value)
+		}
+	}
+	for _, kv := range o.TopNetTypes {
+		if n := count(AttackerQuery{NetType: kv.Name}); int64(n) != kv.Value {
+			t.Errorf("网络类型 %s: 下钻 %d 个，图表 %d 个", kv.Name, n, kv.Value)
+		}
+	}
+	if count(AttackerQuery{Category: "SQL注入"}) != 2 || count(AttackerQuery{Phase: model.PhaseCredential}) != 1 || count(AttackerQuery{Category: "XSS"}) != 0 {
+		t.Fatal("按攻击类型 / 阶段筛选攻击源错误")
+	}
+	m := s.MapData(model.SevLow)
+	for _, p := range m.Points {
+		if n := count(AttackerQuery{Place: p.Key}); n != p.Attackers {
+			t.Errorf("地图地点 %s: 下钻 %d 个，地图 %d 个", p.Name, n, p.Attackers)
+		}
+	}
+	for _, r := range m.Countries {
+		if n := count(AttackerQuery{World: r.MapName}); n != r.Attackers {
+			t.Errorf("地图国家 %s: 下钻 %d 个，地图 %d 个", r.MapName, n, r.Attackers)
+		}
+	}
+	if count(AttackerQuery{Province: "广东", CityMap: "深圳市"}) != 2 {
+		t.Fatal("按省份 / 地市筛选攻击源错误")
+	}
+	// 告警：攻击阶段、被攻击目标（含截断的长目标）与时间段
+	if n := len(s.Alerts(AlertQuery{Phase: model.PhaseExploit})); n != 2 {
+		t.Fatalf("按阶段筛选告警: %d", n)
+	}
+	for _, kv := range o.TopTargets {
+		if n := len(s.Alerts(AlertQuery{Target: kv.Name})); int64(n) != kv.Value {
+			t.Errorf("目标 %q: 下钻 %d 条，图表 %d 次", kv.Name, n, kv.Value)
+		}
+		if !utf8.ValidString(kv.Name) {
+			t.Errorf("截断后的目标不是合法 UTF-8: %q", kv.Name)
+		}
+	}
+	if n := len(s.Alerts(AlertQuery{From: now.Add(-25 * time.Minute), To: now.Add(-15 * time.Minute)})); n != 1 {
+		t.Fatalf("按时间段筛选告警: %d", n)
+	}
+	// 关键字搜索覆盖全部攻击类型（不只是列表中展示的前 4 个）
+	if count(AttackerQuery{Search: "暴力破解"}) != 1 || count(AttackerQuery{Search: "198.51.100"}) != 2 {
+		t.Fatal("攻击源关键字搜索错误")
+	}
+	// 排序稳定：分页结果不重复
+	a, _ := s.Attackers(AttackerQuery{Limit: 2})
+	b, _ := s.Attackers(AttackerQuery{Limit: 2, Offset: 2})
+	if len(a) != 2 || len(b) != 1 || a[0].IP == b[0].IP || a[1].IP == b[0].IP {
+		t.Fatalf("分页: %v %v", a, b)
 	}
 }

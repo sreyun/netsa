@@ -1,6 +1,6 @@
 # netsa —— 网络安全态势感知与攻击面分析系统
 
-基于 Go 实现，以 **nginx 访问日志** 和 **防火墙日志** 为数据源，自动识别日志格式，完成攻击检测、攻击源溯源定位、威胁评分、态势可视化与攻击面分析。单个二进制、无外部依赖（前端、地图数据与离线定位库均已内置），支持 Docker Compose 一键部署与内网离线运行。
+基于 Go 实现，以 **nginx 访问日志** 和 **防火墙日志** 为数据源，自动识别日志格式，完成攻击检测、攻击源溯源定位、威胁评分、态势可视化与攻击面分析。单个二进制、无外部依赖（前端、地图数据与离线定位库均已内置；可选接入 PostgreSQL 长期归档告警），支持 Docker Compose 一键部署与内网离线运行。
 
 ## 功能
 
@@ -13,10 +13,11 @@
 | 攻击源溯源 | **真实 IP 还原**：可信代理（含 Cloudflare 内置网段）+ 多种客户端地址头（CF-Connecting-IP、True-Client-IP、Ali-CDN-Real-IP、X-Real-IP、X-Forwarded-For、RFC 7239 Forwarded）右向左解析，识别 XFF 伪造与**绕过 CDN 直连源站**<br>**多源定位**：ip2region（国内到城市+运营商）、MaxMind GeoLite2（经纬度+精度半径+ASN）、ip-api 在线库（经纬度、代理/IDC/移动网络标记）、反向 DNS、**区划地名库**（离线换算城市/省/国家中心坐标）、**自定义网段**（内网办公区/分支机构/VPN 地址池定位到具体地点）；**交叉比对给出置信度**；定位库**热更新**；按需 **RDAP/WHOIS** 查询网段归属与滥用投诉邮箱；识别 IDC/云主机、代理/VPN、Tor、网络空间测绘机构 |
 | 威胁画像 | 每个 IP 的威胁评分（0-100）、等级、攻击链阶段（侦察→凭证→利用→后门→影响）、命中规则、攻击目标、端口、UA、最近告警、处置命令；**同源关联分析**：按网段、ASN、工具指纹、攻击手法、攻击目标、扫描端口、测绘机构与时间等线索找出疑似同一攻击者/团伙的其他 IP |
 | 攻击面分析 | 自动梳理 Web 入口与网络服务暴露面；发现源码/密钥/备份/配置泄露、调试与管理接口暴露、高危端口对公网放行、疑似被攻破接口、WAF 缺失；识别技术栈；输出处置建议与风险指数 |
-| 态势大屏 | **世界 / 中国双视图攻击地图**：城市级标注、国家/省份热力着色、点击省份下钻到地市、点击地点查看该地攻击源列表、实时飞线与告警闪烁、刷新时保留缩放视角、命中自定义网段的内网攻击源以菱形标注；威胁指数、攻击类型/阶段/来源城市/网络类型分布、趋势、实时告警推送（SSE）、全屏大屏模式；统一栅格布局，各面板在常规与全屏下均对齐填满 |
+| 态势大屏 | **世界 / 中国双视图攻击地图**：城市级标注、国家/省份热力着色、点击省份下钻到地市、点击地点查看该地攻击源列表、实时飞线与告警闪烁、刷新时保留缩放视角、命中自定义网段的内网攻击源以菱形标注；威胁指数、攻击类型/阶段/来源城市/网络类型分布、趋势、实时告警推送（SSE）、全屏大屏模式；统一栅格布局，各面板在常规与全屏下均对齐填满<br>**全面下钻**：KPI 卡片、威胁指数、攻击类型、攻击链阶段、趋势图任意时间点、来源国家 / 城市 / 网络类型、被攻击目标、地图上的国家 / 省份 / 地市 / 地点均可点击，直接列出对应的攻击源或告警（条目数量与图表一致），并可一键转到归档库查询更早的告警 |
 | 处置联动 | 导出封禁列表（txt / nginx deny / 幂等 iptables / ipset / firewalld / Windows / CSV）、JSON 分析报告 |
 | 告警推送 | **钉钉 / 企业微信 / 飞书群机器人**（及通用 JSON Webhook）：每个机器人可**多选推送等级（中危 / 高危 / 严重）**，在大屏中添加、测试、启停；支持加签；去重、合并、按平台限速，超出部分汇总推送不丢失；附“查看溯源详情”链接 |
 | 登录与权限 | 专业安全平台风格的登录页（动态点阵地球与攻击轨迹），账号密码登录（PBKDF2 哈希），**管理员 / 只读**两种角色，首次登录强制修改初始密码，登录失败锁定，登录与操作审计，会话自动续期，可选 HTTPS |
+| 告警归档（可选） | 配置 PostgreSQL 后告警**异步批量写入、按月自动分区**，长期留存；按**时间 / IP / 网段 / 规则 / 等级 / 类型 / 关键字**检索历史告警，统计 TOP 来源与规则、每日趋势，导出 CSV；不配置时保持单二进制无依赖部署 |
 | 时间与时区 | 日志时间按 `timezone` 解析，**实时日志整时区偏差自动校正**（如设备按 UTC 记录导致慢 8 小时），页面与告警消息统一按配置时区展示 |
 
 ## 快速开始（Docker Compose）
@@ -42,7 +43,7 @@ docker compose logs -f netsa
 ## 本地运行
 
 ```bash
-# 编译（需要 Go 1.22+；纯 Go 实现，无 CGO）
+# 编译（需要 Go 1.23+；纯 Go 实现，无 CGO）
 go build -o bin/netsa ./cmd/netsa
 
 # 生成 6 小时演示日志并启动，浏览器打开 http://localhost:8080（账号 admin / Netsa@demo2026）
@@ -76,7 +77,7 @@ GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -trimpath -ldflags "-s -w" -o bin
                                                                 │
              ┌───────────── 状态库（攻击者画像 / 告警 / 时间序列 / 攻击面）──── 快照持久化
              │                       │
-   多源溯源定位（离线同步 + 在线/rDNS 异步 + 区划地名库）    Webhook 告警 / SSE 推送
+   多源溯源定位（离线同步 + 在线/rDNS 异步 + 区划地名库）    Webhook 告警 / SSE 推送 / PostgreSQL 归档（可选）
              │
         REST API + 内嵌 Web 大屏（世界/中国/省级地图）
 ```
@@ -92,6 +93,7 @@ internal/store/       攻击者画像与评分、告警、时间序列、地图�
 internal/ingest/      文件跟踪、批量读取、syslog 接收
 internal/api/         REST API、SSE、封禁列表导出、安全响应头
 internal/auth/        登录账号、PBKDF2 密码哈希、签名会话、登录失败锁定与审计
+internal/archive/     可选的 PostgreSQL 告警归档（异步 COPY 批量写入、按月分区、历史查询）
 internal/alert/       钉钉 / 企业微信 / 飞书 / Webhook 告警推送（多选等级、合并、限速、加签）
 internal/safe/        异常保护（单条畸形数据不影响服务）
 web/static/           前端大屏（ECharts、世界地图、中国省级/地市级地图已内置，可离线使用）
@@ -212,7 +214,7 @@ IP 详情页的“同源关联分析”在全部攻击源中查找与当前 IP �
 - 密码使用 PBKDF2-HMAC-SHA256（60 万次迭代、随机盐）存储在 `users.json`（权限 0600，默认与快照同目录）；密码至少 8 位且包含字母、数字、符号中的两类。
 - 会话：HttpOnly + SameSite Cookie，签名令牌重启后仍有效，有访问时自动续期（`server.session_ttl`，默认 12 小时），自登录起最长 30 天；修改密码、角色变化、删除账号或退出登录后立即失效。
 - 防暴力破解：同一账号同一来源连续失败 5 次锁定 15 分钟（不影响管理员从其他地址登录）；同一来源尝试多个账号失败 20 次锁定该来源；同一账号来自所有来源失败 50 次锁定该账号。账号不存在与密码错误返回相同提示与耗时。所有登录尝试记录在“系统管理 → 登录记录”。
-- **审计日志**：登录（含失败与锁定）、退出、修改密码、账号增删改、告警机器人的添加 / 修改 / 删除 / 测试、封禁列表导出与分析报告下载，均记录操作人、来源 IP、时间与结果，在“系统管理 → 审计日志”查看（保留最近 500 条，随账号文件持久化）。
+- **审计日志**：登录（含失败与锁定）、退出、修改密码、账号增删改、告警机器人的添加 / 修改 / 删除 / 测试、封禁列表导出、分析报告下载与历史告警导出，均记录操作人、来源 IP、时间与结果，在“系统管理 → 审计日志”查看（保留最近 500 条，随账号文件持久化）。
 - 忘记密码：在服务器上执行 `netsa passwd -c configs/config.yaml -u admin`（容器：`docker compose exec netsa /app/netsa passwd -c /app/configs/docker.yaml -u admin -p '新密码'`），运行中的服务自动生效。
 - 脚本调用 API 可使用 HTTP Basic 认证：`curl -u admin:密码 http://服务器:8080/api/export/blocklist?format=txt`。
 - HTTPS：设置 `server.tls_cert` / `server.tls_key` 直接提供 HTTPS（并启用 HSTS），或部署在 HTTPS 反向代理之后。
@@ -232,6 +234,36 @@ IP 详情页的“同源关联分析”在全部攻击源中查找与当前 IP �
 - **降噪**：同一 IP、同一规则、同一研判结果在 `alert.dedup_window`（默认 10 分钟）内只推送一次；2 秒内的多条告警合并为一条消息；钉钉 / 企业微信每个机器人每分钟最多 18 条、飞书 60 条，超出部分汇总为“另有 N 条”推送，不会静默丢失；网络错误或平台限流时自动重试。
 - **安全**：日志中的攻击载荷与链接已转义，不会在群聊中渲染为可点击的链接或图片；界面只允许填写官方机器人地址（防止借服务端访问任意地址），Webhook 令牌与密钥不会回显到页面；机器人配置保存在 `alert-robots.json`（权限 0600）。
 - 私有化部署的机器人或通用 JSON Webhook（对接 SOAR、工单系统）请在配置文件 `alert.webhooks` 中配置，示例见 [configs/config.yaml](configs/config.yaml)。
+
+## 告警归档（可选，PostgreSQL）
+
+默认所有数据保存在内存并定期快照，内存中只保留最近的告警（`storage.max_alerts`）。需要**长期留存、按条件检索历史告警或满足日志留存合规要求**时，可接入 PostgreSQL（11 及以上，推荐 15+）：
+
+```yaml
+archive:
+  dsn: postgres://netsa:密码@127.0.0.1:5432/netsa?sslmode=disable
+  retention_months: 6     # 保留月数（含当月），-1 永久保留
+```
+
+也可使用环境变量 `NETSA_ARCHIVE_DSN`（优先于配置文件，避免口令写入配置）。Docker Compose 部署可直接启用自带的 PostgreSQL：
+
+```bash
+# .env（两处密码相同）
+POSTGRES_PASSWORD=强密码
+NETSA_ARCHIVE_DSN=postgres://netsa:强密码@postgres:5432/netsa?sslmode=disable
+```
+
+```bash
+docker compose --profile archive up -d
+```
+
+- **准备数据库**：只需一个普通账号（无需超级用户）和它拥有的数据库，例如 `CREATE ROLE netsa LOGIN PASSWORD '…'; CREATE DATABASE netsa OWNER netsa;`。表结构与分区由 netsa 自动创建与维护。
+- **写入**：告警进入内存队列，后台按批（默认 1000 条或 2 秒）用 COPY 写入，不影响实时分析（开发机本地 PostgreSQL 实测 3 个实例并发写入约 6 万条/秒）。
+- **幂等去重**：每条告警按内容（时间、来源、规则、目标、证据等）与出现序号计算指纹，同一份日志被重复分析（`from_beginning: true` 时重启、`netsa analyze` 重复补录同一批日志）时，内容相同的告警只归档一次，跳过的数量显示在“数据源 → 告警归档”中；同一秒内内容完全相同的多次真实攻击仍全部保留。多个数据源并发读取时，个别行为检测类告警（如扫描、暴力破解）的触发时刻会随事件交错顺序略有差异，这类告警可能再次写入。数据库暂不可用时 netsa 照常启动与分析，告警在队列中缓冲（默认 10 万条）并自动重连写入，队列满时丢弃并计数；退出时写完队列中剩余的告警。攻击载荷中的 NUL 字节与非法 UTF-8 会被清理，不会导致整批写入失败。
+- **分区**：表 `netsa_alerts` 按 `timezone` 的自然月分区（`netsa_alerts_p202610` …），自动提前创建下月分区；超出保留期的分区整表删除，清理耗时与数据量无关。多台 netsa 可共用一个数据库（写入实例名区分来源，建表与建分区由咨询锁串行化）。
+- **查询**：大屏“告警事件 → 历史告警（归档库）”按时间范围、来源 IP / 网段（IPv4 / IPv6 CIDR）、规则 ID 或名称、等级、攻击类型、研判结果、日志来源、关键字（目标 URL / 载荷 / 规则名称）检索，展示统计（各等级数量、TOP 10 来源 IP 与规则、每日趋势），可导出 CSV（最多 20 万条，记入审计日志）；IP 溯源详情中可一键查看该 IP 的全部历史告警。所有查询参数化执行，限制并发与超时，防止拖垮数据库。
+- **离线分析**：`netsa analyze` 同样会把分析出的告警写入归档，可用于把历史日志补录到归档库。
+- **状态**：“数据源”页面显示连接状态、已写入 / 队列 / 丢弃数量、最近错误与各分区的行数和占用空间（`GET /api/archive/status`）。
 
 ## 时间与时区
 
@@ -264,6 +296,9 @@ IP 详情页的“同源关联分析”在全部攻击源中查找与当前 IP �
 | `geo.custom` | 自定义网段位置（内网办公区、分支机构、VPN 地址池等） |
 | `geo.reload_interval` | 定位库与自定义网段的热更新检查周期，`0` 关闭 |
 | `storage.snapshot` | 状态快照路径（`.gz` 结尾自动压缩） |
+| `archive.dsn` / `NETSA_ARCHIVE_DSN` | 可选的 PostgreSQL 告警归档连接串，不配置则不启用 |
+| `archive.retention_months` | 归档保留月数（默认 6，含当月；`-1` 永久保留） |
+| `archive.batch_size` / `flush_interval` / `queue_size` | 每批写入条数（1000）/ 最长等待（2s）/ 内存队列容量（10 万） |
 
 ## API
 
@@ -279,14 +314,17 @@ IP 详情页的“同源关联分析”在全部攻击源中查找与当前 IP �
 | `GET /api/overview` | 态势总览（KPI、分布、城市排行、威胁指数） |
 | `GET /api/timeline?minutes=360` | 趋势数据 |
 | `GET /api/map?level=` | 地图数据：城市级地点（含攻击源列表）、国家与省份着色统计 |
-| `GET /api/attackers?level=&q=&sort=&limit=&offset=` | 攻击源列表 |
+| `GET /api/attackers?level=&q=&sort=&limit=&offset=` | 攻击源列表；下钻条件 `country`、`city`、`net_type`、`isp`、`world`、`province`、`city_map`、`place`、`category`、`phase` |
 | `GET /api/ip/{ip}` / `GET /api/ip/{ip}/rdap` | IP 溯源详情（含 `related` 同源关联分析）/ WHOIS 注册信息 |
-| `GET /api/alerts?severity=&category=&result=&kind=&ip=&q=` | 告警查询 |
+| `GET /api/alerts?severity=&category=&result=&kind=&ip=&q=` | 告警查询；下钻条件 `phase`、`target`、`from` / `to`（Unix 秒或 RFC3339） |
 | `GET /api/surface` | 攻击面分析 |
 | `GET /api/sources` / `GET /api/rules` | 数据源与运行状态 / 规则列表 |
 | `GET /api/stream` | SSE 实时告警流 |
 | `GET /api/export/blocklist?format=nginx&level=high` | 导出封禁列表 |
 | `GET /api/report` | 完整 JSON 报告 |
+| `GET /api/archive/status` | 告警归档状态与分区信息 |
+| `GET /api/archive/alerts?from=&to=&ip=&rule=&severity=&category=&result=&kind=&q=&limit=&offset=` | 历史告警查询（`ip` 可为 CIDR；时间为 RFC3339 或 `2006-01-02T15:04`，按 `timezone` 解析，默认最近 7 天） |
+| `GET /api/archive/stats?…` / `GET /api/archive/export?…` | 历史告警统计 / 导出 CSV（参数同上） |
 
 ## 注意事项
 

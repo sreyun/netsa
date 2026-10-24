@@ -6,7 +6,9 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -259,5 +261,76 @@ func TestSecurityHardening(t *testing.T) {
 	}
 	if !got["创建账号"] || !got["导出封禁列表"] {
 		t.Fatalf("操作审计缺失: %+v", audit)
+	}
+}
+
+// 实时告警长连接：退出登录后，已建立的连接在下一次心跳时断开，不再继续推送告警。
+func TestStreamClosesAfterLogout(t *testing.T) {
+	s, _ := testServer(t, "admin", "Adm1n-secret")
+	s.Broker.PingEvery = 50 * time.Millisecond
+	h := s.Handler()
+	srv := httptest.NewServer(h)
+	defer srv.Close()
+	cookies := login(t, h, "admin", "Adm1n-secret")
+	// 配置文件账号首次登录也可直接使用（MustChange 仅对自动生成的初始密码生效）
+	req, _ := http.NewRequest(http.MethodGet, srv.URL+"/api/stream", nil)
+	for _, c := range cookies {
+		req.AddCookie(c)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil || resp.StatusCode != 200 {
+		t.Fatalf("建立实时告警连接失败: %v %v", err, resp)
+	}
+	defer resp.Body.Close()
+	ended := make(chan struct{})
+	go func() {
+		buf := make([]byte, 1024)
+		for {
+			if _, err := resp.Body.Read(buf); err != nil {
+				close(ended)
+				return
+			}
+		}
+	}()
+	select {
+	case <-ended:
+		t.Fatal("会话有效时连接不应断开")
+	case <-time.After(200 * time.Millisecond):
+	}
+	if rec := do(h, http.MethodPost, "/api/auth/logout", "", cookies, "Origin", "http://example.com", "Host", "example.com"); rec.Code != 200 {
+		t.Fatalf("退出登录: %d", rec.Code)
+	}
+	select {
+	case <-ended:
+	case <-time.After(2 * time.Second):
+		t.Fatal("退出登录后实时告警连接未断开")
+	}
+}
+
+// 态势总览下钻参数：攻击源按地域 / 网络类型 / 攻击类型筛选，告警按阶段 / 目标 / 时间段筛选。
+func TestDrillDownParams(t *testing.T) {
+	s, st := testServer(t, "", "")
+	h := s.Handler()
+	now := time.Now()
+	st.Record(&model.Event{Kind: model.KindWeb, SrcIP: "198.51.100.30", Host: "a.com", Method: "GET", URI: "/login", Status: 403, Time: now.Add(-30 * time.Minute)},
+		[]model.Hit{{RuleID: "r1", Name: "r1", Category: "SQL注入", Severity: model.SevHigh, Phase: model.PhaseExploit, Result: model.ResultBlocked}})
+	st.Record(&model.Event{Kind: model.KindWeb, SrcIP: "198.51.100.31", Host: "a.com", Method: "GET", URI: "/admin", Status: 404, Time: now.Add(-5 * time.Minute)},
+		[]model.Hit{{RuleID: "r2", Name: "r2", Category: "暴力破解", Severity: model.SevMedium, Phase: model.PhaseCredential, Result: model.ResultFailed}})
+	total := func(q string) int {
+		var r struct{ Total int }
+		json.Unmarshal(get(h, "/api/attackers?"+q).Body.Bytes(), &r)
+		return r.Total
+	}
+	count := func(q string) int {
+		var r []map[string]any
+		json.Unmarshal(get(h, "/api/alerts?"+q).Body.Bytes(), &r)
+		return len(r)
+	}
+	if total("category=SQL注入") != 1 || total("phase=credential") != 1 || total("category=XSS") != 0 || total("") != 2 {
+		t.Fatal("攻击源下钻参数无效")
+	}
+	if count("phase=exploit") != 1 || count("target=a.com+/admin") != 1 || count("from="+strconv.FormatInt(now.Add(-10*time.Minute).Unix(), 10)) != 1 ||
+		count("to="+url.QueryEscape(now.Add(-10*time.Minute).Format(time.RFC3339))) != 1 || count("from=bad") != 2 {
+		t.Fatal("告警下钻参数无效")
 	}
 }

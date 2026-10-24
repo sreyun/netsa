@@ -107,6 +107,7 @@ type Manager struct {
 	fails   map[string]*failure  // "u:用户名" / "ip:地址"
 	audit   []Record
 	fileMod time.Time // 账号文件的修改时间（命令行修改密码后自动重新加载）
+	statAt  time.Time // 最近一次检查账号文件的时间（每个请求都要校验会话，检查频率限制为每秒一次）
 	basicOK sync.Map  // Basic 认证成功结果缓存：摘要 → 到期时间，避免脚本每次请求都做一次耗时的哈希
 	nowFunc func() time.Time
 }
@@ -225,6 +226,7 @@ func (m *Manager) reloadIfChanged() {
 	if m.opt.File == "" {
 		return
 	}
+	m.statAt = time.Now()
 	if fi, err := os.Stat(m.opt.File); err == nil && !fi.ModTime().Equal(m.fileMod) {
 		if err := m.load(); err != nil {
 			log.Printf("[auth] 重新加载账号文件失败: %v", err)
@@ -447,7 +449,9 @@ func (m *Manager) Verify(token string) (s *Session, refresh string, ok bool) {
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.reloadIfChanged()
+	if time.Since(m.statAt) >= time.Second { // 会话校验是每个请求的热路径，不必每次都读取文件状态
+		m.reloadIfChanged()
+	}
 	u := m.users[c.U]
 	if u == nil || u.Gen != c.G {
 		return nil, "", false
@@ -476,6 +480,13 @@ func (m *Manager) Logout(s *Session) {
 	defer m.mu.Unlock()
 	m.revoked[s.ID] = s.Expires.Add(m.opt.TTL)
 	m.saveLocked()
+}
+
+// HasUser 判断账号是否存在。
+func (m *Manager) HasUser(name string) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.users[name] != nil
 }
 
 // CheckBasic 校验 HTTP Basic 认证（供脚本调用 API）。成功结果缓存 5 分钟，失败计入锁定统计。

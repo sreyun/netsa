@@ -113,6 +113,21 @@ func (s *Server) currentSession(w http.ResponseWriter, r *http.Request) (*auth.S
 	return nil, nil
 }
 
+// sessionAlive 返回检查请求所用登录会话是否仍然有效的函数（用于 SSE 等长连接）；未开启登录时返回 nil。
+func (s *Server) sessionAlive(r *http.Request) func() bool {
+	if s.Auth == nil {
+		return nil
+	}
+	if c, err := r.Cookie(sessionCookie); err == nil && c.Value != "" {
+		token := c.Value
+		return func() bool { _, _, ok := s.Auth.Verify(token); return ok }
+	}
+	if u, _, ok := r.BasicAuth(); ok { // Basic 认证不重复计算密码哈希，只检查账号仍然存在
+		return func() bool { return s.Auth.HasUser(u) }
+	}
+	return func() bool { return false }
+}
+
 // acquireHash 限制同时进行的密码哈希计算（每次约数百毫秒 CPU），防止大量登录请求耗尽 CPU。
 func (s *Server) acquireHash() bool {
 	select {
