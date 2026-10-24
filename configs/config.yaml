@@ -3,11 +3,25 @@
 # 不带时区信息的日志时间（syslog、Windows 防火墙、FortiGate 等）按此时区解析，为空则使用系统时区
 timezone: Asia/Shanghai
 
+# 实时日志与实际时间相差整时区时自动校正（例如服务器 / 设备按 UTC 记录，而 timezone 为 Asia/Shanghai，
+# 导致时间慢 8 小时）。auto 为默认值，off 关闭。校正情况显示在“数据源”页面。
+time_correction: auto
+
 server:
   listen: ":8080"
-  # 设置后启用 HTTP Basic 认证，强烈建议在公网部署时开启
+  # 登录认证默认开启。未配置下方账号时，首次启动自动创建管理员 admin，初始密码输出在启动日志中，
+  # 首次登录后须修改密码；更多账号（管理员 / 只读）在大屏“系统管理”中添加。
+  # 仅在可信内网、或由前置统一认证网关负责认证时才设为 false。
+  auth: true
+  # 可选：配置文件中的管理员账号（只读，不能在界面修改密码）。password 建议使用 `netsa hash-password` 生成的哈希
   username: ""
   password: ""
+  # 账号文件（密码哈希、会话签名密钥、登录记录），默认与 storage.snapshot 同目录的 users.json
+  users_file: ""
+  session_ttl: 12h   # 登录有效期，有访问时自动续期；自登录起最长 30 天
+  # 设置证书后直接提供 HTTPS（公网部署建议开启，或置于 HTTPS 反向代理之后）
+  tls_cert: ""
+  tls_key: ""
 
 # 被保护资产所在位置（用于在攻击地图上绘制攻击连线）
 home:
@@ -122,12 +136,22 @@ detect:
     flood_events: 5000
 
 # 告警推送（威胁等级提升至高危及以上、疑似攻击成功时推送）
+# 告警推送：钉钉 / 企业微信 / 飞书群机器人，推荐直接在大屏“告警推送”页面添加（可测试、可分别选择推送等级）。
+# 下列配置文件方式适合批量部署或私有化部署的机器人地址。
 alert:
+  base_url: ""          # 大屏访问地址（如 https://soc.example.com），设置后告警消息附带“查看溯源详情”链接
+  dedup_window: 10m     # 同一 IP、同一规则、同一研判结果在该时间内只推送一次
+  robots_file: ""       # 界面中添加的机器人保存位置，默认与 storage.snapshot 同目录的 alert-robots.json
   webhooks: []
   #  - name: 钉钉安全群
-  #    type: dingtalk            # generic | dingtalk | wecom | feishu
+  #    type: dingtalk            # dingtalk | wecom | feishu | generic（通用 JSON）
   #    url: https://oapi.dingtalk.com/robot/send?access_token=xxx
-  #    min_severity: high
+  #    secret: SECxxxx           # 机器人安全设置为“加签”时填写（钉钉 / 飞书）
+  #    levels: [high, critical]  # 推送等级，可多选：medium / high / critical
+  #  - name: 飞书值班群
+  #    type: feishu
+  #    url: https://open.feishu.cn/open-apis/bot/v2/hook/xxx
+  #    levels: [medium, high, critical]
 
 storage:
   snapshot: state/netsa-state.json.gz   # 定期快照，重启后恢复态势数据

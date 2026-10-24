@@ -2,7 +2,9 @@
 package main
 
 import (
+	"bufio"
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -23,6 +25,7 @@ import (
 
 	"netsa/internal/alert"
 	"netsa/internal/api"
+	"netsa/internal/auth"
 	"netsa/internal/config"
 	"netsa/internal/demo"
 	"netsa/internal/detect"
@@ -36,7 +39,7 @@ import (
 	"netsa/web"
 )
 
-const version = "1.0.0"
+const version = "1.1.0"
 
 func usage() {
 	fmt.Fprintf(os.Stderr, `netsa %s —— 网络安全态势感知与攻击面分析系统
@@ -46,6 +49,8 @@ func usage() {
   netsa analyze  [选项] <日志文件...>            离线分析日志（自动识别格式，支持通配符与 .gz）
   netsa simulate -o demo-logs [-live]            生成演示日志
   netsa rules    [-rules custom.yaml]            列出检测规则
+  netsa passwd   -c config.yaml -u admin         重置登录密码（忘记密码时使用）
+  netsa hash-password                           生成密码哈希（用于配置文件 server.password）
   netsa version
 
 运行 "netsa <命令> -h" 查看各命令选项。
@@ -68,6 +73,10 @@ func main() {
 		err = cmdSimulate(os.Args[2:])
 	case "rules":
 		err = cmdRules(os.Args[2:])
+	case "passwd":
+		err = cmdPasswd(os.Args[2:])
+	case "hash-password":
+		err = cmdHashPassword(os.Args[2:])
 	case "version", "-v", "--version":
 		fmt.Println("netsa", version)
 	default:
@@ -100,6 +109,7 @@ func build(cfg *config.Config) (*app, error) {
 		return nil, err
 	}
 	parser.Location = loc
+	alert.Location = loc // 告警消息中的时间按同一时区展示
 	gaz, err := geo.LoadGazetteer(staticFS(cfg))
 	if err != nil {
 		return nil, fmt.Errorf("加载地图地名库失败: %w", err)
@@ -147,7 +157,9 @@ func build(cfg *config.Config) (*app, error) {
 	a.store = store.New(cfg.Storage.MaxIPs, cfg.Storage.MaxAlerts, cfg.Detect.AlertsPerRule, cfg.Storage.Retention)
 	a.store.GeoLookup = a.geo.Lookup
 	a.store.IntelMatch = a.intel.Match
-	a.notifier = alert.New(cfg.Alert)
+	if a.notifier, err = alert.New(cfg.Alert, robotsFile(cfg)); err != nil {
+		return nil, err
+	}
 	a.broker = api.NewBroker()
 	a.pipe = &pipeline.Pipeline{
 		Engine: a.engine, Behavior: detect.NewBehavior(cfg.Detect.Thresholds), Store: a.store, Geo: a.geo,
@@ -157,16 +169,67 @@ func build(cfg *config.Config) (*app, error) {
 	a.pipe.SetWhitelist(cfg.Detect.Whitelist)
 	a.geo.OnUpdate = a.pipe.OnGeoUpdate
 	a.ingest = ingest.NewManager(20000)
+	a.ingest.AutoTime = cfg.TimeCorrection != "off"
 	return a, nil
 }
 
-func (a *app) server(listen string) *http.Server {
+func (a *app) server(listen string) (*http.Server, error) {
 	s := &api.Server{
 		Cfg: a.cfg, Store: a.store, Ingest: a.ingest, Pipeline: a.pipe, Geo: a.geo, Engine: a.engine,
-		RDAP: a.rdap, Static: staticFS(a.cfg), Version: version, Broker: a.broker,
+		RDAP: a.rdap, Static: staticFS(a.cfg), Version: version, Broker: a.broker, Notifier: a.notifier,
 	}
-	// 不设置 Read/WriteTimeout：SSE 长连接会被其超时中断
-	return &http.Server{Addr: listen, Handler: s.Handler(), ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 120 * time.Second, MaxHeaderBytes: 64 << 10}
+	if a.cfg.Server.AuthEnabled() {
+		m, initial, err := auth.New(auth.Options{
+			ConfigUser: a.cfg.Server.Username, ConfigPassword: a.cfg.Server.Password, File: usersFile(a.cfg),
+			TTL: a.cfg.Server.SessionTTL, InitialAdmin: os.Getenv("NETSA_ADMIN_PASSWORD"),
+		})
+		if err != nil {
+			return nil, fmt.Errorf("初始化登录账号失败: %w", err)
+		}
+		s.Auth = m
+		if initial != "" {
+			log.Printf("[auth] ==================================================")
+			log.Printf("[auth] 已创建管理员账号 admin，初始密码: %s", initial)
+			log.Printf("[auth] 首次登录后须修改密码；忘记密码可执行 netsa passwd -u admin 重置")
+			log.Printf("[auth] ==================================================")
+		}
+		if usersFile(a.cfg) == "" {
+			log.Printf("[auth] 警告: 未配置 storage.snapshot 或 server.users_file，账号只保存在内存中，重启后需重新登录")
+		}
+	} else {
+		log.Printf("[auth] 警告: 已关闭登录认证（server.auth: false），任何能访问该端口的人都可以查看和修改配置")
+	}
+	// 不设置 Read/WriteTimeout：SSE 长连接会被其超时中断；读取请求头与请求体分别限时，防止慢速攻击
+	return &http.Server{
+		Addr: listen, Handler: s.Handler(), ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 120 * time.Second, MaxHeaderBytes: 64 << 10,
+		TLSConfig: &tls.Config{MinVersion: tls.VersionTLS12},
+	}, nil
+}
+
+// listen 启动 HTTP 或 HTTPS 服务（配置了证书时）。
+func (a *app) listen(srv *http.Server) error {
+	if c := a.cfg.Server; c.TLSCert != "" {
+		return srv.ListenAndServeTLS(c.TLSCert, c.TLSKey)
+	}
+	return srv.ListenAndServe()
+}
+
+func (a *app) scheme() string {
+	if a.cfg.Server.TLSCert != "" {
+		return "https"
+	}
+	return "http"
+}
+
+// usersFile 返回账号文件位置：server.users_file，或 storage.snapshot 所在目录。
+func usersFile(cfg *config.Config) string {
+	if cfg.Server.UsersFile != "" {
+		return cfg.Server.UsersFile
+	}
+	if cfg.Storage.Snapshot != "" {
+		return filepath.Join(filepath.Dir(cfg.Storage.Snapshot), "users.json")
+	}
+	return ""
 }
 
 func cmdServe(args []string) error {
@@ -216,10 +279,13 @@ func cmdServe(args []string) error {
 		return fmt.Errorf("启动 syslog 失败: %w", err)
 	}
 
-	srv := a.server(cfg.Server.Listen)
+	srv, err := a.server(cfg.Server.Listen)
+	if err != nil {
+		return err
+	}
 	go func() {
-		log.Printf("[web] 态势感知大屏: http://%s", displayAddr(cfg.Server.Listen))
-		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		log.Printf("[web] 态势感知大屏: %s://%s", a.scheme(), displayAddr(cfg.Server.Listen))
+		if err := a.listen(srv); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			log.Printf("[web] %v", err)
 			stop()
 		}
@@ -284,6 +350,17 @@ func (a *app) reloadGeo(ctx context.Context, cfgPath string) {
 		n := a.store.RefreshGeo(a.geo.Relocate)
 		log.Printf("[geo] 定位库已热更新: %s，%d 个攻击源归属地发生变化", strings.Join(changed, ", "), n)
 	}
+}
+
+// robotsFile 返回界面添加的告警机器人的保存位置：alert.robots_file，或 storage.snapshot 所在目录。
+func robotsFile(cfg *config.Config) string {
+	if cfg.Alert.RobotsFile != "" {
+		return cfg.Alert.RobotsFile
+	}
+	if cfg.Storage.Snapshot != "" {
+		return filepath.Join(filepath.Dir(cfg.Storage.Snapshot), "alert-robots.json")
+	}
+	return ""
 }
 
 // anyReady 判断是否至少有一个离线定位库已加载。
@@ -387,13 +464,16 @@ func cmdAnalyze(args []string) error {
 		fmt.Printf("\nJSON 报告已写入 %s\n", *out)
 	}
 	if *listen != "" {
-		srv := a.server(*listen)
+		srv, err := a.server(*listen)
+		if err != nil {
+			return err
+		}
 		go func() {
 			<-ctx.Done()
 			srv.Close()
 		}()
-		fmt.Printf("\nWeb 大屏: http://%s  (Ctrl+C 退出)\n", displayAddr(*listen))
-		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		fmt.Printf("\nWeb 大屏: %s://%s  (Ctrl+C 退出)\n", a.scheme(), displayAddr(*listen))
+		if err := a.listen(srv); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			return err
 		}
 	}
@@ -415,7 +495,7 @@ func printReport(a *app, files []string, elapsed time.Duration, top int) {
 
 	fmt.Println()
 	fmt.Println("==================== 态势总览 ====================")
-	fmt.Printf("时间范围: %s ~ %s\n", o.From.Format("2006-01-02 15:04:05"), o.To.Format("2006-01-02 15:04:05"))
+	fmt.Printf("时间范围: %s ~ %s\n", o.From.In(parser.Location).Format("2006-01-02 15:04:05"), o.To.In(parser.Location).Format("2006-01-02 15:04:05"))
 	fmt.Printf("Web 请求 %d | 防火墙事件 %d | 独立来源 IP %d | 攻击 IP %d\n", o.Totals.Web, o.Totals.Firewall, o.UniqueIPs, o.Attackers)
 	fmt.Printf("攻击事件 %d | 已拦截 %d (%.1f%%) | 疑似成功 %d | 攻击面风险指数 %d/100\n",
 		o.Totals.Attacks, o.Totals.Blocked, o.BlockRate, o.Totals.Success, o.SurfaceScore)
@@ -533,4 +613,57 @@ func staticFS(cfg *config.Config) fs.FS {
 		return os.DirFS(cfg.Server.WebDir)
 	}
 	return web.Static()
+}
+
+// readPassword 从参数或标准输入读取密码（标准输入读取一行，便于脚本调用）。
+func readPassword(flagValue, prompt string) (string, error) {
+	if flagValue != "" {
+		return flagValue, nil
+	}
+	fmt.Fprint(os.Stderr, prompt)
+	line, err := bufio.NewReader(os.Stdin).ReadString('\n')
+	if err != nil && line == "" {
+		return "", fmt.Errorf("未读取到密码")
+	}
+	return strings.TrimRight(line, "\r\n"), nil
+}
+
+func cmdPasswd(args []string) error {
+	fs := flag.NewFlagSet("passwd", flag.ExitOnError)
+	cfgPath := fs.String("c", "configs/config.yaml", "配置文件（用于定位账号文件）")
+	user := fs.String("u", "admin", "用户名（不存在时以管理员身份创建）")
+	pass := fs.String("p", "", "新密码（不指定时从标准输入读取）")
+	fs.Parse(args)
+	cfg, err := config.Load(*cfgPath)
+	if err != nil {
+		return err
+	}
+	file := usersFile(cfg)
+	if file == "" {
+		return fmt.Errorf("配置中未设置 storage.snapshot 或 server.users_file，账号只保存在内存中，重启服务即会重新生成初始密码")
+	}
+	pw, err := readPassword(*pass, "新密码: ")
+	if err != nil {
+		return err
+	}
+	if err := auth.SetPassword(file, *user, pw); err != nil {
+		return err
+	}
+	fmt.Printf("账号 %s 的密码已更新（%s），该账号已登录的会话全部失效；运行中的服务会自动加载新密码。\n", *user, file)
+	return nil
+}
+
+func cmdHashPassword(args []string) error {
+	fs := flag.NewFlagSet("hash-password", flag.ExitOnError)
+	pass := fs.String("p", "", "密码（不指定时从标准输入读取）")
+	fs.Parse(args)
+	pw, err := readPassword(*pass, "密码: ")
+	if err != nil {
+		return err
+	}
+	if err := auth.CheckStrength("", pw); err != nil {
+		return err
+	}
+	fmt.Println(auth.HashPassword(pw))
+	return nil
 }

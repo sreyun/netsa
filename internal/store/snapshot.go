@@ -1,9 +1,11 @@
 package store
 
 import (
+	"bufio"
 	"compress/gzip"
 	"encoding/json"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -12,26 +14,35 @@ import (
 	"netsa/internal/model"
 )
 
-type snapshot struct {
-	Version    int                   `json:"version"`
-	SavedAt    time.Time             `json:"saved_at"`
-	Profiles   map[string]*IPProfile `json:"profiles"`
-	Alerts     []*model.Alert        `json:"alerts"`
-	NextID     uint64                `json:"next_id"`
-	Buckets    map[int64]*Bucket     `json:"buckets"`
-	Totals     Totals                `json:"totals"`
-	Categories map[string]int64      `json:"categories"`
-	Rules      map[string]int64      `json:"rules"`
-	RuleNames  map[string]string     `json:"rule_names"`
-	SevCount   [5]int64              `json:"sev_count"`
-	Phases     map[string]int64      `json:"phases"`
-	Results    map[string]int64      `json:"results"`
-	MinTime    time.Time             `json:"min_time"`
-	MaxTime    time.Time             `json:"max_time"`
-	Surface    *surface              `json:"surface"`
+// snapshotHead 是快照中除画像以外的部分。
+type snapshotHead struct {
+	Version    int               `json:"version"`
+	SavedAt    time.Time         `json:"saved_at"`
+	Alerts     []*model.Alert    `json:"alerts"`
+	NextID     uint64            `json:"next_id"`
+	Buckets    map[int64]*Bucket `json:"buckets"`
+	Totals     Totals            `json:"totals"`
+	Categories map[string]int64  `json:"categories"`
+	Rules      map[string]int64  `json:"rules"`
+	RuleNames  map[string]string `json:"rule_names"`
+	SevCount   [5]int64          `json:"sev_count"`
+	Phases     map[string]int64  `json:"phases"`
+	Results    map[string]int64  `json:"results"`
+	MinTime    time.Time         `json:"min_time"`
+	MaxTime    time.Time         `json:"max_time"`
+	Surface    *surface          `json:"surface"`
 }
 
+type snapshot struct {
+	snapshotHead
+	Profiles map[string]*IPProfile `json:"profiles"`
+}
+
+// saveChunk 为分批编码画像时每批的数量：批与批之间释放读锁，保存快照时不会长时间阻塞日志入库与大屏查询。
+const saveChunk = 2048
+
 // Save 将状态写入快照文件（.gz 后缀时压缩），先写临时文件再原子替换。
+// 画像分批在读锁内编码，压缩与写盘在锁外进行；状态规模很大时也只会短暂占用锁。
 func (s *Store) Save(path string) error {
 	if path == "" {
 		return nil
@@ -44,35 +55,7 @@ func (s *Store) Save(path string) error {
 	if err != nil {
 		return err
 	}
-	var w interface {
-		Write([]byte) (int, error)
-	} = f
-	var gz *gzip.Writer
-	if strings.HasSuffix(path, ".gz") {
-		gz = gzip.NewWriter(f)
-		w = gz
-	}
-	s.mu.RLock()
-	snap := snapshot{
-		Version: 1, SavedAt: time.Now(), Profiles: s.ips, NextID: s.nextID, Buckets: s.buckets, Totals: s.totals,
-		Categories: s.categories, Rules: s.rules, RuleNames: s.ruleNames, SevCount: s.sevCount, Phases: s.phases,
-		Results: s.results, MinTime: s.minTime, MaxTime: s.maxTime, Surface: s.surf,
-	}
-	n := len(s.alerts)
-	for i := 0; i < n; i++ {
-		idx := i
-		if n == s.maxAlerts {
-			idx = (s.alertHead + i) % n
-		}
-		snap.Alerts = append(snap.Alerts, s.alerts[idx])
-	}
-	err = json.NewEncoder(w).Encode(&snap)
-	s.mu.RUnlock()
-	if gz != nil {
-		if cerr := gz.Close(); err == nil {
-			err = cerr
-		}
-	}
+	err = s.writeSnapshot(f, strings.HasSuffix(path, ".gz"))
 	if cerr := f.Close(); err == nil {
 		err = cerr
 	}
@@ -81,6 +64,83 @@ func (s *Store) Save(path string) error {
 		return err
 	}
 	return os.Rename(tmp, path)
+}
+
+func (s *Store) writeSnapshot(f io.Writer, compress bool) error {
+	out := f
+	var gz *gzip.Writer
+	if compress {
+		gz, _ = gzip.NewWriterLevel(f, gzip.BestSpeed)
+		out = gz
+	}
+	w := bufio.NewWriterSize(out, 256<<10)
+
+	s.mu.RLock()
+	head := snapshotHead{
+		Version: 1, SavedAt: time.Now(), NextID: s.nextID, Buckets: s.buckets, Totals: s.totals,
+		Categories: s.categories, Rules: s.rules, RuleNames: s.ruleNames, SevCount: s.sevCount, Phases: s.phases,
+		Results: s.results, MinTime: s.minTime, MaxTime: s.maxTime, Surface: s.surf,
+	}
+	n := len(s.alerts)
+	head.Alerts = make([]*model.Alert, 0, n)
+	for i := 0; i < n; i++ {
+		idx := i
+		if n == s.maxAlerts {
+			idx = (s.alertHead + i) % n
+		}
+		head.Alerts = append(head.Alerts, s.alerts[idx])
+	}
+	headJSON, err := json.Marshal(&head)
+	ips := make([]string, 0, len(s.ips))
+	for ip := range s.ips {
+		ips = append(ips, ip)
+	}
+	s.mu.RUnlock()
+	if err != nil {
+		return err
+	}
+
+	// {...头部字段..., "profiles": {"ip": {...}, ...}}
+	w.Write(headJSON[:len(headJSON)-1])
+	w.WriteString(`,"profiles":{`)
+	first := true
+	var buf []byte
+	for i := 0; i < len(ips); i += saveChunk {
+		end := min(i+saveChunk, len(ips))
+		buf = buf[:0]
+		s.mu.RLock()
+		for _, ip := range ips[i:end] {
+			p := s.ips[ip]
+			if p == nil { // 编码期间已被淘汰
+				continue
+			}
+			b, err := json.Marshal(p)
+			if err != nil {
+				s.mu.RUnlock()
+				return err
+			}
+			if !first {
+				buf = append(buf, ',')
+			}
+			first = false
+			key, _ := json.Marshal(ip)
+			buf = append(buf, key...)
+			buf = append(buf, ':')
+			buf = append(buf, b...)
+		}
+		s.mu.RUnlock()
+		if _, err := w.Write(buf); err != nil {
+			return err
+		}
+	}
+	w.WriteString("}}\n")
+	if err := w.Flush(); err != nil {
+		return err
+	}
+	if gz != nil {
+		return gz.Close()
+	}
+	return nil
 }
 
 // Load 从快照恢复状态；文件不存在时不报错。
@@ -122,6 +182,9 @@ func (s *Store) Load(path string) error {
 		}
 		if p.Attacks > 0 {
 			p.ensureAttackMaps() // 兼容旧版本快照中缺失的字段
+		}
+		if p.Attacks > 0 || len(p.Intel) > 0 {
+			p.recompute() // 评分规则可能已更新，按当前规则重新计算等级
 		}
 		s.rebuildSketch(p)
 	}

@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex">
+<title>登录 · 网络安全态势感知平台</title>
+<link rel="stylesheet" href="login.css">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Cpath d='M16 2 4 7v8c0 7.5 5.1 13.6 12 15 6.9-1.4 12-7.5 12-15V7z' fill='%2336cfc9'/%3E%3C/svg%3E">
+</head>
+<body>
+<main class="login-wrap">
+  <section class="login-card" aria-labelledby="loginTitle">
+    <div class="login-brand">
+      <svg viewBox="0 0 32 32" class="login-logo" aria-hidden="true"><path d="M16 2 4 7v8c0 7.5 5.1 13.6 12 15 6.9-1.4 12-7.5 12-15V7z"/><path d="M11 16l3.5 3.5L21 13" class="tick"/></svg>
+      <h1 id="loginTitle">网络安全态势感知平台</h1>
+      <p>流量分析 · 攻击溯源 · 攻击面管理</p>
+    </div>
+    <form id="loginForm" class="login-form" autocomplete="on" novalidate>
+      <label class="field">
+        <span>用户名</span>
+        <input id="username" name="username" autocomplete="username" autocapitalize="off" spellcheck="false" maxlength="32" required autofocus>
+      </label>
+      <label class="field">
+        <span>密码</span>
+        <span class="pw">
+          <input id="password" name="password" type="password" autocomplete="current-password" maxlength="128" required>
+          <button type="button" id="togglePw" class="pw-toggle" aria-label="显示密码" title="显示密码">显示</button>
+        </span>
+      </label>
+      <div class="caps" id="capsHint" hidden>大写锁定已开启</div>
+      <div class="msg" id="loginMsg" role="alert"></div>
+      <button type="submit" id="loginBtn" class="login-btn">登 录</button>
+    </form>
+    <p class="login-foot">忘记密码请联系管理员，或在服务器上执行 <code>netsa passwd -u 用户名</code> 重置</p>
+  </section>
+</main>
+<script src="login.js"></script>
+</body>
+</html>

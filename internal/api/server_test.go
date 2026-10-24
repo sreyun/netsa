@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"netsa/internal/auth"
 	"netsa/internal/config"
 	"netsa/internal/detect"
 	"netsa/internal/geo"
@@ -38,6 +39,13 @@ func testServer(t *testing.T, user, pass string) (*Server, *store.Store) {
 	pipe := &pipeline.Pipeline{Engine: eng, Store: st}
 	s := &Server{Cfg: cfg, Store: st, Ingest: ingest.NewManager(1), Pipeline: pipe, Geo: res, Engine: eng,
 		Static: os.DirFS("../../web/static"), Version: "test", Broker: NewBroker()}
+	if user != "" { // 配置了账号时开启登录；为空时视为关闭登录认证
+		m, _, err := auth.New(auth.Options{ConfigUser: user, ConfigPassword: pass})
+		if err != nil {
+			t.Fatal(err)
+		}
+		s.Auth = m
+	}
 	return s, st
 }
 
@@ -117,5 +125,106 @@ func TestPipelineStopsOnCancel(t *testing.T) {
 	case <-done:
 	case <-time.After(2 * time.Second):
 		t.Fatal("取消后流水线未退出")
+	}
+}
+
+func do(h http.Handler, method, path, body string, cookies []*http.Cookie, hdr ...string) *httptest.ResponseRecorder {
+	req := httptest.NewRequest(method, path, strings.NewReader(body))
+	if body != "" {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	for i := 0; i+1 < len(hdr); i += 2 {
+		req.Header.Set(hdr[i], hdr[i+1])
+	}
+	for _, c := range cookies {
+		req.AddCookie(c)
+	}
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	return rec
+}
+
+func login(t *testing.T, h http.Handler, user, pass string) []*http.Cookie {
+	t.Helper()
+	rec := do(h, http.MethodPost, "/api/auth/login", `{"username":"`+user+`","password":"`+pass+`"}`, nil)
+	if rec.Code != 200 {
+		t.Fatalf("登录 %s 失败: %d %s", user, rec.Code, rec.Body.String())
+	}
+	return rec.Result().Cookies()
+}
+
+// 登录页、会话 Cookie、强制修改初始密码、只读角色、退出登录与跨站请求拦截。
+func TestLoginFlow(t *testing.T) {
+	s, _ := testServer(t, "admin", "Adm1n-secret")
+	h := s.Handler()
+	if rec := do(h, http.MethodGet, "/", "", nil); rec.Code != http.StatusFound || rec.Header().Get("Location") != "/login.html" {
+		t.Fatalf("未登录访问首页应跳转登录页: %d %s", rec.Code, rec.Header().Get("Location"))
+	}
+	if rec := do(h, http.MethodGet, "/login.html", "", nil); rec.Code != 200 || !strings.Contains(rec.Body.String(), "登录") {
+		t.Fatalf("登录页应可公开访问: %d", rec.Code)
+	}
+	if rec := do(h, http.MethodGet, "/app.js", "", nil); rec.Code != 401 {
+		t.Fatalf("未登录不应获取大屏资源: %d", rec.Code)
+	}
+	if rec := do(h, http.MethodPost, "/api/auth/login", `{"username":"admin","password":"wrong"}`, nil); rec.Code != 401 || rec.Header().Get("Set-Cookie") != "" {
+		t.Fatalf("错误密码: %d", rec.Code)
+	}
+	rec := do(h, http.MethodPost, "/api/auth/login", `{"username":"admin","password":"Adm1n-secret"}`, nil)
+	sc := rec.Header().Get("Set-Cookie")
+	if rec.Code != 200 || !strings.Contains(sc, "HttpOnly") || !strings.Contains(sc, "SameSite=Lax") {
+		t.Fatalf("登录成功应下发 HttpOnly Cookie: %d %s", rec.Code, sc)
+	}
+	admin := rec.Result().Cookies()
+	if rec := do(h, http.MethodGet, "/api/overview", "", admin); rec.Code != 200 {
+		t.Fatalf("登录后访问 API: %d", rec.Code)
+	}
+	if rec := do(h, http.MethodGet, "/", "", admin); rec.Code != 200 {
+		t.Fatalf("登录后访问首页: %d", rec.Code)
+	}
+	if rec := do(h, http.MethodGet, "/login.html", "", admin); rec.Code != http.StatusFound {
+		t.Fatalf("已登录访问登录页应跳回首页: %d", rec.Code)
+	}
+	// 管理员创建只读账号
+	if rec := do(h, http.MethodPost, "/api/auth/users", `{"name":"screen","role":"viewer","password":"Scr33n-pass"}`, admin); rec.Code != 200 {
+		t.Fatalf("创建账号: %d %s", rec.Code, rec.Body.String())
+	}
+	viewer := login(t, h, "screen", "Scr33n-pass")
+	if rec := do(h, http.MethodGet, "/api/overview", "", viewer); rec.Code != 403 || !strings.Contains(rec.Body.String(), "must_change_password") {
+		t.Fatalf("初始密码登录后须先修改密码: %d %s", rec.Code, rec.Body.String())
+	}
+	rec = do(h, http.MethodPost, "/api/auth/password", `{"current":"Scr33n-pass","new":"N3w-screen-pass"}`, viewer)
+	if rec.Code != 200 {
+		t.Fatalf("修改密码: %d %s", rec.Code, rec.Body.String())
+	}
+	if rec := do(h, http.MethodGet, "/api/overview", "", viewer); rec.Code != 401 {
+		t.Fatalf("修改密码后旧会话应失效: %d", rec.Code)
+	}
+	viewer = rec.Result().Cookies()
+	if rec := do(h, http.MethodGet, "/api/overview", "", viewer); rec.Code != 200 {
+		t.Fatalf("修改密码后的新会话: %d", rec.Code)
+	}
+	// 只读账号不能修改配置、查看账号
+	if rec := do(h, http.MethodPost, "/api/alert/robots", `{"name":"x"}`, viewer); rec.Code != 403 {
+		t.Fatalf("只读账号不能添加机器人: %d", rec.Code)
+	}
+	if rec := do(h, http.MethodGet, "/api/auth/users", "", viewer); rec.Code != 403 {
+		t.Fatalf("只读账号不能查看账号列表: %d", rec.Code)
+	}
+	// 跨站提交被拦截
+	if rec := do(h, http.MethodPost, "/api/auth/logout", "", admin, "Origin", "http://evil.example"); rec.Code != 403 {
+		t.Fatalf("跨站请求应被拦截: %d", rec.Code)
+	}
+	// 退出登录
+	if rec := do(h, http.MethodPost, "/api/auth/logout", "", admin); rec.Code != 200 {
+		t.Fatalf("退出登录: %d", rec.Code)
+	}
+	if rec := do(h, http.MethodGet, "/api/overview", "", admin); rec.Code != 401 {
+		t.Fatalf("退出后会话应失效: %d", rec.Code)
+	}
+	// 登录审计
+	var audit []auth.Record
+	json.Unmarshal(do(h, http.MethodGet, "/api/auth/audit", "", login(t, h, "admin", "Adm1n-secret")).Body.Bytes(), &audit)
+	if len(audit) < 4 {
+		t.Fatalf("登录审计记录不足: %d", len(audit))
 	}
 }

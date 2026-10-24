@@ -1,6 +1,7 @@
 package pipeline
 
 import (
+	"net"
 	"net/netip"
 	"strings"
 
@@ -184,4 +185,24 @@ func containsLoopback(v string) bool {
 		}
 	}
 	return false
+}
+
+// ClientIP 返回 HTTP 请求的真实客户端地址（用于登录失败锁定与审计）：
+// 对端为可信代理（如本机或内网的 nginx 反向代理）时按 X-Forwarded-For 从右向左解析。
+func (r *RealIP) ClientIP(remoteAddr, xff string) string {
+	host, _, err := net.SplitHostPort(remoteAddr)
+	if err != nil {
+		host = remoteAddr
+	}
+	peer, err := netip.ParseAddr(host)
+	if err != nil {
+		return host
+	}
+	peer = peer.Unmap()
+	if xff != "" && r != nil && r.isTrusted(peer) {
+		if a, ok := r.fromChain(strings.Split(xff, ",")); ok {
+			return a.String()
+		}
+	}
+	return peer.String()
 }

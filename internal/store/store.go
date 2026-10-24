@@ -10,6 +10,7 @@ import (
 
 	"netsa/internal/geo"
 	"netsa/internal/model"
+	"netsa/internal/safe"
 )
 
 // IPProfile 是单个来源 IP 的画像。
@@ -96,6 +97,9 @@ func incBounded[K comparable](m *map[K]int, k K, limit int) bool {
 
 var sevWeight = [...]float64{0, 5, 12, 25, 45}
 
+// levelFloor 为各等级对应的最低威胁评分（低危 >0、中危 25、高危 50、严重 80）。
+var levelFloor = [...]float64{0, 1, 25, 50, 80}
+
 // recompute 根据命中规则重新计算威胁分（0-100）与等级。
 // 按攻击分类累计：同类重复命中按对数递增（最多 2 倍），侦察类打 6 折，避免单一扫描器刷高分；
 // 疑似成功、多阶段攻击链、情报命中额外加分。
@@ -124,6 +128,11 @@ func (p *IPProfile) recompute() {
 		sum += 30
 	}
 	p.Score = math.Round(math.Min(sum, 100)*10) / 10
+	// 攻击源等级不低于其触发过的最高告警等级：触发过高危告警的 IP 必然计入“高危以上攻击源”，
+	// 与告警事件中的等级一致。评分同步抬升到该等级的下限，保证评分、等级与排序相互一致。
+	if f := levelFloor[p.MaxSev]; p.Score < f {
+		p.Score = f
+	}
 	lvl := model.SevInfo
 	switch {
 	case p.Score >= 80:
@@ -134,9 +143,6 @@ func (p *IPProfile) recompute() {
 		lvl = model.SevMedium
 	case p.Score > 0:
 		lvl = model.SevLow
-	}
-	if p.MaxSev >= model.SevHigh && lvl < p.MaxSev-1 {
-		lvl = p.MaxSev - 1
 	}
 	p.Level = lvl
 }
@@ -161,6 +167,8 @@ type Totals struct {
 	Alerts   int64 `json:"alerts"`
 	Blocked  int64 `json:"blocked"`
 	Success  int64 `json:"success"`
+	// Untracked 为画像数超过上限期间未建立画像的正常访问（仍计入总量与攻击面统计）
+	Untracked int64 `json:"untracked,omitempty"`
 }
 
 // Store 是线程安全的态势状态库。
@@ -205,7 +213,8 @@ func New(maxIPs, maxAlerts, alertsPerRule int, retention time.Duration) *Store {
 type RecordResult struct {
 	Alerts  []*model.Alert
 	Level   model.Severity
-	LevelUp bool // 等级提升
+	Score   float64 // 记录后的威胁评分
+	LevelUp bool    // 等级提升
 	NewIP   bool
 	Profile string
 }
@@ -225,9 +234,20 @@ func (s *Store) RecordBatch(evs []*model.Event, hits [][]model.Hit) []RecordResu
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for i, ev := range evs {
-		out[i] = s.recordLocked(ev, hits[i])
+		out[i] = s.safeRecord(ev, hits[i])
 	}
 	return out
+}
+
+// safeRecord 记录单条事件；个别畸形数据触发的异常只跳过该条，不影响同批其他事件与整个服务。
+func (s *Store) safeRecord(ev *model.Event, hits []model.Hit) (res RecordResult) {
+	defer func() {
+		if r := recover(); r != nil {
+			safe.Report("记录事件 "+ev.SrcIP, r)
+			res = RecordResult{}
+		}
+	}()
+	return s.recordLocked(ev, hits)
 }
 
 func (s *Store) recordLocked(ev *model.Event, hits []model.Hit) RecordResult {
@@ -238,13 +258,19 @@ func (s *Store) recordLocked(ev *model.Event, hits []model.Hit) RecordResult {
 		s.totals.Outbound++
 		return res
 	}
-	if s.minTime.IsZero() || ev.Time.Before(s.minTime) {
-		s.minTime = ev.Time
+	// 统计用时间：设备时钟错误或解析异常产生的未来 / 远古时间按当前时间统计，
+	// 否则一条异常日志就会把时间窗口推到未来，导致趋势数据被保留期清理、“近 1 小时”统计失真。
+	t := ev.Time
+	if now := time.Now(); t.After(now.Add(time.Hour)) || t.Year() < 2000 {
+		t = now
 	}
-	if ev.Time.After(s.maxTime) {
-		s.maxTime = ev.Time
+	if s.minTime.IsZero() || t.Before(s.minTime) {
+		s.minTime = t
 	}
-	minute := ev.Time.Unix() / 60
+	if t.After(s.maxTime) {
+		s.maxTime = t
+	}
+	minute := t.Unix() / 60
 	b := s.buckets[minute]
 	if b == nil {
 		b = &Bucket{T: minute * 60}
@@ -260,6 +286,20 @@ func (s *Store) recordLocked(ev *model.Event, hits []model.Hit) RecordResult {
 
 	p := s.ips[ev.SrcIP]
 	if p == nil {
+		// 画像数的硬上限：定期维护之间若遇到大量不同来源（伪造源地址的扫描、大规模爬虫），
+		// 正常访问只计入总量与攻击面，不再建立画像；攻击者则立即淘汰低价值画像腾出空间。
+		if len(s.ips) >= s.maxIPs+s.maxIPs/4 {
+			if !hasAttack(hits) {
+				s.totals.Untracked++
+				if ev.Kind == model.KindWeb {
+					s.surf.observeWeb(ev, hits, false)
+				} else {
+					s.surf.observeFw(ev)
+				}
+				return res
+			}
+			s.evictLocked()
+		}
 		p = newProfile(ev.SrcIP, ev.Time)
 		if s.GeoLookup != nil {
 			p.Geo = s.GeoLookup(ev.SrcIP)
@@ -370,7 +410,7 @@ func (s *Store) recordLocked(ev *model.Event, hits []model.Hit) RecordResult {
 	} else {
 		s.surf.observeFw(ev)
 	}
-	res.Level = p.Level
+	res.Level, res.Score = p.Level, p.Score
 	res.LevelUp = p.Level > oldLevel
 	res.Profile = p.IP
 	return res
@@ -494,9 +534,23 @@ func (s *Store) Maintain() {
 			}
 		}
 	}
-	if len(s.ips) <= s.maxIPs {
-		return
+	if len(s.ips) > s.maxIPs {
+		s.evictLocked()
 	}
+}
+
+// hasAttack 判断命中中是否包含攻击（仅打标签的命中不算）。
+func hasAttack(hits []model.Hit) bool {
+	for _, h := range hits {
+		if !h.TagOnly {
+			return true
+		}
+	}
+	return false
+}
+
+// evictLocked 淘汰评分最低、最久未活动的画像，使数量回到上限的 90%（调用方持写锁）。
+func (s *Store) evictLocked() {
 	type cand struct {
 		ip    string
 		score float64
