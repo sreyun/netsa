@@ -17,18 +17,43 @@ import (
 )
 
 type list struct {
-	name     string
-	addrs    map[netip.Addr]bool
-	prefixes []netip.Prefix
+	name  string
+	addrs map[netip.Addr]bool
+	// 网段按前缀长度分组：查询时只需对出现过的每种长度做一次掩码与哈希查找（IPv4 最多 32 次），
+	// 与网段数量无关。出站流量逐条比对情报时，数千条网段的情报库也不会成为瓶颈。
+	nets  map[int]map[netip.Prefix]struct{}
+	bits  []int // nets 中出现过的前缀长度
+	count int   // 网段数
+}
+
+func (l *list) addPrefix(p netip.Prefix) {
+	if l.nets == nil {
+		l.nets = map[int]map[netip.Prefix]struct{}{}
+	}
+	m := l.nets[p.Bits()]
+	if m == nil {
+		m = map[netip.Prefix]struct{}{}
+		l.nets[p.Bits()] = m
+		l.bits = append(l.bits, p.Bits())
+	}
+	if _, ok := m[p]; !ok {
+		m[p] = struct{}{}
+		l.count++
+	}
 }
 
 func (l *list) contains(a netip.Addr) bool {
 	if l.addrs[a] {
 		return true
 	}
-	for _, p := range l.prefixes {
-		if p.Contains(a) {
-			return true
+	for _, b := range l.bits {
+		if b > a.BitLen() {
+			continue
+		}
+		if p, err := a.Prefix(b); err == nil {
+			if _, ok := l.nets[b][p]; ok {
+				return true
+			}
 		}
 	}
 	return false
@@ -52,7 +77,7 @@ func Load(cfg config.IntelConfig) (*DB, error) {
 		}
 		l := parseList(bl.Name, f)
 		f.Close()
-		log.Printf("[intel] 已加载 %s: %d 个IP, %d 个网段", bl.Name, len(l.addrs), len(l.prefixes))
+		log.Printf("[intel] 已加载 %s: %d 个IP, %d 个网段", bl.Name, len(l.addrs), l.count)
 		db.lists = append(db.lists, l)
 	}
 	return db, nil
@@ -74,7 +99,7 @@ func parseList(name string, r io.Reader) *list {
 			if p.IsSingleIP() {
 				l.addrs[p.Addr()] = true
 			} else {
-				l.prefixes = append(l.prefixes, p.Masked())
+				l.addPrefix(p.Masked())
 			}
 		} else if a, err := netip.ParseAddr(f[0]); err == nil {
 			l.addrs[a.Unmap()] = true

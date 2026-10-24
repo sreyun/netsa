@@ -51,6 +51,9 @@ type ServerConfig struct {
 	TLSKey  string `yaml:"tls_key"`
 	// WebDir 非空时从该目录加载前端页面（便于定制界面），否则使用内嵌资源
 	WebDir string `yaml:"web_dir"`
+	// AllowNetworks 允许访问大屏与 API 的来源网段（IP 或 CIDR）；为空表示不限制。本机回环地址始终允许，
+	// /healthz 不受限制。部署在反向代理之后时需同时配置 real_ip.trusted_proxies，按真实客户端地址判断。
+	AllowNetworks []string `yaml:"allow_networks"`
 }
 
 // AuthEnabled 返回是否需要登录（默认开启）。
@@ -313,6 +316,11 @@ func (c *Config) Validate() error {
 	if (c.Server.Username == "") != (c.Server.Password == "") {
 		return fmt.Errorf("server.username 与 server.password 需同时设置")
 	}
+	for _, n := range c.Server.AllowNetworks {
+		if _, err := ParseNetwork(n); err != nil {
+			return fmt.Errorf("server.allow_networks: %w", err)
+		}
+	}
 	if a := c.Archive; a.BatchSize > 10000 || a.QueueSize > 5000000 || a.RetentionYears < 0 || a.RetentionYears > 100 {
 		return fmt.Errorf("archive 配置超出范围：batch_size ≤ 10000、queue_size ≤ 5000000、retention_years 为 0（永久保留）~ 100")
 	}
@@ -448,4 +456,17 @@ func (c *Config) fill() {
 			c.Sources[i].Name = c.Sources[i].Paths[0]
 		}
 	}
+}
+
+// ParseNetwork 解析 IP 或 CIDR 网段。
+func ParseNetwork(s string) (netip.Prefix, error) {
+	s = strings.TrimSpace(s)
+	if p, err := netip.ParsePrefix(s); err == nil {
+		return p.Masked(), nil
+	}
+	if a, err := netip.ParseAddr(s); err == nil {
+		a = a.Unmap()
+		return netip.PrefixFrom(a, a.BitLen()), nil
+	}
+	return netip.Prefix{}, fmt.Errorf("无效的 IP 或网段 %q", s)
 }

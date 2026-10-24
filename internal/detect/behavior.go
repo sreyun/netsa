@@ -71,7 +71,9 @@ func NewBehavior(th config.Thresholds) *Behavior {
 
 // Observe 处理一个事件并返回触发的行为告警。
 func (b *Behavior) Observe(ev *model.Event) []model.Hit {
-	if ev.Outbound {
+	// 出站流量（内网主机访问公网）不做扫描 / 洪泛 / 暴力破解判定：正常上网会连接大量不同的公网地址与端口，
+	// 按入站攻击的阈值判断会产生大量误报。内网主机之间的横向扫描（目的为内网地址）仍会检测。
+	if ev.Outbound || IsEgress(ev) {
 		return nil
 	}
 	b.mu.Lock()

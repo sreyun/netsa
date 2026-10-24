@@ -256,7 +256,7 @@ const drillState = { attackers: null, alerts: null };
 // drillTo 打开目标列表。params 为附加到接口的筛选参数，label 为条件说明，native 为列表自带的筛选控件取值。
 function drillTo(tab, { params = {}, label = '', native = {} } = {}) {
   if (tab === 'attackers') {
-    $('#atkSearch').value = '';
+    $('#atkSearch').value = native.q || '';
     $('#atkLevel').value = native.level || '';
     $('#atkSort').value = native.sort || 'score';
     atkOffset = 0;
@@ -264,7 +264,7 @@ function drillTo(tab, { params = {}, label = '', native = {} } = {}) {
   } else if (tab === 'alerts') {
     setAlertMode('live');
     fillAlertFilters();
-    $('#alSearch').value = '';
+    $('#alSearch').value = native.q || '';
     $('#alSev').value = native.severity || '';
     $('#alCat').value = native.category || '';
     $('#alResult').value = native.result || '';
@@ -345,6 +345,7 @@ async function loadOverview() {
   tb.style.borderColor = tb.style.color;
   $('#rangeText').textContent = zero(o.from) ? '' : `${fmtShort(o.from)} ~ ${fmtShort(o.to)}`;
 
+  renderSituation();
   gauge('cGauge', o.threat_index, '近 60 分钟 · 点击查看告警');
   pie('cCategory', (o.categories || []).slice(0, 12), false, '点击查看该类型告警');
   const ph = o.phases || {};
@@ -395,6 +396,51 @@ $$('#trendRange button').forEach((b) => b.addEventListener('click', () => {
   $$('#trendRange button').forEach((x) => x.classList.toggle('active', x === b));
   loadTrend();
 }));
+// ---------------- 态势研判 ----------------
+// 总览顶部的研判条：近 1 小时攻击量环比、新增与活跃的高危攻击源、疑似成功攻击、失陷资产与安全评分，均可点击下钻。
+async function loadSituationAssess() {
+  lastAssess = await api('/api/assessment');
+  renderSituation();
+}
+function renderSituation() {
+  const o = lastOverview;
+  if (!o) return;
+  const a = lastAssess;
+  const cur = o.recent.attacks, prev = o.prev.attacks;
+  let delta = '';
+  if (prev > 0) {
+    const pct = Math.round(((cur - prev) * 100) / prev);
+    delta = pct > 0 ? `<em class="up">↑ ${pct}%</em>` : pct < 0 ? `<em class="down">↓ ${-pct}%</em>` : '<em>持平</em>';
+  } else if (cur > 0) delta = '<em class="up">新增</em>';
+  const lvl = o.threat_level;
+  const verdict = o.compromised > 0 ? `发现 ${o.compromised} 个疑似失陷资产，需立即处置`
+    : o.recent_success > 0 ? `近 1 小时出现 ${o.recent_success} 次疑似成功攻击，请尽快核查`
+      : lvl === 'critical' || lvl === 'high' ? '攻击活动频繁，请关注高危攻击源并及时封禁'
+        : lvl === 'medium' ? '存在持续的攻击活动，整体可控' : '整体态势平稳';
+  const item = (go, label, value, extra = '', cls = '') => `<button type="button" class="sit-item ${cls}" data-sit="${go}"><span>${label}</span><b>${value}</b>${extra}</button>`;
+  $('#situation').innerHTML = `<div class="sit-verdict" style="--c:${o.compromised ? LV_COLOR.critical : LV_COLOR[lvl] || '#52c41a'}"><span>态势研判</span><b>${esc(verdict)}</b></div>`
+    + item('trend', '近 1 小时攻击', num(cur), delta)
+    + item('new', '新增攻击源', num(o.new_attackers))
+    + item('high', '活跃高危攻击源', num(o.active_high), '', o.active_high ? 'warn' : '')
+    + item('success', '近 1 小时疑似成功', num(o.recent_success), '', o.recent_success ? 'risk' : '')
+    + item('comp', '疑似失陷资产', num(o.compromised), '', o.compromised ? 'risk' : '')
+    + (a ? item('assess', '安全评分', `${a.score}<small> ${esc(a.grade)} ${esc(a.grade_label)}</small>`, '', a.score < 60 ? 'risk' : a.score < 80 ? 'warn' : 'good') : '');
+}
+$('#situation').addEventListener('click', (e) => {
+  const b = e.target.closest('[data-sit]');
+  if (!b || !lastOverview) return;
+  const to = Math.floor(new Date(lastOverview.to).getTime() / 1000) + 1;
+  const hour = `${fmtHM(to - 3600)} ~ ${fmtHM(to)}`;
+  switch (b.dataset.sit) {
+    case 'trend': drillTo('alerts', { params: { from: to - 3600, to }, label: `近 60 分钟（${hour}）` }); break;
+    case 'new': drillTo('attackers', { native: { sort: 'last' } }); break;
+    case 'high': drillTo('attackers', { native: { level: 'high', sort: 'last' } }); break;
+    case 'success': drillTo('alerts', { params: { from: to - 3600, to }, native: { result: 'success' }, label: `近 60 分钟疑似成功的攻击（${hour}）` }); break;
+    case 'comp': switchTab('assess'); requestAnimationFrame(() => $('#asCompPanel').scrollIntoView({ block: 'start' })); break;
+    default: switchTab('assess');
+  }
+});
+
 let trendData = [];
 // 趋势图：点击任意时间点查看该时段的告警（按图表的时间粒度）
 chartSetup.cTrend = (c) => c.getZr().on('click', (e) => {
@@ -1019,6 +1065,7 @@ async function loadSurface() {
       <div class="ft">${badge(f.severity)}<span>${esc(f.title)}</span><span class="spacer"></span><span class="muted">${esc(f.category)} · ${num(f.count)} 次</span></div>
       <div class="asset">${esc(f.asset)}</div><div class="ev">${esc(f.evidence)}</div>
       <div class="fix">处置建议：${esc(f.remediation)}</div>
+      ${(f.ips || []).length ? `<div class="cell-chips"><span class="muted" style="font-size:11px">${f.category === '失陷迹象' ? '外连地址' : '来源'}</span>${f.ips.map((ip) => `<span class="chip ip clickable" data-ip="${esc(ip)}">${esc(ip)}</span>`).join('')}</div>` : ''}
       <div class="muted" style="font-size:11px">${esc(fmtShort(f.first_seen))} ~ ${esc(fmtShort(f.last_seen))}</div></div>`).join('') || '<div class="empty">未发现明显暴露面风险</div>';
   $('#svcTable').innerHTML = `<thead><tr><th>目标</th><th>服务</th><th>风险</th><th>公网放行</th><th class="num">放行/拦截</th><th class="num">来源数</th><th>最近</th></tr></thead><tbody>${
     (s.services || []).map((v) => `<tr><td class="mono">${esc(v.dst_ip || '*')}:${v.port}/${esc(v.proto)}</td><td>${esc(v.name)}</td><td>${badge(v.risk)}</td>
@@ -1182,6 +1229,7 @@ async function openIP(ip) {
       <div class="k">攻击统计</div><div>攻击 ${num(p.attacks)} 次 · <span class="res-success">疑似成功 ${num(p.successes)}</span> · 结果分布 ${sortedEntries(p.results, 6).map(([k, v]) => `${esc(RESULT[k] || k)} ${v}`).join(' / ')}</div>
     </div>
     <h4>攻击链</h4><div class="chain">${chainSteps}</div>
+    ${(d.techniques || []).length ? `<h4>ATT&amp;CK 技术</h4><div class="chips">${d.techniques.map((t) => `<span class="chip" title="${esc(t.tactic_name)} · ${esc(t.name)}">${esc(t.id)} ${esc(t.name)} <span class="muted">${esc(t.tactic_name)} × ${num(t.hits)}</span></span>`).join('')}</div>` : ''}
     <h4>命中规则</h4><table class="table"><thead><tr><th>规则</th><th>等级</th><th>次数</th></tr></thead><tbody>${rules || empty(3)}</tbody></table>
     <h4>攻击目标 TOP</h4><table class="table"><thead><tr><th>目标</th><th>次数</th></tr></thead><tbody>${targets || empty(2)}</tbody></table>
     ${ports ? `<h4>探测端口</h4><div class="chips">${ports}</div>` : ''}
@@ -1241,6 +1289,138 @@ netsh advfirewall firewall add rule name="netsa-block-${esc(ip)}" dir=in action=
     }
   };
 }
+
+// ---------------- 安全评估 ----------------
+const PRIO = { P0: '紧急', P1: '高', P2: '中', P3: '低' };
+const DIM_LEVEL = { good: '良好', warn: '需关注', risk: '高风险', na: '未接入' };
+const DIM_COLOR = { good: '#52c41a', warn: '#ffc53d', risk: '#ff4d4f', na: '#7d8db3' };
+const scoreColor = (s) => (s >= 80 ? '#52c41a' : s >= 60 ? '#ffc53d' : s >= 40 ? '#ff7a45' : '#ff4d4f');
+let lastAssess = null;
+// openDrill 根据评估结果中的下钻描述跳转到对应列表（带上筛选条件）
+const PARAM_LABEL = { category: '攻击类型', technique: 'ATT&CK 技术', phase: '攻击链阶段', country: '来源国家/地区', city: '攻击来源城市', target: '被攻击目标' };
+function openDrill(d, title) {
+  if (!d) return;
+  const p = { ...(d.params || {}) };
+  // 下钻条件栏显示实际的筛选条件，并注明来自哪条处置建议
+  const cond = Object.entries(p).filter(([k]) => PARAM_LABEL[k]).map(([k, v]) => `${PARAM_LABEL[k]} = ${v}`).join('，');
+  const label = `${cond}（来自处置建议：${title}）`;
+  switch (d.tab) {
+    case 'ip': openIP(p.ip); return;
+    case 'attackers': {
+      const native = { level: p.level, sort: p.sort };
+      delete p.level; delete p.sort;
+      drillTo('attackers', Object.keys(p).length ? { params: p, label, native } : { native });
+      return;
+    }
+    case 'alerts': {
+      const native = { result: p.result, category: p.category, q: p.q };
+      delete p.result; delete p.category; delete p.q;
+      drillTo('alerts', Object.keys(p).length ? { params: p, label, native } : { native });
+      return;
+    }
+    default: switchTab(d.tab);
+  }
+}
+async function loadAssess() {
+  const a = await api('/api/assessment');
+  lastAssess = a;
+  const c = scoreColor(a.score);
+  $('#asTime').textContent = `评估时间 ${fmtTime(a.generated_at)}${zero(a.from) ? '' : ` · 数据范围 ${fmtShort(a.from)} ~ ${fmtShort(a.to)}`}`;
+  $('#asScore').innerHTML = `<div class="ring" style="--p:${a.score};--c:${c}"><b style="color:${c}">${a.score}</b><span>${esc(a.grade)} · ${esc(a.grade_label)}</span></div>
+    <div class="as-verdict" style="border-left-color:${c}">${esc(a.verdict)}</div>`;
+  const ac = a.action_count || {};
+  const high = a.compromised.filter((x) => x.confidence === 'high').length;
+  $('#asCounts').innerHTML = ['P0', 'P1', 'P2', 'P3'].map((p) => `<button type="button" class="as-count prio-${p}" data-prio="${p}"><b>${ac[p] || 0}</b><span>${p} ${PRIO[p]}</span></button>`).join('')
+    + `<button type="button" class="as-count comp" data-jump="asCompPanel"><b>${a.compromised.length}</b><span>疑似失陷资产${high ? `（高置信 ${high}）` : ''}</span></button>`;
+  // 雷达图：未接入数据的维度按 0 分显示并在名称中注明
+  chart('cRadar').setOption({
+    tooltip: { ...baseTooltip, trigger: 'item', formatter: () => a.dimensions.map((d) => `${esc(d.name)}：${d.score < 0 ? '未接入' : d.score + ' 分'}`).join('<br/>') },
+    radar: {
+      radius: '66%', splitNumber: 4, axisName: { color: TEXT, fontSize: 11 },
+      indicator: a.dimensions.map((d) => ({ name: d.score < 0 ? `${d.name}（未接入）` : d.name, max: 100 })),
+      splitLine: { lineStyle: { color: GRID_LINE } }, splitArea: { areaStyle: { color: ['rgba(58,139,255,.04)', 'rgba(58,139,255,.08)'] } },
+      axisLine: { lineStyle: { color: GRID_LINE } },
+    },
+    series: [{
+      type: 'radar', symbolSize: 4, data: [{ value: a.dimensions.map((d) => Math.max(0, d.score)), name: '安全评分' }],
+      lineStyle: { color: c, width: 2 }, itemStyle: { color: c }, areaStyle: { color: c + '33' },
+    }],
+  }, true);
+  // 处置建议：P0 / P1 默认展开操作步骤
+  $('#asActCount').textContent = a.actions.length ? `共 ${a.actions.length} 项，按优先级排序` : '';
+  $('#asActions').innerHTML = a.actions.map((x, i) => `<details class="as-act prio-${x.priority}" data-prio="${x.priority}" ${x.priority <= 'P1' ? 'open' : ''}>
+      <summary><span class="prio prio-${x.priority}">${x.priority} ${PRIO[x.priority]}</span><b>${esc(x.title)}</b><span class="spacer"></span>
+        <span class="chip">${esc((a.dimensions.find((d) => d.key === x.dimension) || {}).name || '')}</span>
+        ${x.drill ? `<button type="button" class="btn" data-act="${i}">${esc(x.drill.label || '查看明细')} ›</button>` : ''}</summary>
+      <div class="as-reason">${esc(x.reason)}</div>
+      <ol class="as-steps">${x.steps.filter(Boolean).map((s) => `<li>${esc(s)}</li>`).join('')}</ol></details>`).join('')
+    || '<div class="empty">暂无需要处置的事项</div>';
+  // 失陷研判
+  const comp = a.compromised;
+  $('#asCompCount').textContent = comp.length ? `${comp.length} 个资产，高置信 ${high} 个` : '';
+  $('#asComp').innerHTML = `<colgroup><col style="width:21%"><col style="width:64px"><col style="width:31%"><col style="width:17%"><col style="width:96px"><col></colgroup>
+    <thead><tr><th>资产</th><th>置信度</th><th>失陷迹象</th><th>相关地址</th><th>时间</th><th>处置建议</th></tr></thead><tbody>${comp.map((x, i) => `
+    <tr class="clickable" data-comp="${i}" title="点击查看相关明细"><td class="mono"><span class="chip ${x.kind === 'host' ? 'warn' : ''}">${x.kind === 'host' ? '主机' : 'Web 资产'}</span> ${esc(x.asset)}</td>
+      <td>${x.confidence === 'high' ? '<span class="badge lv-critical bg-critical">高</span>' : '<span class="badge lv-medium bg-medium">中</span>'}</td>
+      <td><div class="as-ind">${x.indicators.slice(0, 3).map((s) => `<div title="${esc(s)}">${esc(s)}</div>`).join('')}${x.indicators.length > 3 ? `<div class="muted">另有 ${x.indicators.length - 3} 条</div>` : ''}</div></td>
+      <td><div class="cell-chips">${x.ips.map((ip) => `<span class="chip ip clickable" data-ip="${esc(ip)}">${esc(ip)}</span>`).join('')}</div></td>
+      <td class="nowrap muted">${esc(fmtShort(x.first_seen))}<br>${esc(fmtShort(x.last_seen))}</td><td class="as-adv">${esc(x.advice)}</td></tr>`).join('')
+    || empty(6, '未发现攻击成功或外连恶意地址等失陷迹象')}</tbody>`;
+  // 各维度
+  $('#asDims').innerHTML = a.dimensions.map((d) => `<div class="as-dim lvl-${d.level}">
+      <div class="as-dim-head"><b>${esc(d.name)}</b><span class="muted">权重 ${d.weight}</span><span class="spacer"></span>
+        <span class="as-dim-score" style="color:${DIM_COLOR[d.level]}">${d.score < 0 ? '—' : d.score}</span><span class="as-dim-lvl" style="color:${DIM_COLOR[d.level]}">${DIM_LEVEL[d.level]}</span></div>
+      <div class="scorebar wide"><i style="width:${Math.max(0, d.score)}%;background:${DIM_COLOR[d.level]}"></i></div>
+      <div class="as-dim-sum">${esc(d.summary)}</div>
+      ${d.metrics && d.metrics.length ? `<div class="as-metrics">${d.metrics.map((m) => `<div><span class="muted">${esc(m.name)}</span><b class="m-${m.level || ''}">${esc(m.value)}</b></div>`).join('')}</div>` : ''}
+      ${d.checks ? `<ul class="as-checks">${d.checks.map((k) => `<li class="${k.ok ? 'ok' : 'no'}">${k.ok ? '✓' : '✗'} ${esc(k.name)}</li>`).join('')}</ul>` : ''}
+      ${d.advice && d.advice.length && d.key !== 'visibility' ? `<ul class="as-advice">${d.advice.map((s) => `<li>${esc(s)}</li>`).join('')}</ul>` : ''}
+    </div>`).join('');
+  // ATT&CK 矩阵：按命中量着色，可点击查看对应告警
+  const m = a.matrix;
+  const maxHits = Math.max(1, ...m.tactics.flatMap((t) => t.techniques.map((x) => x.hits)));
+  $('#asMatrixInfo').textContent = `观测到 ${m.observed} / ${m.total} 项技术${m.unmapped ? ` · ${num(m.unmapped)} 次命中来自威胁情报 / 自定义规则，未映射` : ''}`;
+  $('#asMatrix').innerHTML = m.tactics.map((t) => `<div class="attck-col"><div class="attck-tac"><b>${esc(t.name)}</b><span>${esc(t.id)} ${esc(t.en)}</span><em>${num(t.hits)}</em></div>
+      ${t.techniques.map((x) => {
+        const alpha = x.hits ? 0.18 + 0.62 * Math.log10(1 + x.hits) / Math.log10(1 + maxHits) : 0;
+        return `<button type="button" class="attck-tech${x.hits ? ' hit' : ''}" ${x.hits ? `data-tech="${esc(x.id)}" data-name="${esc(x.name)}"` : 'disabled'}
+          style="${x.hits ? `background:rgba(255,122,69,${alpha.toFixed(2)});border-color:${LV_COLOR[x.max_severity] || '#2b4a80'}` : ''}"
+          title="${esc(x.id)} ${esc(x.name)}&#10;对应检测：${esc(x.categories.join('、'))}${x.hits ? `&#10;命中 ${num(x.hits)} 次 · 攻击源 ${num(x.attackers)} 个 · 点击查看告警` : '&#10;暂未观测到'}">
+          <span class="tid">${esc(x.id)}</span><span class="tname">${esc(x.name)}</span>${x.hits ? `<span class="thits">${num(x.hits)} 次 · ${num(x.attackers)} 源</span>` : ''}</button>`;
+      }).join('')}</div>`).join('');
+}
+$('#asActions').addEventListener('click', (e) => {
+  const b = e.target.closest('[data-act]');
+  if (!b || !lastAssess) return;
+  e.preventDefault(); // 按钮位于 summary 中，阻止切换展开状态
+  const x = lastAssess.actions[+b.dataset.act];
+  openDrill(x.drill, x.title);
+});
+$('#asComp').addEventListener('click', (e) => {
+  if (e.target.closest('[data-ip]')) return; // 地址交给全局的 IP 详情处理
+  const tr = e.target.closest('[data-comp]');
+  if (!tr || !lastAssess) return;
+  const x = lastAssess.compromised[+tr.dataset.comp];
+  if (x.kind === 'host') openIP(x.asset);
+  else openDrill({ tab: 'alerts', params: { q: x.asset.slice(x.asset.indexOf('/')) } }, `失陷研判：${x.asset}`);
+});
+$('#asCounts').addEventListener('click', (e) => {
+  const b = e.target.closest('[data-prio],[data-jump]');
+  if (!b) return;
+  const target = b.dataset.jump ? $('#' + b.dataset.jump) : $(`#asActions [data-prio="${b.dataset.prio}"]`);
+  if (target) { target.scrollIntoView({ behavior: 'smooth', block: 'start' }); if (target.tagName === 'DETAILS') target.open = true; }
+});
+$('#asMatrix').addEventListener('click', (e) => {
+  const b = e.target.closest('[data-tech]');
+  if (b) drillTo('alerts', { params: { technique: b.dataset.tech }, label: `ATT&CK 技术 = ${b.dataset.tech} ${b.dataset.name}` });
+});
+$('#asPrint').addEventListener('click', () => {
+  const t = document.title;
+  const p = timeParts(new Date());
+  document.title = `安全评估报告-${p.y}${p.mo}${p.d}`; // 另存为 PDF 时的默认文件名
+  window.print();
+  document.title = t;
+});
 
 // ---------------- 告警推送 ----------------
 const NT_TYPES = {
@@ -1590,10 +1770,11 @@ $('#userTable').addEventListener('click', async (e) => {
 
 // ---------------- 调度 ----------------
 const loaders = {
-  overview: () => Promise.all([loadOverview(), loadTrend(), loadMap(), loadTopAttackers()]).catch(console.error),
+  overview: () => Promise.all([loadOverview(), loadTrend(), loadMap(), loadTopAttackers(), loadSituationAssess()]).catch(console.error),
   attackers: () => loadAttackers().catch(console.error),
   alerts: () => (alMode === 'history' ? loadHistory(false) : loadAlerts()).catch(console.error),
   surface: () => loadSurface().catch(console.error),
+  assess: () => loadAssess().catch(console.error),
   notify: () => loadNotify().catch(console.error),
   system: () => loadSystem().catch(console.error),
   sources: () => loadSources().catch(console.error),
@@ -1649,4 +1830,12 @@ setInterval(() => {
     loadSources().catch(console.error);
   }
 }, 5000);
-setInterval(() => { if (!document.hidden && currentTab === 'overview') loadMap().catch(console.error); }, 15000);
+setInterval(() => {
+  if (document.hidden) return;
+  if (currentTab === 'overview') {
+    loadMap().catch(console.error);
+    loadSituationAssess().catch(console.error);
+  } else if (currentTab === 'assess') {
+    loadAssess().catch(console.error);
+  }
+}, 15000);

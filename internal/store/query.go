@@ -68,6 +68,23 @@ type Overview struct {
 	Findings     int       `json:"findings"`
 	CountryCount int       `json:"country_count"` // 攻击来源国家/地区数
 	CityCount    int       `json:"city_count"`    // 攻击来源城市数
+
+	// 态势研判：最近 60 分钟与再往前 60 分钟对比
+	Prev struct {
+		Attacks     int64   `json:"attacks"`
+		ThreatIndex float64 `json:"threat_index"`
+	} `json:"prev"`
+	NewAttackers  int   `json:"new_attackers"`  // 最近 60 分钟首次出现的攻击源
+	ActiveHigh    int   `json:"active_high"`    // 最近 60 分钟仍在活动的高危以上攻击源
+	RecentSuccess int64 `json:"recent_success"` // 最近 60 分钟疑似攻击成功的次数
+	Compromised   int   `json:"compromised"`    // 疑似失陷资产数
+}
+
+// threatIndex 把按严重程度加权的攻击量经指数饱和映射到 0-100。
+func threatIndex(weighted float64) float64 { return math.Round(100 * (1 - math.Exp(-weighted/600))) }
+
+func bucketWeight(b *Bucket) float64 {
+	return float64(b.Sev[1]) + 3*float64(b.Sev[2]) + 8*float64(b.Sev[3]) + 20*float64(b.Sev[4])
 }
 
 func isAttacker(p *IPProfile) bool { return p.Attacks > 0 || len(p.Intel) > 0 }
@@ -95,6 +112,12 @@ func (s *Store) Overview() *Overview {
 		o.LevelCounts[p.Level.String()]++
 		if p.LastSeen.After(recentCut) {
 			o.Recent.Attackers++
+			if p.Level >= model.SevHigh {
+				o.ActiveHigh++
+			}
+			if p.FirstSeen.After(recentCut) {
+				o.NewAttackers++
+			}
 		}
 		country, prov, city, isp, nt := geoKeys(p)
 		countries[country]++
@@ -133,15 +156,21 @@ func (s *Store) Overview() *Overview {
 	}
 
 	// 威胁指数：最近 60 分钟按严重程度加权的攻击量，经指数饱和映射到 0-100。
-	var weighted float64
+	var weighted, prevWeighted float64
 	cut := recentCut.Unix() / 60
 	for k, b := range s.buckets {
-		if k >= cut {
+		switch {
+		case k >= cut:
 			o.Recent.Attacks += b.Attacks
-			weighted += float64(b.Sev[1]) + 3*float64(b.Sev[2]) + 8*float64(b.Sev[3]) + 20*float64(b.Sev[4])
+			o.RecentSuccess += b.Success
+			weighted += bucketWeight(b)
+		case k >= cut-60:
+			o.Prev.Attacks += b.Attacks
+			prevWeighted += bucketWeight(b)
 		}
 	}
-	o.ThreatIndex = math.Round(100 * (1 - math.Exp(-weighted/600)))
+	o.ThreatIndex, o.Prev.ThreatIndex = threatIndex(weighted), threatIndex(prevWeighted)
+	o.Compromised = len(s.compromisedLocked())
 	switch {
 	case o.ThreatIndex >= 80:
 		o.ThreatLevel = "critical"
@@ -316,16 +345,17 @@ type AttackerQuery struct {
 	Limit    int
 	Offset   int
 
-	Country  string // 国家 / 地区（总览“来源国家/地区”，未定位为“未知”）
-	City     string // 城市（总览“攻击来源城市”）
-	NetType  string // 网络类型（总览“攻击源网络类型”，未知为“未知”）
-	ISP      string
-	World    string // 世界地图区域名
-	Province string // 中国地图省份名
-	CityMap  string // 省级地图地市名
-	Place    string // 地图地点聚合键
-	Category string // 攻击类型
-	Phase    string // 攻击链阶段
+	Country   string // 国家 / 地区（总览“来源国家/地区”，未定位为“未知”）
+	City      string // 城市（总览“攻击来源城市”）
+	NetType   string // 网络类型（总览“攻击源网络类型”，未知为“未知”）
+	ISP       string
+	World     string // 世界地图区域名
+	Province  string // 中国地图省份名
+	CityMap   string // 省级地图地市名
+	Place     string // 地图地点聚合键
+	Category  string // 攻击类型
+	Phase     string // 攻击链阶段
+	Technique string // ATT&CK 技术编号（如 T1190）
 }
 
 // geoFiltered 判断是否设置了地域类条件。
@@ -334,7 +364,8 @@ func (q *AttackerQuery) geoFiltered() bool {
 }
 
 func (q *AttackerQuery) match(p *IPProfile) bool {
-	if q.Category != "" && p.Categories[q.Category] == 0 || q.Phase != "" && p.Phases[q.Phase] == 0 {
+	if q.Category != "" && p.Categories[q.Category] == 0 || q.Phase != "" && p.Phases[q.Phase] == 0 ||
+		q.Technique != "" && !matchTechnique(p.Categories, q.Technique) {
 		return false
 	}
 	if !q.geoFiltered() {
@@ -426,11 +457,12 @@ func (s *Store) Attackers(q AttackerQuery) ([]AttackerSummary, int) {
 
 // IPDetail 是 IP 溯源详情。
 type IPDetail struct {
-	Summary AttackerSummary `json:"summary"`
-	Profile *IPProfile      `json:"profile"`
-	Chain   []ChainStep     `json:"chain"`
-	Rules   []RuleHit       `json:"rules"`
-	Related *Correlation    `json:"related"` // 同源关联分析
+	Summary    AttackerSummary `json:"summary"`
+	Techniques []TechniqueRef  `json:"techniques"` // 使用过的 ATT&CK 技术
+	Profile    *IPProfile      `json:"profile"`
+	Chain      []ChainStep     `json:"chain"`
+	Rules      []RuleHit       `json:"rules"`
+	Related    *Correlation    `json:"related"` // 同源关联分析
 }
 
 type ChainStep struct {
@@ -470,7 +502,7 @@ func (s *Store) ipDetail(ip string) *IPDetail {
 	cp.CatSev, cp.CatPhase = copyMap(p.CatSev), copyMap(p.CatPhase)
 	cp.Recent = append([]*model.Alert(nil), p.Recent...)
 	cp.Intel = append([]string(nil), p.Intel...)
-	d := &IPDetail{Summary: summarize(p), Profile: &cp}
+	d := &IPDetail{Summary: summarize(p), Profile: &cp, Techniques: techniquesOf(p.Categories)}
 	for _, ph := range phaseOrder {
 		if n := p.Phases[ph]; n > 0 {
 			d.Chain = append(d.Chain, ChainStep{ph, p.PhaseFirst[ph], n})
@@ -499,9 +531,10 @@ type AlertQuery struct {
 	SinceID     uint64
 	Limit       int
 	// 以下条件用于态势总览下钻
-	Phase    string
-	Target   string    // 被攻击目标（总览“被攻击目标 TOP”的条目）
-	From, To time.Time // 告警时间范围 [From, To)
+	Phase     string
+	Target    string    // 被攻击目标（总览“被攻击目标 TOP”的条目）
+	From, To  time.Time // 告警时间范围 [From, To)
+	Technique string    // ATT&CK 技术编号
 }
 
 // matchTarget 判断告警目标是否为总览排行中的目标条目（排行中的目标最长 200 字节，超长时按前缀匹配）。
@@ -559,6 +592,7 @@ func (s *Store) Alerts(q AlertQuery) []*model.Alert {
 			(q.Result != "" && a.Result != q.Result) ||
 			(q.Kind != "" && string(a.Kind) != q.Kind) ||
 			(q.Phase != "" && a.Phase != q.Phase) ||
+			(q.Technique != "" && !categoryInTechnique(a.Category, q.Technique)) ||
 			(q.Target != "" && !matchTarget(a.Target, q.Target)) ||
 			(!q.From.IsZero() && a.Time.Before(q.From)) ||
 			(!q.To.IsZero() && !a.Time.Before(q.To)) {

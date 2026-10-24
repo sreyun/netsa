@@ -88,10 +88,11 @@ func (e *Engine) Inspect(ev *model.Event) []model.Hit {
 	return e.inspectWeb(ev)
 }
 
-// 命中后若疑似成功需要升级风险的分类。
+// 能由响应判断是否成功的分类：命中且返回 2xx 时研判为“疑似成功”并升级风险。
+// SSRF、XXE、表达式注入（Log4j / OGNL / SpEL / SSTI）、反序列化多为盲打或带外利用，页面正常返回 200 是常态，
+// 无法据此判断成功，研判为“未拦截”，避免把正常响应误判为失陷。
 var bumpOnSuccess = map[string]bool{
-	CatSQLi: true, CatTraversal: true, CatCmdExec: true, CatExpr: true, CatSSRF: true, CatXXE: true,
-	CatDeser: true, CatWebShell: true, CatCVE: true, CatSensitive: true,
+	CatSQLi: true, CatTraversal: true, CatCmdExec: true, CatWebShell: true, CatCVE: true, CatSensitive: true,
 }
 
 // scanSegments 一次扫描 "uri\nua\nreferer"，按出现位置把命中的字面量记入各文本段的位图。
@@ -344,6 +345,11 @@ func inspectFirewall(ev *model.Event) []model.Hit {
 }
 
 var cgnat = netip.MustParsePrefix("100.64.0.0/10")
+
+// IsEgress 判断防火墙事件是否为内网主机访问公网的出站连接（部分设备日志不标注方向，按地址判断）。
+func IsEgress(ev *model.Event) bool {
+	return ev.Kind == model.KindFirewall && ev.DstIP != "" && isPrivateIP(ev.SrcIP) && !isPrivateIP(ev.DstIP)
+}
 
 func isPrivateIP(ip string) bool {
 	a, err := netip.ParseAddr(ip)

@@ -25,6 +25,11 @@ server:
   # 设置证书后直接提供 HTTPS（公网部署建议开启，或置于 HTTPS 反向代理之后）
   tls_cert: ""
   tls_key: ""
+  # 可选：只允许这些来源网段访问大屏与 API（IP 或 CIDR），为空表示不限制；本机与 /healthz 始终可访问。
+  # 部署在反向代理之后时需同时配置 real_ip.trusted_proxies，按真实客户端地址判断。
+  allow_networks: []
+  #  - 10.0.0.0/8
+  #  - 192.168.10.0/24
 
 home:
   name: "数据中心"

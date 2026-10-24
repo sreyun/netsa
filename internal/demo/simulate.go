@@ -182,6 +182,28 @@ func (s *Sim) fortiLine(t time.Time, src, dst string, dport int, deny bool) stri
 		t.Format("2006-01-02"), t.Format("15:04:05"), src, 1024+s.r.Intn(60000), dst, dport, act, s.r.Intn(20), dport)
 }
 
+// fortiOutLine 生成内网主机访问公网的出站流量日志。
+func (s *Sim) fortiOutLine(t time.Time, src, dst string, dport int, deny bool) string {
+	act := "deny"
+	if !deny {
+		act = "accept"
+	}
+	return fmt.Sprintf(`date=%s time=%s devname="FGT-HQ" devid="FG100F0000000001" logid="0000000013" type="traffic" subtype="forward" level="notice" srcip=%s srcport=%d srcintf="internal" dstip=%s dstport=%d dstintf="wan1" proto=6 action="%s" policyid=%d service="tcp/%d"`,
+		t.Format("2006-01-02"), t.Format("15:04:05"), src, 1024+s.r.Intn(60000), dst, dport, act, s.r.Intn(20), dport)
+}
+
+// beacon 模拟内网失陷主机：10.0.0.31 周期性回连 C2（被放行），10.0.0.32 尝试连接矿池端口（被拦截），
+// 另有正常的出站访问作为对照。外连地址位于演示情报 configs/demo-intel.txt 中。
+func (s *Sim) beacon(w *writer, t time.Time) {
+	if t.Minute()%7 == 0 {
+		fmt.Fprintln(w.forti, s.fortiOutLine(s.sec(t), "10.0.0.31", "203.0.113.66", 443, false))
+	}
+	if t.Minute()%23 == 0 {
+		fmt.Fprintln(w.forti, s.fortiOutLine(s.sec(t), "10.0.0.32", "203.0.113.99", 3333, true))
+	}
+	fmt.Fprintln(w.forti, s.fortiOutLine(s.sec(t), pick(s.r, []string{"10.0.0.31", "10.0.0.45", "10.0.0.46"}), s.randPublicIP(), 443, false))
+}
+
 func (s *Sim) sec(t time.Time) time.Time { return t.Add(time.Duration(s.r.Intn(60)) * time.Second) }
 
 // emit 生成某一分钟内的一批日志，intensity 控制量级。
@@ -197,6 +219,7 @@ func (s *Sim) emit(w *writer, t time.Time, intensity int) {
 	for i := 0; i < intensity; i++ {
 		fmt.Fprintln(w.forti, s.fortiLine(s.sec(t), pick(s.r, s.normal), s.server, pick(s.r, []int{80, 443}), false))
 	}
+	s.beacon(w, t)
 	for i := 0; i < intensity; i++ {
 		if s.r.Intn(3) == 0 {
 			s.attack(w, t, s.attackers[s.r.Intn(len(s.attackers))])
@@ -335,6 +358,9 @@ func (s *Sim) emitLive(w *writer, now time.Time, intensity int) {
 	for i := 0; i < 2*intensity; i++ {
 		u := attacker{ip: pick(s.r, s.normal), ua: pick(s.r, browserUA)}
 		fmt.Fprintln(w.nginx, s.nginxLine(now, u, "GET", pick(s.r, normalPaths), 200, 500+s.r.Intn(20000)))
+	}
+	if s.r.Intn(30) == 0 {
+		s.beacon(w, now.Add(-59*time.Second).Truncate(time.Minute))
 	}
 	if s.r.Intn(2) == 0 {
 		a := s.attackers[s.r.Intn(len(s.attackers))]

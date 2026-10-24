@@ -40,5 +40,11 @@ geo:
 detect:
   rules_file: configs/rules.example.yaml
 
+# 演示用威胁情报：模拟日志中内网主机 10.0.0.31 / 10.0.0.32 会周期性外连其中的地址，用于演示失陷主机检测
+intel:
+  blocklists:
+    - name: 演示威胁情报
+      path: configs/demo-intel.txt
+
 storage:
   snapshot: ""         # 演示环境不保存快照

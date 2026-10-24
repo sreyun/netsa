@@ -334,3 +334,51 @@ func TestDrillDownParams(t *testing.T) {
 		t.Fatal("告警下钻参数无效")
 	}
 }
+
+// 管理访问来源白名单：不在白名单内的来源返回 403，本机回环地址与健康检查始终可访问。
+func TestAllowNetworks(t *testing.T) {
+	s, _ := testServer(t, "", "")
+	s.Cfg.Server.AllowNetworks = []string{"10.8.0.0/16", "192.0.2.7"}
+	h := s.Handler()
+	req := func(remote, path string) int {
+		r := httptest.NewRequest(http.MethodGet, path, nil)
+		r.RemoteAddr = remote
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, r)
+		return rec.Code
+	}
+	for remote, want := range map[string]int{"10.8.3.4:5555": 200, "192.0.2.7:1": 200, "127.0.0.1:9": 200, "[::1]:9": 200, "198.51.100.1:80": 403, "10.9.0.1:80": 403} {
+		if got := req(remote, "/api/overview"); got != want {
+			t.Errorf("%s 访问: %d，期望 %d", remote, got, want)
+		}
+	}
+	if req("198.51.100.1:80", "/healthz") != 200 {
+		t.Fatal("健康检查不受来源限制")
+	}
+}
+
+// 安全评估接口与按 ATT&CK 技术下钻。
+func TestAssessmentAPI(t *testing.T) {
+	s, st := testServer(t, "", "")
+	h := s.Handler()
+	st.Record(&model.Event{Kind: model.KindWeb, SrcIP: "198.51.100.40", Host: "a.com", Method: "POST", URI: "/up/x.php", Status: 200, Bytes: 10, Time: time.Now()},
+		[]model.Hit{{RuleID: "ws", Name: "ws", Category: "WebShell后门", Severity: model.SevCritical, Phase: model.PhasePersistence, Result: model.ResultSuccess}})
+	var a store.Assessment
+	rec := get(h, "/api/assessment")
+	if err := json.Unmarshal(rec.Body.Bytes(), &a); err != nil || rec.Code != 200 {
+		t.Fatalf("评估接口: %d %v", rec.Code, err)
+	}
+	if a.Grade != "E" || len(a.Compromised) != 1 || len(a.Actions) == 0 || a.Actions[0].Priority != "P0" || a.Matrix == nil || len(a.Dimensions) != 7 {
+		t.Fatalf("评估结果: %+v", a)
+	}
+	var r struct{ Total int }
+	json.Unmarshal(get(h, "/api/attackers?technique=T1505.003").Body.Bytes(), &r)
+	if r.Total != 1 {
+		t.Fatal("按技术筛选攻击源")
+	}
+	var rep map[string]any
+	json.Unmarshal(get(h, "/api/report").Body.Bytes(), &rep)
+	if rep["assessment"] == nil {
+		t.Fatal("分析报告应包含安全评估")
+	}
+}
