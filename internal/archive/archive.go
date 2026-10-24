@@ -32,13 +32,13 @@ const Table = "netsa_alerts"
 
 // Options 是归档参数。
 type Options struct {
-	DSN             string
-	RetentionMonths int // 负数表示永久保留
-	BatchSize       int
-	FlushInterval   time.Duration
-	QueueSize       int
-	Instance        string         // 写入实例名（多台 netsa 共用一个数据库时区分来源）
-	Location        *time.Location // 按此时区划分自然月
+	DSN            string
+	RetentionYears int // 保留年数，0 或负数表示永久保留
+	BatchSize      int
+	FlushInterval  time.Duration
+	QueueSize      int
+	Instance       string         // 写入实例名（多台 netsa 共用一个数据库时区分来源）
+	Location       *time.Location // 按此时区划分自然月
 }
 
 // Archive 是告警归档器。
@@ -129,7 +129,7 @@ func (a *Archive) connect(ctx context.Context) {
 		if err == nil {
 			a.ready.Store(true)
 			close(a.readyCh)
-			log.Printf("[archive] 已连接告警归档数据库 %s（保留 %d 个月）", a.Server(), a.opt.RetentionMonths)
+			log.Printf("[archive] 已连接告警归档数据库 %s（%s）", a.Server(), a.retentionText())
 			a.maintain(ctx)
 			return
 		}
@@ -302,12 +302,21 @@ func (a *Archive) ensurePartition(ctx context.Context, month time.Time) error {
 	return nil
 }
 
+// retentionText 返回保留周期的说明。
+func (a *Archive) retentionText() string {
+	if a.opt.RetentionYears <= 0 {
+		return "永久保留"
+	}
+	return fmt.Sprintf("保留 %d 年", a.opt.RetentionYears)
+}
+
 // cutoff 返回保留期的起点（早于此时间的告警不再写入，相应分区会被删除）；永久保留时返回零值。
 func (a *Archive) cutoff(now time.Time) time.Time {
-	if a.opt.RetentionMonths < 0 {
+	if a.opt.RetentionYears <= 0 {
 		return time.Time{}
 	}
-	return monthStart(now.In(a.opt.Location), -(a.opt.RetentionMonths - 1))
+	// 保留完整的 N×12 个月再加当月：任何时刻都至少保留最近 N 年
+	return monthStart(now.In(a.opt.Location), -12*a.opt.RetentionYears)
 }
 
 // maintain 就绪时与之后每小时检查：提前创建下月分区，删除超过保留期的分区，并清理默认分区中的过期数据。
@@ -361,7 +370,7 @@ func (a *Archive) dropExpired(ctx context.Context, now time.Time) error {
 			return fmt.Errorf("删除过期分区 %s 失败: %w", p.Name, err)
 		}
 		a.parts.Delete(p.From.Unix())
-		log.Printf("[archive] 已删除过期分区 %s（保留 %d 个月）", p.Name, a.opt.RetentionMonths)
+		log.Printf("[archive] 已删除过期分区 %s（%s）", p.Name, a.retentionText())
 	}
 	_, err = a.pool.Exec(ctx, "DELETE FROM "+Table+"_default WHERE time < $1", cut)
 	return err
@@ -588,7 +597,8 @@ func (a *Archive) write(ctx context.Context, batch []item) (err error) {
 	}
 	// 写入前确保涉及的月分区存在（只为保留期内的月份建分区，其余落入默认分区）
 	for _, m := range months {
-		if !m.Before(cut) && !m.After(now.Add(32*24*time.Hour)) {
+		// 时间明显异常（2000 年以前）的告警落入默认分区，不为其单独建分区
+		if !m.Before(cut) && m.Year() >= 2000 && !m.After(now.Add(32*24*time.Hour)) {
 			if err := a.ensurePartition(ctx, m); err != nil {
 				return partitionError{err} // 建分区失败（如多实例并发、锁超时）与告警数据无关，整批稍后重试
 			}
@@ -704,20 +714,20 @@ func scrub(err error) error {
 
 // Status 是归档运行状态。
 type Status struct {
-	Enabled         bool            `json:"enabled"`
-	Connected       bool            `json:"connected"`
-	Server          string          `json:"server,omitempty"`
-	Written         int64           `json:"written"`
-	Queued          int             `json:"queued"`
-	Dropped         int64           `json:"dropped"`
-	Expired         int64           `json:"expired"`
-	Duplicates      int64           `json:"duplicates"` // 重复分析同一份日志产生、已跳过的告警
-	FailedBatches   int64           `json:"failed_batches"`
-	LastWrite       time.Time       `json:"last_write"`
-	LastError       string          `json:"last_error,omitempty"`
-	LastErrorAt     time.Time       `json:"last_error_at"`
-	RetentionMonths int             `json:"retention_months"`
-	Partitions      []PartitionInfo `json:"partitions"`
+	Enabled        bool            `json:"enabled"`
+	Connected      bool            `json:"connected"`
+	Server         string          `json:"server,omitempty"`
+	Written        int64           `json:"written"`
+	Queued         int             `json:"queued"`
+	Dropped        int64           `json:"dropped"`
+	Expired        int64           `json:"expired"`
+	Duplicates     int64           `json:"duplicates"` // 重复分析同一份日志产生、已跳过的告警
+	FailedBatches  int64           `json:"failed_batches"`
+	LastWrite      time.Time       `json:"last_write"`
+	LastError      string          `json:"last_error,omitempty"`
+	LastErrorAt    time.Time       `json:"last_error_at"`
+	RetentionYears int             `json:"retention_years"` // 0 表示永久保留
+	Partitions     []PartitionInfo `json:"partitions"`
 }
 
 // Status 返回运行状态（包含分区列表，需要查询数据库）。
@@ -726,7 +736,7 @@ func (a *Archive) Status(ctx context.Context) Status {
 		return Status{Partitions: []PartitionInfo{}}
 	}
 	st := Status{Enabled: true, Server: a.Server(), Written: a.written.Load(), Queued: len(a.q), Dropped: a.dropped.Load(),
-		Expired: a.expired.Load(), Duplicates: a.duplicates.Load(), FailedBatches: a.failed.Load(), RetentionMonths: a.opt.RetentionMonths, Partitions: []PartitionInfo{}}
+		Expired: a.expired.Load(), Duplicates: a.duplicates.Load(), FailedBatches: a.failed.Load(), RetentionYears: max(a.opt.RetentionYears, 0), Partitions: []PartitionInfo{}}
 	a.mu.Lock()
 	st.LastWrite, st.LastError, st.LastErrorAt = a.lastWrite, a.lastErr, a.lastErrAt
 	a.mu.Unlock()

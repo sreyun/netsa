@@ -1061,7 +1061,7 @@ async function loadArchiveStatus() {
   const st = await api('/api/archive/status');
   $('#arcPanel').hidden = false;
   const conn = st.connected ? '<span class="nt-on">● 已连接</span>' : '<span class="lv-high">● 未连接（后台自动重试，期间告警在内存队列中缓冲）</span>';
-  $('#arcSummary').textContent = `${st.server || ''} · 保留 ${st.retention_months < 0 ? '永久' : st.retention_months + ' 个月'}`;
+  $('#arcSummary').textContent = `${st.server || ''} · ${st.retention_years > 0 ? `至少保留最近 ${st.retention_years} 年` : '永久保留'}`;
   const errRecent = st.last_error && !zero(st.last_error_at) && (zero(st.last_write) || st.last_error_at > st.last_write);
   const parts = (st.partitions || []).map((p) => `<tr><td class="mono">${esc(p.name)}</td>
     <td class="nowrap">${p.default ? '<span class="muted">默认分区（超出月分区范围的数据）</span>' : `${esc(fmtTime(p.from).slice(0, 10))} ~ ${esc(fmtTime(p.to).slice(0, 10))}`}</td>
@@ -1072,7 +1072,7 @@ async function loadArchiveStatus() {
       <div class="k">待写入队列</div><div>${num(st.queued)} 条</div>
       <div class="k">丢弃</div><div>${st.dropped ? `<span class="lv-high">${num(st.dropped)} 条</span> <span class="muted">（队列满或数据无法写入）</span>` : '0'}</div>
       <div class="k">重复跳过</div><div>${num(st.duplicates)} 条 <span class="muted">（同一份日志被重复分析时，已归档的告警不会重复写入）</span></div>
-      <div class="k">超出保留期</div><div>${num(st.expired)} 条 <span class="muted">（早于保留期的告警不写入）</span></div>
+      ${st.retention_years > 0 ? `<div class="k">超出保留期</div><div>${num(st.expired)} 条 <span class="muted">（早于保留期的告警不写入，过期分区每小时自动清理）</span></div>` : ''}
       <div class="k">写入失败批次</div><div>${st.failed_batches ? `<span class="lv-medium">${num(st.failed_batches)}</span>（已自动重试）` : '0'}</div>
       <div class="k">最近写入</div><div>${esc(fmtTime(st.last_write))}</div>
       ${st.last_error ? `<div class="k">最近错误</div><div class="${errRecent ? 'arc-err' : 'muted'}">${esc(fmtTime(st.last_error_at))} ${esc(st.last_error)}${errRecent ? '' : '（已恢复）'}</div>` : ''}

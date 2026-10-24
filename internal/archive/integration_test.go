@@ -56,13 +56,13 @@ func withParam(dsn, k, v string) string {
 	return dsn + sep + k + "=" + url.QueryEscape(v)
 }
 
-func openTest(t *testing.T, dsn string, retention int, batch ...int) *Archive {
+func openTest(t *testing.T, dsn string, retentionYears int, batch ...int) *Archive {
 	sh, _ := time.LoadLocation("Asia/Shanghai")
 	bs := 50
 	if len(batch) > 0 {
 		bs = batch[0]
 	}
-	a, err := Open(context.Background(), Options{DSN: dsn, RetentionMonths: retention, BatchSize: bs, FlushInterval: 50 * time.Millisecond,
+	a, err := Open(context.Background(), Options{DSN: dsn, RetentionYears: retentionYears, BatchSize: bs, FlushInterval: 50 * time.Millisecond,
 		QueueSize: 100000, Instance: "node-1", Location: sh})
 	if err != nil {
 		t.Fatal(err)
@@ -95,7 +95,7 @@ func partNames(t *testing.T, a *Archive) map[string]PartitionInfo {
 
 func TestIntegrationArchive(t *testing.T) {
 	dsn := testDSN(t)
-	a := openTest(t, dsn, 6)
+	a := openTest(t, dsn, 1)
 	defer a.Close(5 * time.Second)
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -129,8 +129,8 @@ func TestIntegrationArchive(t *testing.T) {
 		{ID: 5, Time: now.Add(-5 * time.Minute), Kind: model.KindWeb, SrcIP: "::ffff:10.1.2.4", RuleID: "sqli-001", Name: "SQL 注入 union select", Category: "SQL注入", Severity: model.SevHigh, Target: "/a\x00b", Evidence: "bad\xff\xfeutf8\x00", UA: "sqlmap\x00", Source: "nginx"},
 		// 设备时钟错误产生的未来时间
 		{ID: 6, Time: now.AddDate(0, 3, 0), SrcIP: "10.9.9.9", RuleID: "clock", Name: "时钟错误", Severity: model.SevLow},
-		// 超过保留期（6 个月）的告警不写入
-		{ID: 7, Time: now.AddDate(-1, 0, 0), SrcIP: "10.9.9.8", RuleID: "too-old", Name: "过期", Severity: model.SevLow},
+		// 超过保留期（1 年）的告警不写入
+		{ID: 7, Time: now.AddDate(-2, 0, 0), SrcIP: "10.9.9.8", RuleID: "too-old", Name: "过期", Severity: model.SevLow},
 		// 2 个月前与 3 个月前：写入时自动建分区；3 个月前的分区需迁入默认分区中的旧数据
 		{ID: 8, Time: monthStart(now, -2).Add(time.Hour), SrcIP: "10.1.2.5", RuleID: "sqli-001", Name: "SQL 注入 union select", Severity: model.SevHigh},
 		{ID: 9, Time: old.Add(time.Hour), SrcIP: "203.0.113.99", RuleID: "legacy", Name: "历史规则", Severity: model.SevMedium},
@@ -262,8 +262,8 @@ func TestIntegrationArchive(t *testing.T) {
 		t.Fatalf("状态: %+v", s)
 	}
 
-	// 保留期：模拟 8 个月之后的维护，只保留最近 6 个月（含当月）的分区
-	future := monthStart(now, 8).Add(time.Hour)
+	// 保留期：模拟 16 个月之后的维护，只保留最近 1 年（12 个完整月加当月）的分区
+	future := monthStart(now, 16).Add(time.Hour)
 	if err := a.dropExpired(ctx, future); err != nil {
 		t.Fatal(err)
 	}
@@ -289,7 +289,7 @@ func TestIntegrationConcurrent(t *testing.T) {
 	dsn := testDSN(t)
 	var as []*Archive
 	for i := 0; i < 3; i++ {
-		as = append(as, openTest(t, dsn, 3, 1000)) // 默认批量大小
+		as = append(as, openTest(t, dsn, 1, 1000)) // 默认批量大小
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -352,7 +352,7 @@ func TestIntegrationOutageRecovery(t *testing.T) {
 	proxyAddr := l.Addr().String()
 	l.Close()
 	u.Host = proxyAddr
-	a := openTest(t, u.String(), 6)
+	a := openTest(t, u.String(), 0)
 	defer a.Close(5 * time.Second)
 
 	for i := 0; i < 120; i++ {
@@ -405,7 +405,7 @@ func TestIntegrationOutageRecovery(t *testing.T) {
 func TestIntegrationQueueFullAndClose(t *testing.T) {
 	dsn := testDSN(t)
 	sh, _ := time.LoadLocation("Asia/Shanghai")
-	a, err := Open(context.Background(), Options{DSN: dsn, RetentionMonths: 6, BatchSize: 10000, FlushInterval: time.Hour, QueueSize: 100, Location: sh})
+	a, err := Open(context.Background(), Options{DSN: dsn, BatchSize: 10000, FlushInterval: time.Hour, QueueSize: 100, Location: sh})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -469,7 +469,7 @@ func TestIntegrationIdempotent(t *testing.T) {
 		return out
 	}
 	for round, base := range []uint64{0, 5000, 9000} {
-		a := openTest(t, dsn, 6)
+		a := openTest(t, dsn, 0)
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		if err := a.WaitReady(ctx); err != nil {
 			t.Fatal(err)

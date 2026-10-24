@@ -175,7 +175,7 @@ func build(cfg *config.Config) (*app, error) {
 	if dsn := archiveDSN(cfg); dsn != "" {
 		host, _ := os.Hostname()
 		ar, err := archive.Open(context.Background(), archive.Options{
-			DSN: dsn, RetentionMonths: cfg.Archive.RetentionMonths, BatchSize: cfg.Archive.BatchSize, FlushInterval: cfg.Archive.FlushInterval,
+			DSN: dsn, RetentionYears: cfg.Archive.RetentionYears, BatchSize: cfg.Archive.BatchSize, FlushInterval: cfg.Archive.FlushInterval,
 			QueueSize: cfg.Archive.QueueSize, Instance: host, Location: loc,
 		})
 		if err != nil {

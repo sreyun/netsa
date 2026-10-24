@@ -187,11 +187,12 @@ type ArchiveConfig struct {
 	// DSN 例如 postgres://netsa:密码@127.0.0.1:5432/netsa?sslmode=disable；为空表示不启用。
 	// 建议通过环境变量 NETSA_ARCHIVE_DSN 提供，避免密码写入配置文件。
 	DSN string `yaml:"dsn"`
-	// RetentionMonths 保留月数，超过的分区自动删除（默认 6，满足《网络安全法》日志留存不少于六个月的要求；负数表示永久保留）
-	RetentionMonths int           `yaml:"retention_months"`
-	BatchSize       int           `yaml:"batch_size"`     // 每批写入条数（默认 1000）
-	FlushInterval   time.Duration `yaml:"flush_interval"` // 未满一批时的最长等待时间（默认 2s）
-	QueueSize       int           `yaml:"queue_size"`     // 待写入队列容量（默认 100000），数据库不可用时在此缓冲
+	// RetentionYears 按年设置的保留周期：0（默认）表示永久保留；N 表示至少保留最近 N 年，更早的月分区整表删除
+	// （按月分区，实际保留 N 年加不足一个月，满足《网络安全法》日志留存不少于六个月的要求）
+	RetentionYears int           `yaml:"retention_years"`
+	BatchSize      int           `yaml:"batch_size"`     // 每批写入条数（默认 1000）
+	FlushInterval  time.Duration `yaml:"flush_interval"` // 未满一批时的最长等待时间（默认 2s）
+	QueueSize      int           `yaml:"queue_size"`     // 待写入队列容量（默认 100000），数据库不可用时在此缓冲
 }
 
 type StorageConfig struct {
@@ -312,8 +313,8 @@ func (c *Config) Validate() error {
 	if (c.Server.Username == "") != (c.Server.Password == "") {
 		return fmt.Errorf("server.username 与 server.password 需同时设置")
 	}
-	if a := c.Archive; a.BatchSize > 10000 || a.QueueSize > 5000000 || a.RetentionMonths > 120 {
-		return fmt.Errorf("archive 配置超出范围：batch_size ≤ 10000、queue_size ≤ 5000000、retention_months ≤ 120")
+	if a := c.Archive; a.BatchSize > 10000 || a.QueueSize > 5000000 || a.RetentionYears < 0 || a.RetentionYears > 100 {
+		return fmt.Errorf("archive 配置超出范围：batch_size ≤ 10000、queue_size ≤ 5000000、retention_years 为 0（永久保留）~ 100")
 	}
 	if d := c.Archive.DSN; d != "" && !strings.HasPrefix(d, "postgres://") && !strings.HasPrefix(d, "postgresql://") && !strings.Contains(d, "=") {
 		return fmt.Errorf("archive.dsn 格式无效，应形如 postgres://用户:密码@主机:5432/库名?sslmode=disable")
@@ -411,9 +412,6 @@ func (c *Config) fill() {
 		if *p.v <= 0 {
 			*p.v = p.def
 		}
-	}
-	if c.Archive.RetentionMonths == 0 {
-		c.Archive.RetentionMonths = 6
 	}
 	if c.Archive.BatchSize <= 0 {
 		c.Archive.BatchSize = 1000
