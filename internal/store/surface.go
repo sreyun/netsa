@@ -1,7 +1,9 @@
 package store
 
 import (
+	"math"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -27,6 +29,32 @@ type Endpoint struct {
 	atk        map[string]struct{} // 攻击者集合（有上限）
 	sens       *sensitiveRule      // 敏感资源分类缓存
 	classified bool
+	// 正常（非攻击）2xx 响应大小的均值与方差（Welford 算法），用于复核攻击请求的“疑似成功”研判
+	normN          int64
+	normMean, norm float64
+}
+
+// observeNormal 记录一次正常响应的大小。
+func (ep *Endpoint) observeNormal(bytes int64) {
+	ep.normN++
+	x := float64(bytes)
+	d := x - ep.normMean
+	ep.normMean += d / float64(ep.normN)
+	ep.norm += d * (x - ep.normMean)
+}
+
+// baselineMatches 判断攻击请求的响应是否就是该接口的正常页面：要求接口的正常响应大小稳定
+// （至少 5 个样本、变异系数不超过 10%），且本次响应与均值相差不超过 5% 或 2 个标准差。
+// 响应大小本身波动较大的接口无法据此判断，保留原研判，宁可多报也不漏掉真实的攻击成功。
+func (ep *Endpoint) baselineMatches(bytes int64) bool {
+	if ep == nil || ep.normN < 5 || bytes <= 0 || ep.normMean <= 0 {
+		return false
+	}
+	std := math.Sqrt(ep.norm / float64(ep.normN-1))
+	if std/ep.normMean > 0.1 {
+		return false
+	}
+	return math.Abs(float64(bytes)-ep.normMean) <= math.Max(0.05*ep.normMean, 2*std)
 }
 
 // Service 是从防火墙日志中观测到的网络服务（目的 IP:端口）。
@@ -53,6 +81,7 @@ type Finding struct {
 	Asset       string         `json:"asset"`
 	Evidence    string         `json:"evidence"`
 	Remediation string         `json:"remediation"`
+	IPs         []string       `json:"ips,omitempty"` // 相关地址：攻击来源，或失陷主机外连的地址（最多 8 个）
 	Count       int64          `json:"count"`
 	FirstSeen   time.Time      `json:"first_seen"`
 	LastSeen    time.Time      `json:"last_seen"`
@@ -270,6 +299,9 @@ func (sf *surface) observeWeb(ev *model.Event, hits []model.Hit, attacked bool) 
 		if ev.Time.After(ep.LastSeen) {
 			ep.LastSeen = ev.Time
 		}
+		if !attacked && ev.Status >= 200 && ev.Status < 300 && ev.Bytes > 0 {
+			ep.observeNormal(ev.Bytes)
+		}
 		if attacked {
 			ep.Attacks++
 			if len(ep.atk) < maxSetSize {
@@ -286,7 +318,7 @@ func (sf *surface) observeWeb(ev *model.Event, hits []model.Hit, attacked bool) 
 	// 敏感资源被成功访问
 	if ev.Status == 200 && ev.Bytes > 0 && sens != nil {
 		sf.finding("sens:"+key, sens.title, "敏感资源暴露", sens.sev, asset,
-			ev.SrcIP+" 访问返回 200，响应 "+strconv.FormatInt(ev.Bytes, 10)+" 字节", sens.remediation, ev.Time)
+			ev.SrcIP+" 访问返回 200，响应 "+strconv.FormatInt(ev.Bytes, 10)+" 字节", sens.remediation, ev.SrcIP, ev.Time)
 	}
 	for _, h := range hits {
 		if h.TagOnly || h.Phase == model.PhaseRecon {
@@ -304,7 +336,7 @@ func (sf *surface) observeWeb(ev *model.Event, hits []model.Hit, attacked bool) 
 				rem = "核查该接口是否存在对应漏洞，排查服务器是否已被入侵，并在 WAF 中加入拦截规则"
 			}
 			sf.finding("succ:"+h.Category+":"+key, "疑似攻击成功: "+h.Category, "攻击成功研判", h.Severity, asset,
-				ev.SrcIP+" "+ev.Method+" 返回 "+strconv.Itoa(ev.Status)+"，"+h.Name+": "+h.Evidence, rem, ev.Time)
+				ev.SrcIP+" "+ev.Method+" 返回 "+strconv.Itoa(ev.Status)+"，"+h.Name+": "+h.Evidence, rem, ev.SrcIP, ev.Time)
 		}
 	}
 }
@@ -312,6 +344,10 @@ func (sf *surface) observeWeb(ev *model.Event, hits []model.Hit, attacked bool) 
 // observeFw 更新网络服务暴露面（调用方持锁）。
 func (sf *surface) observeFw(ev *model.Event) {
 	if ev.DstPort <= 0 {
+		return
+	}
+	// 内网主机访问公网（出站流量）不是本方对外提供的服务，不计入暴露面
+	if ev.DstIP != "" && geo.IsPrivate(ev.SrcIP) && !geo.IsPrivate(ev.DstIP) {
 		return
 	}
 	sf.Ports[ev.DstPort]++
@@ -333,7 +369,7 @@ func (sf *surface) observeFw(ev *model.Event) {
 			sv.Exposed = true
 			if sv.Risk >= model.SevMedium {
 				sf.finding("svc:"+key, "高危服务对公网开放: "+sv.Name, "服务暴露", sv.Risk, key,
-					"防火墙放行了来自公网 "+ev.SrcIP+" 的连接", "通过安全组/防火墙将该端口限制为内网或白名单访问，必要时修改默认端口并启用认证", ev.Time)
+					"防火墙放行了来自公网 "+ev.SrcIP+" 的连接", "通过安全组/防火墙将该端口限制为内网或白名单访问，必要时修改默认端口并启用认证", ev.SrcIP, ev.Time)
 			}
 		}
 	case model.ActionDeny:
@@ -348,7 +384,7 @@ func (sf *surface) observeFw(ev *model.Event) {
 	}
 }
 
-func (sf *surface) finding(id, title, cat string, sev model.Severity, asset, evidence, remediation string, t time.Time) {
+func (sf *surface) finding(id, title, cat string, sev model.Severity, asset, evidence, remediation, ip string, t time.Time) {
 	f := sf.Findings[id]
 	if f == nil {
 		if len(sf.Findings) >= 5000 {
@@ -358,6 +394,12 @@ func (sf *surface) finding(id, title, cat string, sev model.Severity, asset, evi
 		sf.Findings[id] = f
 	}
 	f.Count++
+	if sev > f.Severity { // 同一发现后续出现更严重的情况（如外连被放行）时升级
+		f.Severity, f.Evidence = sev, evidence
+	}
+	if ip != "" && len(f.IPs) < 8 && !slices.Contains(f.IPs, ip) {
+		f.IPs = append(f.IPs, ip)
+	}
 	if t.After(f.LastSeen) {
 		f.LastSeen = t
 	}

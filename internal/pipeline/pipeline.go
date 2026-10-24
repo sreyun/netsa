@@ -170,7 +170,7 @@ func (p *Pipeline) aggregate(items []item) {
 	p.processed.Add(int64(len(items)))
 	for i, res := range results {
 		ev := evs[i]
-		if ev.Outbound {
+		if ev.Outbound && len(res.Alerts) == 0 { // 出站流量只有外连威胁情报地址时才产生告警
 			continue
 		}
 		for _, a := range res.Alerts {

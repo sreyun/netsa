@@ -1,0 +1,187 @@
+package store
+
+import (
+	"fmt"
+	"slices"
+	"sort"
+	"strings"
+	"time"
+
+	"netsa/internal/geo"
+	"netsa/internal/model"
+)
+
+// c2Hit 检测内网主机（或本机出站流量）连接威胁情报地址的行为。放行的连接为严重，被拦截的连接为高危
+// （拦截说明主机已在尝试回连）；只命中 Tor 出口节点时为中危（可能是正常的匿名浏览）。
+func (s *Store) c2Hit(ev *model.Event) *model.Hit {
+	if ev.DstIP == "" || geo.IsPrivate(ev.DstIP) || !ev.Outbound && !geo.IsPrivate(ev.SrcIP) {
+		return nil
+	}
+	names := s.IntelMatch(ev.DstIP)
+	if len(names) == 0 {
+		return nil
+	}
+	sev, res := model.SevCritical, model.ResultAllowed
+	if ev.Action == model.ActionDeny {
+		sev, res = model.SevHigh, model.ResultBlocked
+	}
+	if len(names) == 1 && names[0] == "Tor出口节点" {
+		sev = min(sev, model.SevMedium)
+	}
+	dst := ev.DstIP
+	if ev.DstPort > 0 {
+		dst += fmt.Sprintf(":%d", ev.DstPort)
+	}
+	if ev.Proto != "" {
+		dst += "/" + ev.Proto
+	}
+	act := "已放行"
+	if res == model.ResultBlocked {
+		act = "已拦截"
+	}
+	return &model.Hit{RuleID: "c2-egress", Name: "外连威胁情报地址（疑似失陷）", Category: CatC2, Severity: sev, Phase: model.PhasePersistence,
+		Result: res, Evidence: ev.SrcIP + " → " + dst + "（" + act + "），命中 " + strings.Join(names, "、")}
+}
+
+// Compromised 是一个疑似失陷的资产。
+type Compromised struct {
+	Asset      string         `json:"asset"`
+	Kind       string         `json:"kind"`       // web：Web 资产（接口被攻击成功）；host：主机（外连恶意地址）
+	Confidence string         `json:"confidence"` // high / medium
+	Severity   model.Severity `json:"severity"`
+	Indicators []string       `json:"indicators"`
+	IPs        []string       `json:"ips"` // 攻击来源，或主机外连的恶意地址
+	Count      int64          `json:"count"`
+	FirstSeen  time.Time      `json:"first_seen"`
+	LastSeen   time.Time      `json:"last_seen"`
+	Advice     string         `json:"advice"`
+}
+
+// 攻击成功即意味着可在服务器上执行代码或已植入后门的攻击类型，研判为高置信失陷。
+var highImpact = map[string]bool{"WebShell后门": true, "命令/代码执行": true, "表达式注入": true, "反序列化": true, CatC2: true}
+
+// compromisedLocked 汇总疑似失陷资产（调用方持读锁）：攻击成功研判按资产合并，外连恶意地址按主机列出。
+func (s *Store) compromisedLocked() []*Compromised {
+	byAsset := map[string]*Compromised{}
+	var out []*Compromised
+	for _, f := range s.surf.Findings {
+		var kind string
+		switch f.Category {
+		case "攻击成功研判":
+			kind = "web"
+		case "失陷迹象":
+			kind = "host"
+		default:
+			continue
+		}
+		c := byAsset[kind+"|"+f.Asset]
+		if c == nil {
+			c = &Compromised{Asset: f.Asset, Kind: kind, Confidence: "medium", FirstSeen: f.FirstSeen}
+			byAsset[kind+"|"+f.Asset] = c
+			out = append(out, c)
+		}
+		cat := strings.TrimPrefix(f.Title, "疑似攻击成功: ")
+		if kind == "host" || highImpact[cat] {
+			c.Confidence = "high"
+		}
+		if f.Severity > c.Severity {
+			c.Severity = f.Severity
+		}
+		c.Indicators = append(c.Indicators, f.Title+"："+f.Evidence)
+		for _, ip := range f.IPs {
+			if len(c.IPs) < 10 && !slices.Contains(c.IPs, ip) {
+				c.IPs = append(c.IPs, ip)
+			}
+		}
+		c.Count += f.Count
+		if f.FirstSeen.Before(c.FirstSeen) {
+			c.FirstSeen = f.FirstSeen
+		}
+		if f.LastSeen.After(c.LastSeen) {
+			c.LastSeen = f.LastSeen
+		}
+		if c.Advice == "" || highImpact[cat] {
+			c.Advice = f.Remediation
+		}
+	}
+	// 同一资产命中多种攻击成功研判（如 SQL 注入成功后又出现 WebShell 访问）时提升为高置信
+	for _, c := range out {
+		if len(c.Indicators) >= 2 {
+			c.Confidence = "high"
+		}
+		sort.Strings(c.Indicators)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		a, b := out[i], out[j]
+		if a.Confidence != b.Confidence {
+			return a.Confidence == "high"
+		}
+		if a.Severity != b.Severity {
+			return a.Severity > b.Severity
+		}
+		return a.LastSeen.After(b.LastSeen)
+	})
+	return out
+}
+
+// CompromisedAssets 返回疑似失陷资产。
+func (s *Store) CompromisedAssets() []*Compromised {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.compromisedLocked()
+}
+
+func hasCategory(hits []model.Hit, cat string) bool {
+	for _, h := range hits {
+		if h.Category == cat && !h.TagOnly {
+			return true
+		}
+	}
+	return false
+}
+
+func hitOf(hits []model.Hit, cat string) model.Hit {
+	for _, h := range hits {
+		if h.Category == cat && !h.TagOnly {
+			return h
+		}
+	}
+	return model.Hit{}
+}
+
+// verifySuccess 用接口的正常响应基线复核“疑似成功”：攻击请求的响应与该接口正常访问时的响应大小一致
+// （例如注入载荷被忽略、返回的仍是正常页面），说明攻击并未改变应用行为，改判为“未拦截”。
+// 返回的切片为副本，不修改调用方的数据。
+func (s *Store) verifySuccess(ev *model.Event, hits []model.Hit) []model.Hit {
+	var ep *Endpoint
+	looked := false
+	var out []model.Hit
+	for i, h := range hits {
+		if h.Result != model.ResultSuccess || h.Category == "敏感文件探测" || h.Category == "WebShell后门" {
+			continue // 敏感文件与 WebShell 以资源存在 / 交互成功为准，不按页面大小复核
+		}
+		if !looked {
+			looked = true
+			host := ev.Host
+			if host == "" {
+				host = "-"
+			}
+			ep = s.surf.Endpoints[host+" "+normPath(ev.URI)]
+		}
+		if !ep.baselineMatches(ev.Bytes) {
+			continue
+		}
+		if out == nil {
+			out = append([]model.Hit(nil), hits...)
+		}
+		out[i].Result = model.ResultPassed
+		if s := out[i].Severity; s > model.SevLow && s < model.SevCritical {
+			out[i].Severity = s - 1 // 撤销“疑似成功”时的升级（严重级别的规则本身即为严重，不降级）
+		}
+		out[i].Evidence += "（响应大小与该接口正常响应一致，判定为未成功）"
+	}
+	if out == nil {
+		return hits
+	}
+	return out
+}

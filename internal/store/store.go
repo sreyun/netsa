@@ -155,6 +155,7 @@ type Bucket struct {
 	Fw      int64    `json:"fw"`
 	Attacks int64    `json:"attacks"`
 	Blocked int64    `json:"blocked"`
+	Success int64    `json:"success,omitempty"` // 疑似攻击成功的命中
 	Sev     [5]int64 `json:"sev"`
 }
 
@@ -255,9 +256,20 @@ func (s *Store) recordLocked(ev *model.Event, hits []model.Hit) RecordResult {
 	var res RecordResult
 
 	s.totals.Events++
+	// 外连威胁情报地址：内网主机（或本机）主动连接已知恶意地址是典型的失陷迹象（木马回连 C2、挖矿、数据外传）。
+	// 普通出站流量不作为攻击来源统计；命中情报的出站连接以发起连接的主机为主体记录告警。
+	var c2 *model.Hit
+	if ev.Kind == model.KindFirewall && s.IntelMatch != nil {
+		c2 = s.c2Hit(ev)
+	}
 	if ev.Outbound {
 		s.totals.Outbound++
-		return res
+		if c2 == nil {
+			return res
+		}
+	}
+	if c2 != nil {
+		hits = append(hits[:len(hits):len(hits)], *c2) // 不修改调用方的切片
 	}
 	// 统计用时间：设备时钟错误或解析异常产生的未来 / 远古时间按当前时间统计，
 	// 否则一条异常日志就会把时间窗口推到未来，导致趋势数据被保留期清理、“近 1 小时”统计失真。
@@ -343,6 +355,9 @@ func (s *Store) recordLocked(ev *model.Event, hits []model.Hit) RecordResult {
 		}
 	}
 
+	if ev.Kind == model.KindWeb && ev.Status >= 200 && ev.Status < 300 {
+		hits = s.verifySuccess(ev, hits)
+	}
 	attacked := false
 	for _, h := range hits {
 		if h.TagOnly {
@@ -372,6 +387,7 @@ func (s *Store) recordLocked(ev *model.Event, hits []model.Hit) RecordResult {
 		}
 		if h.Result == model.ResultSuccess {
 			s.totals.Success++
+			b.Success++
 			p.Successes++
 		}
 		p.Attacks++
@@ -408,6 +424,15 @@ func (s *Store) recordLocked(ev *model.Event, hits []model.Hit) RecordResult {
 	}
 	if ev.Kind == model.KindWeb {
 		s.surf.observeWeb(ev, hits, attacked)
+	} else if c2 == nil && geo.IsPrivate(ev.SrcIP) && hasCategory(hits, CatMalware) {
+		// 安全设备报出内网主机的恶意软件 / 远控通信，同样是失陷迹象
+		h := hitOf(hits, CatMalware)
+		s.surf.finding("c2:"+ev.SrcIP, "内网主机触发恶意软件 / 远控告警", "失陷迹象", h.Severity, ev.SrcIP, h.Name+"："+h.Evidence,
+			"隔离该主机并使用终端安全软件全盘查杀，排查恶意进程、自启动项与外连；确认感染途径后修复", ev.DstIP, ev.Time)
+		s.surf.observeFw(ev)
+	} else if c2 != nil {
+		s.surf.finding("c2:"+ev.SrcIP, "内网主机外连威胁情报地址", "失陷迹象", c2.Severity, ev.SrcIP, c2.Evidence,
+			"立即隔离该主机，排查恶意进程、计划任务、自启动项与可疑账号；在出口防火墙封禁该地址，并核查同网段其他主机是否存在相同外连", ev.DstIP, ev.Time)
 	} else {
 		s.surf.observeFw(ev)
 	}

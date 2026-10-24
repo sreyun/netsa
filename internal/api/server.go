@@ -76,6 +76,7 @@ func (s *Server) Handler() http.Handler {
 		writeJSON(w, map[string]any{"home": s.Cfg.Home, "data": res})
 	}))
 	mux.HandleFunc("GET /api/surface", cached(3*time.Second, func(w http.ResponseWriter, r *http.Request) { writeJSON(w, s.Store.Surface()) }))
+	mux.HandleFunc("GET /api/assessment", cached(3*time.Second, s.assessment))
 	mux.HandleFunc("GET /api/sources", s.sources)
 	mux.HandleFunc("GET /api/rules", func(w http.ResponseWriter, r *http.Request) { writeJSON(w, s.Engine.Rules()) })
 	mux.HandleFunc("GET /api/stream", func(w http.ResponseWriter, r *http.Request) { s.Broker.Serve(w, r, s.sessionAlive(r)) })
@@ -120,7 +121,7 @@ func (s *Server) Handler() http.Handler {
 	root.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, map[string]any{"status": "ok", "uptime": time.Since(s.started).Round(time.Second).String(), "processed": s.Pipeline.Processed()})
 	})
-	root.Handle("/", s.authenticate(sameOrigin(mux)))
+	root.Handle("/", s.allowNetworks(s.authenticate(sameOrigin(mux))))
 	return securityHeaders(gzipHandler(root))
 }
 
@@ -217,6 +218,7 @@ func (s *Server) attackers(w http.ResponseWriter, r *http.Request) {
 		Limit: clamp(qint(r, "limit", 50), 1, 1000), Offset: max(qint(r, "offset", 0), 0),
 		Country: q.Get("country"), City: q.Get("city"), NetType: q.Get("net_type"), ISP: q.Get("isp"), World: q.Get("world"),
 		Province: q.Get("province"), CityMap: q.Get("city_map"), Place: q.Get("place"), Category: q.Get("category"), Phase: q.Get("phase"),
+		Technique: q.Get("technique"),
 	})
 	if list == nil {
 		list = []store.AttackerSummary{}
@@ -267,7 +269,7 @@ func (s *Server) alerts(w http.ResponseWriter, r *http.Request) {
 		MinSeverity: model.ParseSeverity(q.Get("severity")), Category: q.Get("category"), IP: q.Get("ip"),
 		Result: q.Get("result"), Kind: q.Get("kind"), Search: q.Get("q"), SinceID: since,
 		Limit: clamp(qint(r, "limit", 200), 1, 2000),
-		Phase: q.Get("phase"), Target: q.Get("target"), From: qtime(q.Get("from")), To: qtime(q.Get("to")),
+		Phase: q.Get("phase"), Target: q.Get("target"), From: qtime(q.Get("from")), To: qtime(q.Get("to")), Technique: q.Get("technique"),
 	})
 	if list == nil {
 		list = []*model.Alert{}
@@ -381,7 +383,9 @@ func (s *Server) blocklist(w http.ResponseWriter, r *http.Request) {
 func (s *Server) report(w http.ResponseWriter, r *http.Request) {
 	s.audit(r, "下载分析报告", "", nil)
 	w.Header().Set("Content-Disposition", "attachment; filename=netsa-report-"+s.now().Format("20060102-150405")+".json")
-	writeJSON(w, Report(s.Store, 200))
+	rep := Report(s.Store, 200)
+	rep["assessment"] = s.Store.Assess(s.visibility(r))
+	writeJSON(w, rep)
 }
 
 // csvSafe 防止 CSV 公式注入：以 = + - @ 制表符或回车开头的单元格（运营商、地名等可能来自第三方数据）

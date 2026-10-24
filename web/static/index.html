@@ -21,6 +21,7 @@
     <button data-tab="attackers">攻击溯源</button>
     <button data-tab="alerts">告警事件</button>
     <button data-tab="surface">攻击面分析</button>
+    <button data-tab="assess">安全评估</button>
     <button data-tab="notify">告警推送</button>
     <button data-tab="sources">数据源</button>
     <button data-tab="system" id="tabSystem" hidden>系统管理</button>
@@ -46,6 +47,7 @@
   <!-- 态势总览 -->
   <section id="tab-overview" class="tab active">
     <div class="kpis" id="kpis"></div>
+    <div class="situation" id="situation" aria-live="polite"></div>
     <!-- 统一 8 列栅格：KPI、主体两行、底部一行共用相同的列线，所有面板左右边缘与上下边界对齐 -->
     <div class="grid-overview">
       <div class="stack area-stack">
@@ -172,6 +174,25 @@
       <div class="panel"><h3>网络服务暴露面（防火墙日志）</h3><div class="scroll"><table class="table" id="svcTable"></table></div></div>
       <div class="panel"><h3>Web 资产入口（nginx 日志）</h3><div class="scroll"><table class="table" id="epTable"></table></div></div>
     </div>
+  </section>
+
+  <!-- 安全评估 -->
+  <section id="tab-assess" class="tab">
+    <div class="toolbar">
+      <span class="muted">从失陷风险、暴露面、Web 防护、凭证安全、边界防护、威胁活跃度、日志与检测覆盖七个维度评估当前防护状况，给出按优先级排序的处置建议。</span>
+      <span class="spacer"></span>
+      <span class="muted" id="asTime"></span>
+      <button type="button" class="btn" id="asPrint" title="打印评估报告，或在打印对话框中选择“另存为 PDF”">打印 / 导出 PDF</button>
+    </div>
+    <div class="as-top">
+      <div class="panel as-score-panel"><h3>安全评分</h3><div id="asScore" class="as-score"></div></div>
+      <div class="panel"><h3>评估维度</h3><div class="chart" id="cRadar" style="min-height:250px"></div></div>
+      <div class="panel"><h3>待处置事项</h3><div id="asCounts" class="as-counts"></div></div>
+    </div>
+    <div class="panel"><h3>处置建议 <small id="asActCount"></small></h3><div id="asActions" class="as-actions"></div></div>
+    <div class="panel" id="asCompPanel"><h3>失陷研判 <small id="asCompCount"></small></h3><div class="table-wrap"><table class="table" id="asComp"></table></div></div>
+    <div class="panel"><h3>各维度评估</h3><div id="asDims" class="as-dims"></div></div>
+    <div class="panel"><h3>ATT&amp;CK 战术与技术 <small id="asMatrixInfo"></small></h3><div id="asMatrix" class="attck"></div></div>
   </section>
 
   <!-- 告警推送 -->
