@@ -23,7 +23,14 @@ const api = async (path, method = 'GET', body) => {
     opt.headers['Content-Type'] = 'application/json';
     opt.body = JSON.stringify(body);
   }
-  const r = await fetch(path, opt);
+  let r;
+  try {
+    r = await fetch(path, opt);
+  } catch (e) {
+    setOffline(true); // 网络中断或服务重启：提示并由定时刷新自动重试
+    throw e;
+  }
+  setOffline(false);
   if (!r.ok) {
     const text = await r.text();
     let msg = text || r.statusText;
@@ -42,6 +49,41 @@ const api = async (path, method = 'GET', body) => {
   }
   return r.json();
 };
+
+function setOffline(on) {
+  const b = document.getElementById('connBanner');
+  if (b && b.hidden === on) b.hidden = !on;
+}
+
+// 对话框：打开时记住原焦点、Tab 键在对话框内循环，关闭后焦点回到打开前的元素
+const focusables = 'a[href], button:not([disabled]), input:not([disabled]):not([type=hidden]), select, textarea, [tabindex]:not([tabindex="-1"])';
+const openDialog = () => [...document.querySelectorAll('.modal-mask')].find((m) => !m.hidden)
+  || (document.getElementById('drawer').classList.contains('open') ? document.getElementById('drawer') : null);
+document.addEventListener('keydown', (e) => {
+  if (e.key !== 'Tab') return;
+  const dlg = openDialog();
+  if (!dlg) return;
+  const items = [...dlg.querySelectorAll(focusables)].filter((el) => el.offsetParent !== null);
+  if (!items.length) return;
+  const first = items[0], last = items[items.length - 1];
+  if (!dlg.contains(document.activeElement)) { first.focus(); e.preventDefault(); return; }
+  if (e.shiftKey && document.activeElement === first) { last.focus(); e.preventDefault(); }
+  else if (!e.shiftKey && document.activeElement === last) { first.focus(); e.preventDefault(); }
+});
+// 记录对话框之外最近获得焦点的元素（打开对话框的按钮），对话框关闭后把焦点还给它
+let lastOutside = null;
+// rememberFocus 在打开对话框前调用，同步记录当前焦点（不依赖 focusin 事件）
+function rememberFocus() {
+  const a = document.activeElement;
+  if (a && a !== document.body && !a.closest('.modal-mask')) lastOutside = a;
+}
+document.addEventListener('focusin', (e) => { if (!e.target.closest('.modal-mask')) lastOutside = e.target; });
+new MutationObserver((muts) => {
+  for (const m of muts) {
+    // 只处理对话框关闭；提示条等元素的显隐不能改变焦点
+    if (m.target.classList.contains('modal-mask') && m.target.hidden && lastOutside && document.contains(lastOutside)) lastOutside.focus();
+  }
+}).observe(document.body, { subtree: true, attributes: true, attributeFilter: ['hidden'] });
 
 // 跳转登录页（保留 #ip=… 等页面内定位，登录后回到原处）
 let leaving = false;
@@ -930,6 +972,7 @@ function ntMsg(text, ok) {
 }
 
 function openRobotForm(r) {
+  rememberFocus();
   ntState.editing = r || null;
   $('#ntFormTitle').textContent = r ? `编辑机器人 · ${r.name}` : '添加告警推送机器人';
   $('#ntName').value = r ? r.name : '';
@@ -1067,6 +1110,7 @@ $('#menuLogout').addEventListener('click', async () => {
 let pwForced = false;
 function openPasswordForm(forced) {
   if (!$('#pwModal').hidden && pwForced) return;
+  rememberFocus();
   pwForced = !!forced;
   $('#pwTitle').textContent = forced ? '请设置新密码' : '修改密码';
   $('#pwForce').hidden = !forced;
@@ -1120,10 +1164,11 @@ async function loadSystem() {
       <td class="nowrap muted">${esc(fmtShort(x.last_login))}</td><td class="nowrap muted">${esc(fmtShort(x.changed))}</td>
       <td class="nowrap muted">${esc(fmtShort(x.created))}</td><td class="nowrap num">${acts}</td></tr>`;
   }).join('')}</tbody>`;
-  $('#auditTable').innerHTML = `<thead><tr><th>时间</th><th>账号</th><th>来源 IP</th><th>结果</th><th>客户端</th></tr></thead><tbody>${audit.map((a) => `<tr>
+  $('#auditTable').innerHTML = `<thead><tr><th>时间</th><th>账号</th><th>来源 IP</th><th>操作</th><th>结果</th><th>详情 / 客户端</th></tr></thead><tbody>${audit.map((a) => `<tr>
     <td class="nowrap muted">${esc(fmtShort(a.time))}</td><td>${esc(a.user)}</td><td class="mono">${esc(a.ip)}</td>
+    <td class="nowrap">${esc(a.action || '登录')}</td>
     <td>${a.ok ? '<span class="nt-on">成功</span>' : `<span class="nt-err-inline">失败</span> <span class="muted">${esc(a.reason || '')}</span>`}</td>
-    <td class="muted evidence">${esc(a.agent || '')}</td></tr>`).join('') || empty(5, '暂无登录记录')}</tbody>`;
+    <td class="muted evidence">${esc(a.detail || a.agent || '')}</td></tr>`).join('') || empty(6, '暂无记录')}</tbody>`;
 }
 
 // 账号表单：mode 为 create（新增）或 reset（重置密码）
@@ -1135,6 +1180,7 @@ function setUfRole(r) {
   $$('#ufRole button').forEach((b) => b.classList.toggle('active', b.dataset.r === r));
 }
 function openUserForm(mode, name) {
+  rememberFocus();
   ufMode = mode;
   ufName = name || '';
   $('#userFormTitle').textContent = mode === 'create' ? '添加账号' : `重置密码 · ${name}`;
@@ -1215,6 +1261,7 @@ document.addEventListener('fullscreenchange', () => setTimeout(resizeCharts, 200
   // 先确认登录状态：未登录时 api() 会跳转登录页；使用初始密码时先强制修改密码
   try {
     const s = await api('/api/auth/session');
+    if (!s.authenticated) { goLogin(); return; }
     me = { user: s.user, role: s.role, auth: s.auth_enabled, must_change: s.must_change };
   } catch (_) { return; }
   renderUserMenu();

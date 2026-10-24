@@ -39,7 +39,7 @@ import (
 	"netsa/web"
 )
 
-const version = "1.1.0"
+const version = "1.2.0"
 
 func usage() {
 	fmt.Fprintf(os.Stderr, `netsa %s —— 网络安全态势感知与攻击面分析系统

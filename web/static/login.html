@@ -9,32 +9,71 @@
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Cpath d='M16 2 4 7v8c0 7.5 5.1 13.6 12 15 6.9-1.4 12-7.5 12-15V7z' fill='%2336cfc9'/%3E%3C/svg%3E">
 </head>
 <body>
-<main class="login-wrap">
+<!-- 全屏动态背景：点阵地球、攻击轨迹、雷达扫描 -->
+<canvas id="bg" aria-hidden="true"></canvas>
+<div class="fx" aria-hidden="true"><div class="fx-grid"></div><div class="fx-scan"></div><div class="fx-vignette"></div></div>
+<div class="hud-corner tl" aria-hidden="true"></div><div class="hud-corner tr" aria-hidden="true"></div>
+<div class="hud-corner bl" aria-hidden="true"></div><div class="hud-corner br" aria-hidden="true"></div>
+
+<header class="hud-top">
+  <div class="brand">
+    <svg viewBox="0 0 32 32" class="logo" aria-hidden="true"><path d="M16 2 4 7v8c0 7.5 5.1 13.6 12 15 6.9-1.4 12-7.5 12-15V7z"/><path d="M11 16l3.5 3.5L21 13" class="tick"/></svg>
+    <div>
+      <div class="brand-name">网络安全态势感知平台</div>
+      <div class="brand-en">CYBER SITUATION AWARENESS PLATFORM</div>
+    </div>
+  </div>
+  <div class="hud-status"><span class="dot"></span>防护运行中<span class="sep">|</span><span id="hudClock" class="mono"></span></div>
+</header>
+
+<main class="layout">
+  <section class="hero" aria-label="平台简介">
+    <div class="kicker"><span></span>NETSA · 全域威胁感知</div>
+    <h1>洞悉每一次攻击<br><em>守护每一寸边界</em></h1>
+    <p class="lead">流量分析 · 攻击溯源 · 攻击面管理 · 实时告警</p>
+    <ul class="caps">
+      <li><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h16M4 12h10M4 18h7"/><circle cx="18" cy="16" r="3"/><path d="m20.2 18.2 1.8 1.8"/></svg>
+        <div><b>多源日志智能识别</b><span>Web · 防火墙 · IDS/IPS · Syslog</span></div></li>
+      <li><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3a14 14 0 0 1 0 18M12 3a14 14 0 0 0 0 18"/></svg>
+        <div><b>攻击源精准溯源</b><span>多源定位交叉比对 · 城市级落点</span></div></li>
+      <li><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="6" cy="6" r="2.5"/><circle cx="18" cy="6" r="2.5"/><circle cx="12" cy="18" r="2.5"/><path d="M8 7.5 10.8 16M16 7.5 13.2 16M8.5 6h7"/></svg>
+        <div><b>攻击链与同源关联</b><span>还原攻击路径 · 识别攻击团伙</span></div></li>
+      <li><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3a6 6 0 0 0-6 6v4l-2 3h16l-2-3V9a6 6 0 0 0-6-6Z"/><path d="M10 19a2 2 0 0 0 4 0"/></svg>
+        <div><b>7×24 实时告警</b><span>钉钉 · 企业微信 · 飞书推送</span></div></li>
+    </ul>
+  </section>
+
   <section class="login-card" aria-labelledby="loginTitle">
-    <div class="login-brand">
-      <svg viewBox="0 0 32 32" class="login-logo" aria-hidden="true"><path d="M16 2 4 7v8c0 7.5 5.1 13.6 12 15 6.9-1.4 12-7.5 12-15V7z"/><path d="M11 16l3.5 3.5L21 13" class="tick"/></svg>
-      <h1 id="loginTitle">网络安全态势感知平台</h1>
-      <p>流量分析 · 攻击溯源 · 攻击面管理</p>
+    <div class="card-glow" aria-hidden="true"></div>
+    <div class="card-head">
+      <h2 id="loginTitle">安全登录</h2>
+      <span>SECURE ACCESS</span>
     </div>
     <form id="loginForm" class="login-form" autocomplete="on" novalidate>
       <label class="field">
-        <span>用户名</span>
-        <input id="username" name="username" autocomplete="username" autocapitalize="off" spellcheck="false" maxlength="32" required autofocus>
+        <span class="label">用户名</span>
+        <span class="input">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="8" r="4"/><path d="M4 21a8 8 0 0 1 16 0"/></svg>
+          <input id="username" name="username" autocomplete="username" autocapitalize="off" spellcheck="false" maxlength="32" placeholder="请输入用户名" required autofocus>
+        </span>
       </label>
       <label class="field">
-        <span>密码</span>
-        <span class="pw">
-          <input id="password" name="password" type="password" autocomplete="current-password" maxlength="128" required>
+        <span class="label">密码</span>
+        <span class="input">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/></svg>
+          <input id="password" name="password" type="password" autocomplete="current-password" maxlength="128" placeholder="请输入密码" required>
           <button type="button" id="togglePw" class="pw-toggle" aria-label="显示密码" title="显示密码">显示</button>
         </span>
       </label>
-      <div class="caps" id="capsHint" hidden>大写锁定已开启</div>
+      <div class="caps-hint" id="capsHint" hidden>大写锁定已开启</div>
       <div class="msg" id="loginMsg" role="alert"></div>
-      <button type="submit" id="loginBtn" class="login-btn">登 录</button>
+      <button type="submit" id="loginBtn" class="login-btn"><span>登 录</span></button>
     </form>
-    <p class="login-foot">忘记密码请联系管理员，或在服务器上执行 <code>netsa passwd -u 用户名</code> 重置</p>
+    <p class="card-foot">忘记密码请联系管理员，或在服务器上执行 <code>netsa passwd -u 用户名</code> 重置</p>
   </section>
 </main>
+
+<footer class="legal">本系统仅限授权人员使用，所有访问与操作均被记录审计 · 未经授权的访问将被追究责任</footer>
 <script src="login.js"></script>
 </body>
 </html>

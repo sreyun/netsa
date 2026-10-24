@@ -40,6 +40,8 @@
   </div>
 </header>
 
+<div class="conn-banner" id="connBanner" role="status" hidden>与服务器的连接已中断，正在自动重试…</div>
+
 <main>
   <!-- 态势总览 -->
   <section id="tab-overview" class="tab active">
@@ -153,7 +155,7 @@
       <button class="btn primary" id="userAdd">＋ 添加账号</button>
     </div>
     <div class="panel"><h3>登录账号 <small id="userCount"></small></h3><div class="table-wrap"><table class="table" id="userTable"></table></div></div>
-    <div class="panel"><h3>登录记录 <small>最近 100 条，包括失败与锁定</small></h3><div class="scroll"><table class="table" id="auditTable"></table></div></div>
+    <div class="panel"><h3>审计日志 <small>最近 100 条：登录（含失败与锁定）、账号与告警推送配置变更、数据导出</small></h3><div class="scroll"><table class="table" id="auditTable"></table></div></div>
   </section>
 
   <!-- 数据源 -->
@@ -177,14 +179,14 @@
 
 <!-- IP 溯源详情抽屉 -->
 <div class="drawer-mask" id="drawerMask"></div>
-<aside class="drawer" id="drawer">
+<aside class="drawer" id="drawer" role="dialog" aria-modal="true" aria-label="IP 溯源详情">
   <div class="drawer-head"><div id="drawerTitle"></div><button class="close" id="drawerClose" aria-label="关闭">✕</button></div>
   <div class="drawer-body" id="drawerBody"></div>
 </aside>
 
 <!-- 修改密码 -->
 <div class="modal-mask" id="pwModal" hidden>
-  <form class="modal" id="pwForm" autocomplete="off" novalidate>
+  <form class="modal" role="dialog" aria-modal="true" aria-labelledby="pwTitle" id="pwForm" autocomplete="off" novalidate>
     <div class="modal-head"><b id="pwTitle">修改密码</b><button type="button" class="close" id="pwClose" aria-label="关闭">✕</button></div>
     <div class="modal-body">
       <div class="nt-help" id="pwForce" hidden>当前使用的是初始密码或管理员重置的密码，为保障安全，请先设置新密码后再使用。</div>
@@ -201,7 +203,7 @@
 
 <!-- 添加 / 编辑账号 -->
 <div class="modal-mask" id="userModal" hidden>
-  <form class="modal" id="userForm" autocomplete="off" novalidate>
+  <form class="modal" role="dialog" aria-modal="true" aria-labelledby="userFormTitle" id="userForm" autocomplete="off" novalidate>
     <div class="modal-head"><b id="userFormTitle">添加账号</b><button type="button" class="close" id="userClose" aria-label="关闭">✕</button></div>
     <div class="modal-body">
       <label class="field"><span class="flabel">用户名</span><input id="ufName" maxlength="32" spellcheck="false" placeholder="字母、数字与 _ . @ -，2~32 位"></label>
@@ -217,7 +219,7 @@
 
 <!-- 告警机器人编辑对话框 -->
 <div class="modal-mask" id="ntModal" hidden>
-  <form class="modal" id="ntForm" autocomplete="off" novalidate>
+  <form class="modal" role="dialog" aria-modal="true" aria-labelledby="ntFormTitle" id="ntForm" autocomplete="off" novalidate>
     <div class="modal-head"><b id="ntFormTitle">添加机器人</b><button type="button" class="close" id="ntClose" aria-label="关闭">✕</button></div>
     <div class="modal-body">
       <div class="field"><span class="flabel">机器人类型</span>

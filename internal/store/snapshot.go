@@ -51,7 +51,8 @@ func (s *Store) Save(path string) error {
 		return err
 	}
 	tmp := path + ".tmp"
-	f, err := os.Create(tmp)
+	// 快照包含攻击源画像等敏感安全数据，仅允许服务账号读取
+	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
 	if err != nil {
 		return err
 	}

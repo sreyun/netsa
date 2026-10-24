@@ -65,7 +65,7 @@ func (s *Server) Handler() http.Handler {
 		writeJSON(w, s.Store.Timeline(clamp(qint(r, "minutes", 60), 1, 31*24*60)))
 	}))
 	mux.HandleFunc("GET /api/attackers", cached(time.Second, s.attackers))
-	mux.HandleFunc("GET /api/ip/{ip}", s.ipDetail)
+	mux.HandleFunc("GET /api/ip/{ip}", cached(2*time.Second, s.ipDetail)) // 含同源关联分析，短时缓存避免重复全量比对
 	mux.HandleFunc("GET /api/ip/{ip}/rdap", s.rdap)
 	mux.HandleFunc("GET /api/alerts", cached(time.Second, s.alerts))
 	mux.HandleFunc("GET /api/alerts/summary", cached(2*time.Second, func(w http.ResponseWriter, r *http.Request) { writeJSON(w, s.Store.AlertSummary()) }))
@@ -124,6 +124,9 @@ func securityHeaders(next http.Handler) http.Handler {
 		h.Set("X-Content-Type-Options", "nosniff")
 		h.Set("X-Frame-Options", "DENY")
 		h.Set("Referrer-Policy", "no-referrer")
+		h.Set("Permissions-Policy", "camera=(), microphone=(), geolocation=(), payment=(), usb=(), interest-cohort=()")
+		h.Set("Cross-Origin-Opener-Policy", "same-origin")
+		h.Set("Cross-Origin-Resource-Policy", "same-origin")
 		if r.TLS != nil {
 			h.Set("Strict-Transport-Security", "max-age=31536000")
 		}
@@ -271,6 +274,7 @@ func (s *Server) blocklist(w http.ResponseWriter, r *http.Request) {
 	}
 	list := s.Store.Blocklist(model.ParseSeverity(lvl))
 	format := r.URL.Query().Get("format")
+	s.audit(r, "导出封禁列表", "格式 "+format+" 等级>="+lvl+" 共 "+strconv.Itoa(len(list))+" 个 IP", nil)
 	ext := map[string]string{"nginx": "conf", "csv": "csv", "windows": "bat", "iptables": "sh", "ipset": "sh", "firewalld": "sh"}[format]
 	if ext == "" {
 		format, ext = "txt", "txt"
@@ -283,9 +287,9 @@ func (s *Server) blocklist(w http.ResponseWriter, r *http.Request) {
 		cw := csv.NewWriter(w)
 		cw.Write([]string{"ip", "score", "level", "attacks", "location", "isp", "asn", "net_type", "categories", "first_seen", "last_seen"})
 		for _, a := range list {
-			cw.Write([]string{a.IP, strconv.FormatFloat(a.Score, 'f', 0, 64), a.Level.Label(), strconv.FormatInt(a.Attacks, 10),
+			cw.Write(csvSafe([]string{a.IP, strconv.FormatFloat(a.Score, 'f', 0, 64), a.Level.Label(), strconv.FormatInt(a.Attacks, 10),
 				a.Location, a.ISP, strconv.FormatUint(uint64(a.ASN), 10), a.NetType, strings.Join(a.Categories, "/"),
-				a.FirstSeen.Format(time.RFC3339), a.LastSeen.Format(time.RFC3339)})
+				a.FirstSeen.Format(time.RFC3339), a.LastSeen.Format(time.RFC3339)}))
 		}
 		cw.Flush()
 		return
@@ -353,8 +357,20 @@ func (s *Server) blocklist(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) report(w http.ResponseWriter, r *http.Request) {
+	s.audit(r, "下载分析报告", "", nil)
 	w.Header().Set("Content-Disposition", "attachment; filename=netsa-report-"+s.now().Format("20060102-150405")+".json")
 	writeJSON(w, Report(s.Store, 200))
+}
+
+// csvSafe 防止 CSV 公式注入：以 = + - @ 制表符或回车开头的单元格（运营商、地名等可能来自第三方数据）
+// 在 Excel 中会被当作公式执行，在前面加单引号使其按文本显示。
+func csvSafe(row []string) []string {
+	for i, v := range row {
+		if v != "" && strings.ContainsRune("=+-@\t\r", rune(v[0])) {
+			row[i] = "'" + v
+		}
+	}
+	return row
 }
 
 // Report 生成完整的 JSON 分析报告。
