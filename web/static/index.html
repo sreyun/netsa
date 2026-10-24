@@ -70,19 +70,19 @@
         </div>
         <div class="map-note" id="mapNote"></div>
       </div>
-      <div class="panel feed-panel area-feed"><h3>实时告警 <small id="feedCount"></small></h3>
+      <div class="panel feed-panel area-feed"><h3>实时告警 <small id="feedCount"></small><button type="button" class="more" data-go="alerts:" title="查看全部告警">全部告警 ›</button></h3>
         <div class="feed-wrap"><div class="feed-new" id="feedNew" hidden></div><ul class="feed" id="feed"></ul></div></div>
       <div class="panel area-phase"><h3>攻击链阶段</h3><div class="chart" id="cPhase" style="min-height:190px"></div></div>
       <div class="panel area-trend"><h3>流量与攻击趋势
         <span class="seg" id="trendRange"><button data-m="60">1小时</button><button data-m="360" class="active">6小时</button><button data-m="1440">24小时</button><button data-m="10080">7天</button></span></h3>
         <div class="chart" id="cTrend" style="min-height:220px"></div></div>
-      <div class="panel area-top"><h3>高威胁攻击源 TOP</h3><table class="mini" id="topAttackers"></table></div>
+      <div class="panel area-top"><h3>高威胁攻击源 TOP<button type="button" class="more" data-go="attackers:" title="查看全部攻击源">全部 ›</button></h3><table class="mini" id="topAttackers"></table></div>
     </div>
     <div class="grid-4">
       <div class="panel"><h3>来源国家/地区</h3><div class="chart" id="cCountry" style="min-height:240px"></div></div>
       <div class="panel"><h3>攻击来源城市 TOP</h3><div class="chart" id="cCity" style="min-height:240px"></div></div>
       <div class="panel"><h3>攻击源网络类型</h3><div class="chart" id="cNetType" style="min-height:240px"></div></div>
-      <div class="panel"><h3>被攻击目标 TOP</h3><table class="mini" id="topTargets"></table></div>
+      <div class="panel"><h3>被攻击目标 TOP<button type="button" class="more" data-go="surface:" title="查看攻击面分析">攻击面 ›</button></h3><table class="mini" id="topTargets"></table></div>
     </div>
   </section>
 
@@ -98,12 +98,18 @@
       <span class="spacer"></span>
       <span class="muted" id="atkTotal"></span>
     </div>
+    <div class="drill-bar" id="atkDrill" hidden></div>
     <div class="panel"><div class="table-wrap"><table class="table" id="atkTable"></table></div>
       <div class="pager" id="atkPager"></div></div>
   </section>
 
   <!-- 告警事件 -->
   <section id="tab-alerts" class="tab">
+    <div class="al-mode" id="alModeBar" hidden>
+      <span class="seg al-seg" id="alMode" role="tablist"><button data-m="live" class="active" role="tab">实时告警</button><button data-m="history" role="tab">历史告警（归档库）</button></span>
+      <span class="muted" id="alModeHint">内存中最近的告警，实时更新</span>
+    </div>
+    <div id="alLive">
     <div class="toolbar">
       <input id="alSearch" placeholder="搜索规则 / 目标 / 载荷 / IP">
       <select id="alSev"><option value="">全部等级</option><option value="critical">严重</option><option value="high">高危及以上</option><option value="medium">中危及以上</option><option value="low">低危及以上</option></select>
@@ -113,7 +119,44 @@
       <span class="spacer"></span>
       <label class="muted"><input type="checkbox" id="alAuto" checked> 自动刷新</label>
     </div>
+    <div class="drill-bar" id="alDrill" hidden></div>
     <div class="panel"><div class="al-summary" id="alSummary"></div><div class="table-wrap"><table class="table" id="alTable"></table></div></div>
+    </div>
+
+    <!-- 历史告警（PostgreSQL 归档） -->
+    <div id="alHistory" hidden>
+      <form class="panel hs-form" id="hsForm" autocomplete="off" novalidate>
+        <div class="hs-row">
+          <label class="hs-f"><span>开始时间</span><input type="datetime-local" id="hsFrom" step="60"></label>
+          <label class="hs-f"><span>结束时间</span><input type="datetime-local" id="hsTo" step="60" title="留空表示到现在"></label>
+          <span class="seg hs-range" id="hsRange"><button type="button" data-d="1">24小时</button><button type="button" data-d="7" class="active">7天</button><button type="button" data-d="30">30天</button><button type="button" data-d="90">90天</button><button type="button" data-d="all">全部</button></span>
+        </div>
+        <div class="hs-row">
+          <label class="hs-f"><span>来源 IP / 网段</span><input id="hsIP" spellcheck="false" maxlength="49" placeholder="如 203.0.113.7 或 10.0.0.0/8"></label>
+          <label class="hs-f"><span>规则</span><input id="hsRule" spellcheck="false" maxlength="100" placeholder="规则 ID 或名称关键字"></label>
+          <label class="hs-f"><span>关键字</span><input id="hsQ" spellcheck="false" maxlength="100" placeholder="目标 URL / 载荷 / 规则名称"></label>
+        </div>
+        <div class="hs-row">
+          <label class="hs-f sm"><span>等级</span><select id="hsSev"><option value="">全部等级</option><option value="critical">严重</option><option value="high">高危及以上</option><option value="medium">中危及以上</option><option value="low">低危及以上</option></select></label>
+          <label class="hs-f sm"><span>攻击类型</span><select id="hsCat"><option value="">全部类型</option></select></label>
+          <label class="hs-f sm"><span>研判结果</span><select id="hsResult"><option value="">全部结果</option></select></label>
+          <label class="hs-f sm"><span>攻击阶段</span><select id="hsPhase"><option value="">全部阶段</option></select></label>
+          <label class="hs-f sm"><span>日志来源</span><select id="hsKind"><option value="">全部来源</option><option value="web">Web 日志</option><option value="firewall">防火墙日志</option></select></label>
+          <span class="spacer"></span>
+          <button type="button" class="btn" id="hsReset">重置</button>
+          <button type="button" class="btn" id="hsExport" title="按当前条件导出 CSV（最多 20 万条），导出操作记入审计日志">导出 CSV</button>
+          <button type="submit" class="btn primary" id="hsSubmit">查询</button>
+        </div>
+        <div class="form-msg err" id="hsMsg" role="status"></div>
+      </form>
+      <div class="hs-stats">
+        <div class="panel"><h3>查询结果统计 <small id="hsRangeText"></small></h3><div id="hsSummary" class="hs-summary"></div></div>
+        <div class="panel"><h3>告警趋势 <small id="hsTrendUnit"></small></h3><div class="chart" id="cHsDay" style="min-height:170px"></div></div>
+      </div>
+      <div class="panel"><h3>历史告警 <small id="hsCount"></small></h3>
+        <div class="table-wrap"><table class="table" id="hsTable"></table></div>
+        <div class="pager" id="hsPager"></div></div>
+    </div>
   </section>
 
   <!-- 攻击面分析 -->
@@ -161,14 +204,15 @@
   <!-- 数据源 -->
   <section id="tab-sources" class="tab">
     <div class="panel"><h3>日志数据源 <small id="procCount"></small></h3><div class="table-wrap"><table class="table" id="srcTable"></table></div></div>
+    <div class="panel" id="arcPanel" hidden><h3>告警归档（PostgreSQL） <small id="arcSummary"></small></h3><div id="arcBody"></div></div>
     <div class="grid-2">
       <div class="panel"><h3>溯源与检测能力</h3><div id="caps"></div></div>
       <div class="panel"><h3>导出</h3>
         <div class="exports">
           <label>封禁等级 <select id="blLevel"><option value="critical">严重</option><option value="high" selected>高危及以上</option><option value="medium">中危及以上</option><option value="low">低危及以上</option></select></label>
           <div class="btns">
-            <a class="btn" data-fmt="txt">IP 列表</a><a class="btn" data-fmt="nginx">nginx deny</a><a class="btn" data-fmt="iptables">iptables</a>
-            <a class="btn" data-fmt="ipset">ipset</a><a class="btn" data-fmt="firewalld">firewalld</a><a class="btn" data-fmt="windows">Windows 防火墙</a><a class="btn" data-fmt="csv">CSV</a>
+            <button type="button" class="btn" data-fmt="txt">IP 列表</button><button type="button" class="btn" data-fmt="nginx">nginx deny</button><button type="button" class="btn" data-fmt="iptables">iptables</button>
+            <button type="button" class="btn" data-fmt="ipset">ipset</button><button type="button" class="btn" data-fmt="firewalld">firewalld</button><button type="button" class="btn" data-fmt="windows">Windows 防火墙</button><button type="button" class="btn" data-fmt="csv">CSV</button>
           </div>
           <a class="btn primary" href="/api/report" download>下载完整分析报告 (JSON)</a>
         </div>

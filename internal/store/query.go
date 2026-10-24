@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"netsa/internal/geo"
 	"netsa/internal/model"
 )
 
@@ -95,25 +96,7 @@ func (s *Store) Overview() *Overview {
 		if p.LastSeen.After(recentCut) {
 			o.Recent.Attackers++
 		}
-		country, prov, city, isp, nt := "未知", "", "", "", "未知"
-		if g := p.Geo; g != nil {
-			if g.Country != "" {
-				country = g.Country
-			}
-			// 省份使用中国地图中的规范名称（"广东省" 与 "广东" 合并统计）
-			prov = g.ProvinceMap
-			if g.City != "" {
-				if prov != "" {
-					city = placeName(prov, "", g.City)
-				} else {
-					city = placeName(country, g.Province, g.City)
-				}
-			}
-			isp = g.ISP
-			if g.NetType != "" {
-				nt = g.NetType
-			}
-		}
+		country, prov, city, isp, nt := geoKeys(p)
 		countries[country]++
 		if prov != "" {
 			provinces[prov]++
@@ -173,6 +156,48 @@ func (s *Store) Overview() *Overview {
 	}
 	o.SurfaceScore = s.surfaceScoreLocked()
 	return o
+}
+
+// geoKeys 返回攻击源在总览排行中的国家、省份、城市、运营商与网络类型。总览下钻时按相同的值筛选攻击源，
+// 保证点击排行条目后列出的攻击源数量与图表一致。
+func geoKeys(p *IPProfile) (country, prov, city, isp, nt string) {
+	country, nt = "未知", "未知"
+	g := p.Geo
+	if g == nil {
+		return
+	}
+	if g.Country != "" {
+		country = g.Country
+	}
+	// 省份使用中国地图中的规范名称（"广东省" 与 "广东" 合并统计）
+	prov = g.ProvinceMap
+	if g.City != "" {
+		if prov != "" {
+			city = placeName(prov, "", g.City)
+		} else {
+			city = placeName(country, g.Province, g.City)
+		}
+	}
+	isp = g.ISP
+	if g.NetType != "" {
+		nt = g.NetType
+	}
+	return
+}
+
+// mapKey 返回攻击源在地图上所属地点的聚合键（与 MapData 一致）；不上图时返回空。
+func mapKey(g *geo.Info) string {
+	if g == nil || g.Private && g.Label == "" || !g.HasCoord {
+		return ""
+	}
+	switch {
+	case g.Label != "":
+		return "label|" + g.Label
+	case g.City == "" && g.Province == "" && g.CoordSource != "country":
+		// 只有精确坐标、没有地名时按约 10km 网格聚合
+		return fmt.Sprintf("xy|%.1f|%.1f", g.Lat, g.Lon)
+	}
+	return g.CountryCode + "|" + g.Province + "|" + g.City
 }
 
 func copyMap[K comparable, V any](m map[K]V) map[K]V {
@@ -283,30 +308,85 @@ func summarize(p *IPProfile) AttackerSummary {
 	return a
 }
 
-// AttackerQuery 攻击者查询条件。
+// AttackerQuery 攻击者查询条件。地域、网络类型、攻击类型与阶段条件用于态势总览各图表的下钻，取值与总览统计一致。
 type AttackerQuery struct {
 	MinLevel model.Severity
 	Search   string
 	Sort     string // score | attacks | last
 	Limit    int
 	Offset   int
+
+	Country  string // 国家 / 地区（总览“来源国家/地区”，未定位为“未知”）
+	City     string // 城市（总览“攻击来源城市”）
+	NetType  string // 网络类型（总览“攻击源网络类型”，未知为“未知”）
+	ISP      string
+	World    string // 世界地图区域名
+	Province string // 中国地图省份名
+	CityMap  string // 省级地图地市名
+	Place    string // 地图地点聚合键
+	Category string // 攻击类型
+	Phase    string // 攻击链阶段
 }
 
-func (s *Store) Attackers(q AttackerQuery) ([]AttackerSummary, int) {
-	s.mu.RLock()
-	var list []AttackerSummary
-	search := strings.ToLower(q.Search)
-	for _, p := range s.ips {
-		if !isAttacker(p) || p.Level < q.MinLevel {
-			continue
-		}
-		a := summarize(p)
-		if search != "" && !strings.Contains(strings.ToLower(a.IP+" "+a.Location+" "+strings.Join(a.Tags, " ")+" "+strings.Join(a.Categories, " ")), search) {
-			continue
-		}
-		list = append(list, a)
+// geoFiltered 判断是否设置了地域类条件。
+func (q *AttackerQuery) geoFiltered() bool {
+	return q.Country != "" || q.City != "" || q.NetType != "" || q.ISP != "" || q.World != "" || q.Province != "" || q.CityMap != "" || q.Place != ""
+}
+
+func (q *AttackerQuery) match(p *IPProfile) bool {
+	if q.Category != "" && p.Categories[q.Category] == 0 || q.Phase != "" && p.Phases[q.Phase] == 0 {
+		return false
 	}
-	s.mu.RUnlock()
+	if !q.geoFiltered() {
+		return true
+	}
+	country, _, city, isp, nt := geoKeys(p)
+	if q.Country != "" && country != q.Country || q.City != "" && city != q.City || q.NetType != "" && nt != q.NetType || q.ISP != "" && isp != q.ISP {
+		return false
+	}
+	g := p.Geo
+	if q.World != "" || q.Province != "" || q.CityMap != "" { // 与地图着色一致：内网地址不参与国家 / 省份统计
+		if g == nil || g.Private || q.World != "" && g.WorldName != q.World || q.Province != "" && g.ProvinceMap != q.Province ||
+			q.CityMap != "" && g.CityMap != q.CityMap {
+			return false
+		}
+	}
+	return q.Place == "" || mapKey(g) == q.Place
+}
+
+// searchText 返回攻击源用于关键字搜索的文本（IP、归属地、标签与全部攻击类型）。
+func searchText(p *IPProfile) string {
+	var b strings.Builder
+	b.WriteString(p.IP)
+	b.WriteByte(' ')
+	b.WriteString(p.Geo.Location())
+	for t := range p.Tags {
+		b.WriteByte(' ')
+		b.WriteString(t)
+	}
+	for c := range p.Categories {
+		b.WriteByte(' ')
+		b.WriteString(c)
+	}
+	return strings.ToLower(b.String())
+}
+
+// Attackers 查询攻击源列表。先按条件筛选与排序画像，只为当前页生成摘要：
+// 攻击源数量很多（数万）时避免为每个画像构造摘要，减少读锁占用时间与内存分配。
+func (s *Store) Attackers(q AttackerQuery) ([]AttackerSummary, int) {
+	search := strings.ToLower(strings.TrimSpace(q.Search))
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	list := make([]*IPProfile, 0, 256)
+	for _, p := range s.ips {
+		if !isAttacker(p) || p.Level < q.MinLevel || !q.match(p) {
+			continue
+		}
+		if search != "" && !strings.Contains(searchText(p), search) {
+			continue
+		}
+		list = append(list, p)
+	}
 	sort.Slice(list, func(i, j int) bool {
 		x, y := list[i], list[j]
 		switch q.Sort {
@@ -322,7 +402,10 @@ func (s *Store) Attackers(q AttackerQuery) ([]AttackerSummary, int) {
 		if x.Score != y.Score {
 			return x.Score > y.Score
 		}
-		return x.Attacks > y.Attacks
+		if x.Attacks != y.Attacks {
+			return x.Attacks > y.Attacks
+		}
+		return x.IP < y.IP // 排序稳定，翻页时不会重复或遗漏
 	})
 	total := len(list)
 	if q.Offset > 0 {
@@ -334,7 +417,11 @@ func (s *Store) Attackers(q AttackerQuery) ([]AttackerSummary, int) {
 	if q.Limit > 0 && len(list) > q.Limit {
 		list = list[:q.Limit]
 	}
-	return list, total
+	out := make([]AttackerSummary, len(list))
+	for i, p := range list {
+		out[i] = summarize(p)
+	}
+	return out, total
 }
 
 // IPDetail 是 IP 溯源详情。
@@ -411,6 +498,15 @@ type AlertQuery struct {
 	Search      string
 	SinceID     uint64
 	Limit       int
+	// 以下条件用于态势总览下钻
+	Phase    string
+	Target   string    // 被攻击目标（总览“被攻击目标 TOP”的条目）
+	From, To time.Time // 告警时间范围 [From, To)
+}
+
+// matchTarget 判断告警目标是否为总览排行中的目标条目（排行中的目标最长 200 字节，超长时按前缀匹配）。
+func matchTarget(alertTarget, t string) bool {
+	return alertTarget == t || len(t) >= 190 && strings.HasPrefix(alertTarget, t)
 }
 
 // AlertSummary 说明告警列表与攻击命中计数之间的关系：同一 IP 同一规则在节流窗口内只记录前若干条告警，
@@ -461,7 +557,11 @@ func (s *Store) Alerts(q AlertQuery) []*model.Alert {
 			(q.Category != "" && a.Category != q.Category) ||
 			(q.IP != "" && a.SrcIP != q.IP) ||
 			(q.Result != "" && a.Result != q.Result) ||
-			(q.Kind != "" && string(a.Kind) != q.Kind) {
+			(q.Kind != "" && string(a.Kind) != q.Kind) ||
+			(q.Phase != "" && a.Phase != q.Phase) ||
+			(q.Target != "" && !matchTarget(a.Target, q.Target)) ||
+			(!q.From.IsZero() && a.Time.Before(q.From)) ||
+			(!q.To.IsZero() && !a.Time.Before(q.To)) {
 			continue
 		}
 		if search != "" && !strings.Contains(strings.ToLower(a.Name+" "+a.Target+" "+a.Evidence+" "+a.SrcIP+" "+a.Location), search) {
@@ -483,6 +583,7 @@ type MapIP struct {
 
 // MapPoint 是攻击来源地图上的一个地点（按 国家/省/市 聚合，城市未知时按省或国家）。
 type MapPoint struct {
+	Key         string         `json:"key"` // 地点聚合键，下钻查询该地点的全部攻击源
 	Name        string         `json:"name"`
 	Label       string         `json:"label,omitempty"`    // 自定义网段名称
 	Internal    bool           `json:"internal,omitempty"` // 内网攻击源（命中自定义网段）
@@ -569,21 +670,14 @@ func (s *Store) MapData(minLevel model.Severity) *MapResult {
 			addRegion(countries, g.WorldName, g.Country, p)
 			addRegion(provinces, g.ProvinceMap, g.ProvinceMap, p)
 		}
-		if !g.HasCoord {
+		key := mapKey(g)
+		if key == "" {
 			res.NoCoord++
 			continue
 		}
-		key := g.CountryCode + "|" + g.Province + "|" + g.City
-		switch {
-		case g.Label != "":
-			key = "label|" + g.Label
-		case g.City == "" && g.Province == "" && g.CoordSource != "country":
-			// 只有精确坐标、没有地名时按约 10km 网格聚合
-			key = fmt.Sprintf("xy|%.1f|%.1f", g.Lat, g.Lon)
-		}
 		mp := pts[key]
 		if mp == nil {
-			mp = &MapPoint{Country: g.Country, Province: g.Province, City: g.City, WorldName: g.WorldName,
+			mp = &MapPoint{Key: key, Country: g.Country, Province: g.Province, City: g.City, WorldName: g.WorldName,
 				ProvinceMap: g.ProvinceMap, CityMap: g.CityMap, CoordSource: g.CoordSource}
 			mp.Name = placeName(g.Country, g.Province, g.City)
 			if g.Label != "" {

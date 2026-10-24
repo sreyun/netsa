@@ -25,6 +25,7 @@ import (
 
 	"netsa/internal/alert"
 	"netsa/internal/api"
+	"netsa/internal/archive"
 	"netsa/internal/auth"
 	"netsa/internal/config"
 	"netsa/internal/demo"
@@ -39,7 +40,7 @@ import (
 	"netsa/web"
 )
 
-const version = "1.2.0"
+const version = "1.3.0"
 
 func usage() {
 	fmt.Fprintf(os.Stderr, `netsa %s —— 网络安全态势感知与攻击面分析系统
@@ -100,6 +101,7 @@ type app struct {
 	pipe     *pipeline.Pipeline
 	ingest   *ingest.Manager
 	rdap     *geo.RDAPClient
+	archive  *archive.Archive // 可选的 PostgreSQL 告警归档
 }
 
 func build(cfg *config.Config) (*app, error) {
@@ -164,12 +166,24 @@ func build(cfg *config.Config) (*app, error) {
 	a.pipe = &pipeline.Pipeline{
 		Engine: a.engine, Behavior: detect.NewBehavior(cfg.Detect.Thresholds), Store: a.store, Geo: a.geo,
 		RealIP: pipeline.NewRealIP(cfg.RealIP), Notifier: a.notifier,
-		EnrichLevel: model.ParseSeverity(cfg.Geo.EnrichLevel), OnAlert: a.broker.Publish,
+		EnrichLevel: model.ParseSeverity(cfg.Geo.EnrichLevel), OnAlert: a.onAlert,
 	}
 	a.pipe.SetWhitelist(cfg.Detect.Whitelist)
 	a.geo.OnUpdate = a.pipe.OnGeoUpdate
 	a.ingest = ingest.NewManager(20000)
 	a.ingest.AutoTime = cfg.TimeCorrection != "off"
+	if dsn := archiveDSN(cfg); dsn != "" {
+		host, _ := os.Hostname()
+		ar, err := archive.Open(context.Background(), archive.Options{
+			DSN: dsn, RetentionMonths: cfg.Archive.RetentionMonths, BatchSize: cfg.Archive.BatchSize, FlushInterval: cfg.Archive.FlushInterval,
+			QueueSize: cfg.Archive.QueueSize, Instance: host, Location: loc,
+		})
+		if err != nil {
+			return nil, err
+		}
+		a.archive = ar
+		log.Printf("[archive] 告警归档已启用：%s（后台连接中）", ar.Server())
+	}
 	return a, nil
 }
 
@@ -177,6 +191,7 @@ func (a *app) server(listen string) (*http.Server, error) {
 	s := &api.Server{
 		Cfg: a.cfg, Store: a.store, Ingest: a.ingest, Pipeline: a.pipe, Geo: a.geo, Engine: a.engine,
 		RDAP: a.rdap, Static: staticFS(a.cfg), Version: version, Broker: a.broker, Notifier: a.notifier,
+		Archive: a.archive,
 	}
 	if a.cfg.Server.AuthEnabled() {
 		m, initial, err := auth.New(auth.Options{
@@ -219,6 +234,20 @@ func (a *app) scheme() string {
 		return "https"
 	}
 	return "http"
+}
+
+// archiveDSN 返回告警归档的数据库连接串：环境变量 NETSA_ARCHIVE_DSN 优先（避免口令写入配置文件），其次 archive.dsn。
+func archiveDSN(cfg *config.Config) string {
+	if v := strings.TrimSpace(os.Getenv("NETSA_ARCHIVE_DSN")); v != "" {
+		return v
+	}
+	return strings.TrimSpace(cfg.Archive.DSN)
+}
+
+// onAlert 把告警推送到大屏实时流，并投递到归档（未启用时忽略）。
+func (a *app) onAlert(al *model.Alert) {
+	a.broker.Publish(al)
+	a.archive.Add(al)
 }
 
 // usersFile 返回账号文件位置：server.users_file，或 storage.snapshot 所在目录。
@@ -309,6 +338,7 @@ func cmdServe(args []string) error {
 			case <-done:
 			case <-time.After(3 * time.Second):
 			}
+			a.archive.Close(10 * time.Second) // 写完归档队列中剩余的告警
 			if err := a.store.Save(cfg.Storage.Snapshot); err != nil {
 				log.Printf("[store] 保存快照失败: %v", err)
 			}
@@ -445,6 +475,16 @@ func cmdAnalyze(args []string) error {
 	}()
 	<-done
 	elapsed := time.Since(start)
+	if a.archive != nil { // 离线分析同样归档（可用于把历史日志补录到归档库）
+		c, cancel := context.WithTimeout(ctx, 30*time.Second)
+		if err := a.archive.WaitReady(c); err != nil {
+			log.Printf("[archive] 归档数据库不可用，本次分析结果未归档")
+		}
+		cancel()
+		a.archive.Close(2 * time.Minute)
+		w, d := a.archive.Counts()
+		log.Printf("[archive] 已归档 %d 条告警（丢弃 %d 条）", w, d)
+	}
 
 	if *online {
 		deadline := time.Now().Add(*wait)

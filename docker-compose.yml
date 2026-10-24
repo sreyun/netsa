@@ -17,6 +17,8 @@ services:
       TZ: Asia/Shanghai
       # 可选：首次启动时管理员 admin 的初始密码；不设置则随机生成并输出在日志中（docker compose logs netsa | grep 初始密码）
       # NETSA_ADMIN_PASSWORD: "请替换为强密码"
+      # 可选：告警归档连接串，在 .env 中设置后生效（未设置时不启用归档，无需数据库），见下方 postgres 服务说明
+      NETSA_ARCHIVE_DSN: ${NETSA_ARCHIVE_DSN:-}
     ports:
       - "8080:8080"
       - "5514:5514/udp"
@@ -46,5 +48,37 @@ services:
         max-size: "20m"
         max-file: "3"
 
+  # 可选：告警归档数据库（PostgreSQL）。默认不启动；启用方法：
+  #   1. 在本目录的 .env 文件中写入（两处密码相同，使用强密码）：
+  #        POSTGRES_PASSWORD=强密码
+  #        NETSA_ARCHIVE_DSN=postgres://netsa:强密码@postgres:5432/netsa?sslmode=disable
+  #   2. docker compose --profile archive up -d
+  # 已有 PostgreSQL 时无需启动此服务，把 NETSA_ARCHIVE_DSN 指向现有数据库即可。
+  postgres:
+    image: postgres:17-alpine
+    container_name: netsa-postgres
+    profiles: ["archive"]
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: netsa
+      POSTGRES_DB: netsa
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-}
+      TZ: Asia/Shanghai
+    # 不映射端口，只允许同一 compose 网络中的 netsa 访问；需用外部工具连接时可加 "127.0.0.1:5432:5432"
+    volumes:
+      - netsa-pg:/var/lib/postgresql/data
+    shm_size: 256mb
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U netsa -d netsa"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "3"
+
 volumes:
   netsa-state:
+  netsa-pg:

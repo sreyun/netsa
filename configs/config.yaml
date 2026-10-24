@@ -34,7 +34,7 @@ sources:
   - name: nginx
     type: auto            # auto | nginx | firewall | nginx_json | netfilter | pfsense | windows_firewall | cisco_asa | kv_firewall | json_firewall
     paths: ["/var/log/nginx/*access*.log"]
-    from_beginning: false # true 表示启动时先分析已有内容
+    from_beginning: false # true 表示每次启动都先分析已有内容（适合演示或一次性补录；长期运行建议 false，避免重启后重复统计）
     host: ""              # 日志中没有 $host 时用于区分站点
     # 使用自定义 log_format 时，把 nginx.conf 中的格式原样粘贴到这里：
     # log_format: '$remote_addr - $remote_user [$time_local] "$request" $status $body_bytes_sent "$http_referer" "$http_user_agent" "$http_x_forwarded_for" $request_time $host'
@@ -159,3 +159,13 @@ storage:
   max_ips: 200000
   max_alerts: 20000
   retention: 168h                # 趋势数据保留时长
+
+# 可选：告警归档到 PostgreSQL（≥ 11），用于长期留存与按时间 / IP / 网段 / 规则检索、导出历史告警。
+# 不配置时不依赖任何数据库，行为与之前完全相同。也可通过环境变量 NETSA_ARCHIVE_DSN 设置（优先于此处，避免口令写入配置文件）。
+# 告警异步批量写入（COPY），数据库暂不可用时在内存队列中缓冲并自动重连，不影响实时分析；按月自动分区，过期分区整表删除。
+archive:
+  dsn: ""                       # 例如 postgres://netsa:密码@127.0.0.1:5432/netsa?sslmode=disable（跨网络连接建议 sslmode=require）
+  retention_months: 6           # 保留月数（含当月），-1 表示永久保留
+  # batch_size: 1000            # 每批写入条数
+  # flush_interval: 2s          # 未凑满一批时的最长等待时间
+  # queue_size: 100000          # 内存队列容量，数据库长时间不可用时超出部分丢弃并计数

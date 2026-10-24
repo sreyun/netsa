@@ -7,6 +7,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"netsa/internal/geo"
 	"netsa/internal/model"
@@ -428,6 +429,10 @@ func (p *IPProfile) setTag(tag, detail string) {
 func truncate(s string, n int) string {
 	if len(s) <= n {
 		return s
+	}
+	// 在字符边界截断，避免把多字节字符（中文路径、URL 编码解码后的载荷）截成非法 UTF-8
+	for n > 0 && !utf8.RuneStart(s[n]) {
+		n--
 	}
 	return s[:n]
 }

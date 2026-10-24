@@ -186,13 +186,17 @@ function chart(id) {
 }
 const baseTooltip = { backgroundColor: 'rgba(8,16,34,.95)', borderColor: '#2b4a80', textStyle: { color: '#d6e2ff', fontSize: 12 } };
 
-function barChart(id, items, color, horizontal = true) {
+// 可下钻图表的提示信息末尾附加操作说明
+const hintLine = (t) => (t ? `<br/><span style="color:#7d8db3">${esc(t)}</span>` : '');
+const HINT = hintLine('点击查看明细');
+
+function barChart(id, items, color, horizontal = true, hint = '') {
   const names = items.map((i) => i.name).reverse();
   const vals = items.map((i) => i.value).reverse();
-  const cat = { type: 'category', data: names, axisLabel: { color: TEXT, fontSize: 11, width: 110, overflow: 'truncate' }, axisLine: { lineStyle: { color: GRID_LINE } }, axisTick: { show: false } };
+  const cat = { type: 'category', data: names, triggerEvent: !!hint, axisLabel: { color: TEXT, fontSize: 11, width: 110, overflow: 'truncate' }, axisLine: { lineStyle: { color: GRID_LINE } }, axisTick: { show: false } };
   const val = { type: 'value', axisLabel: { color: TEXT, fontSize: 10 }, splitLine: { lineStyle: { color: GRID_LINE } } };
   chart(id).setOption({
-    tooltip: { ...baseTooltip, trigger: 'axis', axisPointer: { type: 'shadow' } },
+    tooltip: { ...baseTooltip, trigger: 'axis', axisPointer: { type: 'shadow' }, formatter: (ps) => `${esc(ps[0].name)}：${num(ps[0].value)}${hintLine(hint)}` },
     grid: { left: 8, right: 30, top: 6, bottom: 4, containLabel: true },
     xAxis: horizontal ? val : cat, yAxis: horizontal ? cat : val,
     series: [{
@@ -219,9 +223,9 @@ function gauge(id, value, title) {
   }, true);
 }
 
-function pie(id, items, rose = false) {
+function pie(id, items, rose = false, hint = '') {
   chart(id).setOption({
-    tooltip: { ...baseTooltip, trigger: 'item', formatter: '{b}<br/>{c} ({d}%)' },
+    tooltip: { ...baseTooltip, trigger: 'item', formatter: (x) => `${esc(x.name)}<br/>${num(x.value)} (${x.percent}%)${hintLine(hint)}` },
     legend: { type: 'scroll', orient: 'vertical', right: 0, top: 'middle', textStyle: { color: TEXT, fontSize: 11 }, itemWidth: 10, itemHeight: 10, pageTextStyle: { color: TEXT } },
     color: ['#3a8bff', '#36cfc9', '#ff7a45', '#ffc53d', '#ff4d4f', '#9254de', '#73d13d', '#f759ab', '#40a9ff', '#ffa940', '#5cdbd3', '#adc6ff'],
     series: [{
@@ -245,15 +249,65 @@ function switchTab(tab) {
   requestAnimationFrame(() => requestAnimationFrame(resizeCharts));
 }
 
-// KPI 卡片下钻到对应列表，便于核对数字
-$('#kpis').addEventListener('click', (e) => {
+// ---------------- 下钻 ----------------
+// 态势总览中的 KPI、图表、排行与地图均可点击，跳转到攻击源或告警列表并带上筛选条件；
+// 条件显示在列表上方的“下钻条件”栏中，可一键清除或返回态势总览。
+const drillState = { attackers: null, alerts: null };
+// drillTo 打开目标列表。params 为附加到接口的筛选参数，label 为条件说明，native 为列表自带的筛选控件取值。
+function drillTo(tab, { params = {}, label = '', native = {} } = {}) {
+  if (tab === 'attackers') {
+    $('#atkSearch').value = '';
+    $('#atkLevel').value = native.level || '';
+    $('#atkSort').value = native.sort || 'score';
+    atkOffset = 0;
+    drillState.attackers = label ? { params, label } : null;
+  } else if (tab === 'alerts') {
+    setAlertMode('live');
+    fillAlertFilters();
+    $('#alSearch').value = '';
+    $('#alSev').value = native.severity || '';
+    $('#alCat').value = native.category || '';
+    $('#alResult').value = native.result || '';
+    $('#alKind').value = native.kind || '';
+    drillState.alerts = label ? { params, label } : null;
+  }
+  renderDrillBars();
+  closeDrawer();
+  switchTab(tab);
+  window.scrollTo({ top: 0 });
+}
+function renderDrillBars() {
+  for (const [tab, id] of [['attackers', '#atkDrill'], ['alerts', '#alDrill']]) {
+    const d = drillState[tab];
+    const bar = $(id);
+    bar.hidden = !d;
+    if (!d) continue;
+    const hist = tab === 'alerts' && meta.archive ? '<button type="button" class="btn" data-drill="history" title="按相同条件在 PostgreSQL 归档中查询更早的告警">在归档库中查询</button>' : '';
+    bar.innerHTML = `<span class="drill-ico">⤵</span><span>下钻条件：<b>${esc(d.label)}</b></span><span class="spacer"></span>${hist}`
+      + `<button type="button" class="btn" data-drill="back">← 返回态势总览</button><button type="button" class="btn" data-drill="clear">✕ 清除条件</button>`;
+  }
+}
+const drillParams = (tab) => (drillState[tab] ? drillState[tab].params : {});
+['#atkDrill', '#alDrill'].forEach((id) => $(id).addEventListener('click', (e) => {
+  const b = e.target.closest('[data-drill]');
+  if (!b) return;
+  const tab = id === '#atkDrill' ? 'attackers' : 'alerts';
+  if (b.dataset.drill === 'back') { switchTab('overview'); return; }
+  if (b.dataset.drill === 'history') { openHistoryFromDrill(); return; }
+  drillState[tab] = null;
+  renderDrillBars();
+  if (tab === 'attackers') { atkOffset = 0; loadAttackers().catch(console.error); } else loadAlerts().catch(console.error);
+}));
+// data-go="标签页:参数" 的元素（KPI 卡片、面板标题中的“全部 ›”链接）点击后跳转
+document.addEventListener('click', (e) => {
   const k = e.target.closest('[data-go]');
   if (!k) return;
   const [tab, arg] = k.dataset.go.split(':');
-  if (tab === 'attackers') { $('#atkLevel').value = arg || ''; atkOffset = 0; }
-  if (tab === 'alerts') { fillAlertFilters(); $('#alSev').value = ''; $('#alResult').value = arg || ''; }
-  switchTab(tab);
+  if (tab === 'attackers') drillTo('attackers', { native: { level: arg } });
+  else if (tab === 'alerts') drillTo('alerts', { native: { result: arg } });
+  else switchTab(tab);
 });
+const fmtHM = (sec) => { const p = timeParts(new Date(sec * 1000)); return `${p.mo}-${p.d} ${p.h}:${p.mi}`; };
 
 // IP 点击统一打开溯源详情
 document.addEventListener('click', (e) => {
@@ -272,17 +326,17 @@ async function loadOverview() {
   // 两类“等级”含义不同：攻击事件按单次攻击的告警等级统计；攻击源按 IP 的综合威胁等级统计
   // （不低于其触发过的最高告警等级）。一个同时触发高危与严重告警的 IP 计为严重攻击源。
   const kpis = [
-    ['总事件', num(t.events), `Web ${num(t.web)} · 防火墙 ${num(t.firewall)}`, '#8fe9ff'],
+    ['总事件', num(t.events), `Web ${num(t.web)} · 防火墙 ${num(t.firewall)}`, '#8fe9ff', '点击查看各日志数据源的采集与解析情况', 'sources:'],
     ['攻击事件', num(t.attacks), `严重 ${num(sc.critical || 0)} · 高危 ${num(sc.high || 0)} · 中危 ${num(sc.medium || 0)}`, LV_COLOR.high,
       `按告警等级统计的攻击命中次数：严重 ${num(sc.critical || 0)} · 高危 ${num(sc.high || 0)} · 中危 ${num(sc.medium || 0)} · 低危 ${num(sc.low || 0)}；近 1 小时 ${num(o.recent.attacks)} 次`, 'alerts:'],
     ['攻击源 IP', num(o.attackers), `独立来源 ${num(o.unique_ips)} · 近 1 小时活跃 ${num(o.recent.attackers)}`, '#ffc53d', '', 'attackers:'],
     ['高危以上攻击源', num((lc.critical || 0) + (lc.high || 0)), `严重 ${lc.critical || 0} · 高危 ${lc.high || 0}`, LV_COLOR.critical,
       `按攻击源 IP 的综合威胁等级统计：严重 ${lc.critical || 0} · 高危 ${lc.high || 0} · 中危 ${lc.medium || 0} · 低危 ${lc.low || 0}。触发过高危告警的 IP 至少为高危`, 'attackers:high'],
-    ['攻击拦截率', `${o.block_rate}%`, `已拦截 ${num(t.blocked)}`, '#52c41a', '', 'alerts:'],
+    ['攻击拦截率', `${o.block_rate}%`, `已拦截 ${num(t.blocked)}`, '#52c41a', `已拦截 ${num(t.blocked)} 次，点击查看已拦截的告警`, 'alerts:blocked'],
     ['疑似成功攻击', num(t.success), '需优先排查是否失陷', t.success > 0 ? LV_COLOR.critical : '#52c41a', '', 'alerts:success'],
     ['攻击面风险指数', `${o.surface_score}`, `风险发现 ${num(o.findings)} 项`,
       o.surface_score >= 60 ? LV_COLOR.critical : o.surface_score >= 30 ? LV_COLOR.high : o.surface_score > 0 ? LV_COLOR.medium : '#52c41a', '', 'surface:'],
-    ['攻击来源地域', num(o.country_count), `国家/地区 · 城市 ${num(o.city_count)}`, '#8fe9ff'],
+    ['攻击来源地域', num(o.country_count), `国家/地区 · 城市 ${num(o.city_count)}`, '#8fe9ff', '点击查看全部攻击源（可在下方“来源国家/地区”“攻击来源城市”图表中点击具体地域）', 'attackers:'],
   ];
   $('#kpis').innerHTML = kpis.map(([l, v, s, c, tip, go]) => `<div class="kpi${go ? ' clickable' : ''}"${go ? ` data-go="${go}"` : ''} title="${esc(tip || s)}"><div class="label">${l}</div><div class="value" style="color:${c}">${v}</div><div class="sub">${esc(s)}</div></div>`).join('');
   const tb = $('#threatBadge');
@@ -291,24 +345,49 @@ async function loadOverview() {
   tb.style.borderColor = tb.style.color;
   $('#rangeText').textContent = zero(o.from) ? '' : `${fmtShort(o.from)} ~ ${fmtShort(o.to)}`;
 
-  gauge('cGauge', o.threat_index, '近 60 分钟');
-  pie('cCategory', (o.categories || []).slice(0, 12));
+  gauge('cGauge', o.threat_index, '近 60 分钟 · 点击查看告警');
+  pie('cCategory', (o.categories || []).slice(0, 12), false, '点击查看该类型告警');
   const ph = o.phases || {};
   chart('cPhase').setOption({
-    tooltip: { ...baseTooltip, trigger: 'axis', axisPointer: { type: 'shadow' } },
+    tooltip: { ...baseTooltip, trigger: 'axis', axisPointer: { type: 'shadow' }, formatter: (ps) => `${esc(ps[0].name)}：${num(ps[0].value)} 次${HINT}` },
     grid: { left: 8, right: 30, top: 6, bottom: 4, containLabel: true },
     xAxis: { type: 'value', axisLabel: { color: TEXT, fontSize: 10 }, splitLine: { lineStyle: { color: GRID_LINE } } },
-    yAxis: { type: 'category', inverse: true, data: PHASES.map((p) => PHASE[p]), axisLabel: { color: TEXT }, axisTick: { show: false }, axisLine: { lineStyle: { color: GRID_LINE } } },
+    yAxis: { type: 'category', inverse: true, triggerEvent: true, data: PHASES.map((p) => PHASE[p]), axisLabel: { color: TEXT }, axisTick: { show: false }, axisLine: { lineStyle: { color: GRID_LINE } } },
     series: [{ type: 'bar', barMaxWidth: 14, label: { show: true, position: 'right', color: TEXT, fontSize: 10 },
       data: PHASES.map((p, i) => ({ value: ph[p] || 0, itemStyle: { color: ['#40a9ff', '#ffc53d', '#ff7a45', '#ff4d4f', '#9254de'][i], borderRadius: [0, 3, 3, 0] } })) }],
   }, true);
-  barChart('cCountry', (o.top_countries || []).slice(0, 10), ['#1d4fa8', '#3a8bff']);
-  barChart('cCity', (o.top_cities || []).slice(0, 10), ['#126e6a', '#36cfc9']);
-  pie('cNetType', o.top_net_types || []);
+  barChart('cCountry', (o.top_countries || []).slice(0, 10), ['#1d4fa8', '#3a8bff'], true, '点击查看该地区攻击源');
+  barChart('cCity', (o.top_cities || []).slice(0, 10), ['#126e6a', '#36cfc9'], true, '点击查看该城市攻击源');
+  pie('cNetType', o.top_net_types || [], false, '点击查看该类型攻击源');
   $('#topTargets').innerHTML = (o.top_targets || []).length
-    ? `<colgroup><col><col style="width:72px"></colgroup><thead><tr><th>目标</th><th class="num">次数</th></tr></thead><tbody>${o.top_targets.map((k) => `<tr><td class="mono" title="${esc(k.name)}">${esc(k.name)}</td><td class="num">${num(k.value)}</td></tr>`).join('')}</tbody>`
+    ? `<colgroup><col><col style="width:72px"></colgroup><thead><tr><th>目标</th><th class="num">次数</th></tr></thead><tbody>${o.top_targets.map((k) => `<tr class="clickable" data-target="${esc(k.name)}" title="${esc(k.name)}&#10;点击查看攻击该目标的告警"><td class="mono">${esc(k.name)}</td><td class="num">${num(k.value)}</td></tr>`).join('')}</tbody>`
     : empty(2);
 }
+$('#topTargets').addEventListener('click', (e) => {
+  const tr = e.target.closest('[data-target]');
+  if (tr) drillTo('alerts', { params: { target: tr.dataset.target }, label: `被攻击目标 = ${tr.dataset.target}` });
+});
+
+// 总览图表的下钻：图表实例创建时绑定（实例重建后自动恢复）。条目名称即筛选值，与总览统计口径一致。
+const onPick = (c, fn) => c.on('click', (x) => {
+  // 系列条目与坐标轴标签（triggerEvent）都可点击
+  const name = x.componentType === 'yAxis' || x.componentType === 'xAxis' ? x.value : x.name;
+  if (name) fn(name, x);
+});
+chartSetup.cCategory = (c) => onPick(c, (name) => drillTo('alerts', { native: { category: name } }));
+chartSetup.cPhase = (c) => onPick(c, (name) => {
+  const ph = PHASES.find((p) => PHASE[p] === name);
+  if (ph) drillTo('alerts', { params: { phase: ph }, label: `攻击链阶段 = ${name}` });
+});
+chartSetup.cCountry = (c) => onPick(c, (name) => drillTo('attackers', { params: { country: name }, label: `来源国家/地区 = ${name}` }));
+chartSetup.cCity = (c) => onPick(c, (name) => drillTo('attackers', { params: { city: name }, label: `攻击来源城市 = ${name}` }));
+chartSetup.cNetType = (c) => onPick(c, (name) => drillTo('attackers', { params: { net_type: name }, label: `攻击源网络类型 = ${name}` }));
+// 威胁指数：点击仪表盘查看近 60 分钟（以最新日志时间为准）的告警
+chartSetup.cGauge = (c) => c.getZr().on('click', () => {
+  if (!lastOverview || zero(lastOverview.to)) return;
+  const to = Math.floor(new Date(lastOverview.to).getTime() / 1000) + 1;
+  drillTo('alerts', { params: { from: to - 3600, to }, label: `近 60 分钟（${fmtHM(to - 3600)} ~ ${fmtHM(to)}）` });
+});
 
 let trendMinutes = 360;
 $$('#trendRange button').forEach((b) => b.addEventListener('click', () => {
@@ -316,8 +395,19 @@ $$('#trendRange button').forEach((b) => b.addEventListener('click', () => {
   $$('#trendRange button').forEach((x) => x.classList.toggle('active', x === b));
   loadTrend();
 }));
+let trendData = [];
+// 趋势图：点击任意时间点查看该时段的告警（按图表的时间粒度）
+chartSetup.cTrend = (c) => c.getZr().on('click', (e) => {
+  if (!trendData.length || !c.containPixel({ gridIndex: 0 }, [e.offsetX, e.offsetY])) return;
+  const idx = Math.round(c.convertFromPixel({ xAxisIndex: 0 }, e.offsetX));
+  const b = trendData[idx];
+  if (!b) return;
+  const step = trendData.length > 1 ? trendData[1].t - trendData[0].t : 60;
+  drillTo('alerts', { params: { from: b.t, to: b.t + step }, label: `时间段 ${fmtHM(b.t)} ~ ${fmtHM(b.t + step)}（攻击 ${num(b.attacks)} 次）` });
+});
 async function loadTrend() {
   const data = (await api(`/api/timeline?minutes=${trendMinutes}`)) || [];
+  trendData = data;
   const x = data.map((b) => {
     const d = new Date(b.t * 1000);
     const p = timeParts(d);
@@ -325,7 +415,10 @@ async function loadTrend() {
   });
   const area = (c) => ({ color: new echarts.graphic.LinearGradient(0, 0, 0, 1, [{ offset: 0, color: c + '66' }, { offset: 1, color: c + '00' }]) });
   chart('cTrend').setOption({
-    tooltip: { ...baseTooltip, trigger: 'axis' },
+    tooltip: {
+      ...baseTooltip, trigger: 'axis',
+      formatter: (ps) => `${esc(ps[0].axisValue)}<br/>${ps.map((p) => `${p.marker}${esc(p.seriesName)}：${num(p.value)}`).join('<br/>')}${hintLine('点击查看该时段告警')}`,
+    },
     // 图例单独占一行，坐标轴名称放在其下方，避免与右侧轴名“攻击”重叠
     legend: { top: 0, right: 0, textStyle: { color: TEXT, fontSize: 11 }, itemWidth: 12, itemHeight: 8, itemGap: 14 },
     grid: { left: 8, right: 8, top: 44, bottom: 4, containLabel: true },
@@ -457,7 +550,8 @@ async function renderMap(reset) {
         tooltip: {
           formatter: (x) => (x.data
             ? `<b>${esc(x.data.label || x.name)}</b><br/>攻击源 ${x.data.attackers} 个 · 攻击 ${num(x.data.value)} 次`
-              + (mapCtl.view === 'china' && !mapCtl.province ? '<br/><span style="color:#7d8db3">点击查看地市分布</span>' : '')
+              + hintLine(mapCtl.view === 'world' ? (x.name === 'China' ? '点击切换到中国地图' : '点击查看该国家/地区的攻击源')
+                : !mapCtl.province ? (meta.china_maps?.[x.name] ? '点击查看地市分布' : '点击查看该省攻击源') : '点击查看该地市的攻击源')
             : esc(x.name)),
         },
       },
@@ -515,9 +609,17 @@ function updateMapChrome(pts, regions) {
   if (pts.some((p) => p.internal)) notes.push('菱形为命中自定义网段的内网攻击源');
   if (pts.length && exact < pts.length) notes.push('空心点为按城市/省份/国家中心换算的近似位置，配置 MaxMind 或开启在线溯源可获得精确坐标');
   $('#mapNote').textContent = notes.join('；');
-  $('#mapCrumb').innerHTML = mapCtl.view === 'china' && mapCtl.province ? `<a id="crumbBack">中国</a> › <b>${esc(mapCtl.province)}</b>` : '';
+  $('#mapCrumb').innerHTML = mapCtl.view === 'china' && mapCtl.province
+    ? `<button type="button" id="crumbBack">中国</button> › <b>${esc(mapCtl.province)}</b> <button type="button" id="crumbList" title="列出该省全部攻击源">攻击源列表 ›</button>`
+    : mapCtl.view === 'china' ? '<button type="button" id="crumbList" title="列出国内全部攻击源">国内攻击源列表 ›</button>' : '';
   const back = $('#crumbBack');
   if (back) back.onclick = () => { mapCtl.province = null; hidePop(); renderMap(true); };
+  const list = $('#crumbList');
+  if (list) {
+    list.onclick = () => (mapCtl.province
+      ? drillTo('attackers', { params: { province: mapCtl.province }, label: `来源省份 = ${mapCtl.province}` })
+      : drillTo('attackers', { params: { world: 'China' }, label: '来源国家/地区 = 中国' }));
+  }
   $$('#mapView button').forEach((b) => b.classList.toggle('active', b.dataset.v === mapCtl.view));
 }
 
@@ -528,9 +630,10 @@ function showPop(p) {
   pop.innerHTML = `<div class="pt">${badge(p.level)} ${esc(p.name || placeShort(p))}<span class="x" id="popClose">✕</span></div>
     <div class="meta">${esc(COORD[p.coord_source] || '')} · ${(+p.lat).toFixed(3)}, ${(+p.lon).toFixed(3)}<br/>攻击源 ${p.attackers} 个 · 攻击 ${num(p.attacks)} 次</div>
     <table>${ips.map((x) => `<tr class="clickable" data-ip="${esc(x.ip)}"><td class="ip">${esc(x.ip)}</td><td>${badge(x.level)}</td><td>${Math.round(x.score)}</td><td class="muted">${esc(x.isp || '')}</td></tr>`).join('')}</table>
-    ${p.attackers > ips.length ? `<div class="muted" style="font-size:11px;margin-top:4px">仅显示威胁评分最高的 ${ips.length} 个</div>` : ''}`;
+    <div class="pop-foot">${p.attackers > ips.length ? `<span class="muted">仅显示威胁评分最高的 ${ips.length} 个</span>` : '<span></span>'}<button type="button" class="more" id="popAll">查看该地全部攻击源 ›</button></div>`;
   pop.hidden = false;
   $('#popClose').onclick = hidePop;
+  $('#popAll').onclick = () => { hidePop(); drillTo('attackers', { params: { place: p.key }, label: `攻击来源地点 = ${p.name || placeShort(p)}` }); };
 }
 
 function switchMapView(v) {
@@ -544,13 +647,22 @@ function switchMapView(v) {
 // 地图点击事件随实例创建绑定，实例重建后自动恢复
 chartSetup.cMap = (c) => c.on('click', (x) => {
   if (x.seriesType === 'effectScatter' && x.data && x.data.p) { showPop(x.data.p); return; }
-  if (x.seriesType !== 'map') return;
-  if (mapCtl.view === 'world' && x.name === 'China') { switchMapView('china'); return; }
-  if (mapCtl.view === 'china' && !mapCtl.province && meta.china_maps && meta.china_maps[x.name]) {
-    mapCtl.province = x.name;
-    hidePop();
-    renderMap(true);
+  if (x.seriesType !== 'map' || !x.data) return; // 没有攻击来源的区域不下钻
+  const label = x.data.label || x.name;
+  if (mapCtl.view === 'world') {
+    if (x.name === 'China') switchMapView('china');
+    else drillTo('attackers', { params: { world: x.name }, label: `来源国家/地区 = ${label}` });
+    return;
   }
+  if (!mapCtl.province) {
+    if (meta.china_maps && meta.china_maps[x.name]) {
+      mapCtl.province = x.name;
+      hidePop();
+      renderMap(true);
+    } else drillTo('attackers', { params: { province: x.name }, label: `来源省份 = ${label}` });
+    return;
+  }
+  drillTo('attackers', { params: { province: mapCtl.province, city_map: x.name }, label: `来源地市 = ${mapCtl.province} ${label}` });
 });
 function initMapEvents() {
   $$('#mapView button').forEach((b) => b.addEventListener('click', () => switchMapView(b.dataset.v)));
@@ -629,9 +741,9 @@ function connectStream() {
 let atkOffset = 0;
 const ATK_PAGE = 50;
 async function loadAttackers() {
-  const q = new URLSearchParams({ q: $('#atkSearch').value, level: $('#atkLevel').value, sort: $('#atkSort').value, limit: ATK_PAGE, offset: atkOffset });
+  const q = new URLSearchParams({ ...drillParams('attackers'), q: $('#atkSearch').value, level: $('#atkLevel').value, sort: $('#atkSort').value, limit: ATK_PAGE, offset: atkOffset });
   const r = await api('/api/attackers?' + q);
-  $('#atkTotal').textContent = `共 ${r.total} 个攻击源`;
+  $('#atkTotal').textContent = `共 ${num(r.total)} 个攻击源`;
   const rows = r.items.map((a) => `<tr class="clickable" data-ip="${esc(a.ip)}">
     <td class="nowrap">${ipLink(a.ip)}<div class="cell-chips">${a.via_proxy ? '<span class="chip">经代理还原</span>' : ''}${(a.intel || []).length ? '<span class="chip warn">情报命中</span>' : ''}</div></td>
     <td class="nowrap">${scoreBar(a.score, a.level)}</td><td class="nowrap">${badge(a.level)}</td>
@@ -646,7 +758,7 @@ async function loadAttackers() {
   $('#atkTable').innerHTML = `<thead><tr><th>来源 IP</th><th>威胁评分</th><th>等级</th><th>归属地 / 运营商</th><th>ASN</th><th>网络类型</th><th>定位置信度</th><th>攻击类型</th><th>攻击阶段</th><th class="num">攻击次数</th><th>最近活动</th></tr></thead><tbody>${rows || empty(11)}</tbody>`;
   const pages = Math.max(1, Math.ceil(r.total / ATK_PAGE));
   const page = Math.floor(atkOffset / ATK_PAGE) + 1;
-  $('#atkPager').innerHTML = `<a class="btn" id="atkPrev" ${page <= 1 ? 'disabled' : ''}>上一页</a><span class="muted">${page} / ${pages}</span><a class="btn" id="atkNext" ${page >= pages ? 'disabled' : ''}>下一页</a>`;
+  $('#atkPager').innerHTML = `<button type="button" class="btn" id="atkPrev" ${page <= 1 ? 'disabled' : ''}>上一页</button><span class="muted">${page} / ${pages}</span><button type="button" class="btn" id="atkNext" ${page >= pages ? 'disabled' : ''}>下一页</button>`;
   $('#atkPrev').onclick = () => { atkOffset = Math.max(0, atkOffset - ATK_PAGE); loadAttackers(); };
   $('#atkNext').onclick = () => { atkOffset += ATK_PAGE; loadAttackers(); };
 }
@@ -665,7 +777,7 @@ function fillAlertFilters() {
 }
 async function loadAlerts() {
   fillAlertFilters();
-  const q = new URLSearchParams({ q: $('#alSearch').value, severity: $('#alSev').value, category: $('#alCat').value, result: $('#alResult').value, kind: $('#alKind').value, limit: 300 });
+  const q = new URLSearchParams({ ...drillParams('alerts'), q: $('#alSearch').value, severity: $('#alSev').value, category: $('#alCat').value, result: $('#alResult').value, kind: $('#alKind').value, limit: 300 });
   const [list, sum] = await Promise.all([api('/api/alerts?' + q), api('/api/alerts/summary')]);
   const rt = sum.retained || {}, hits = sum.hits || {};
   $('#alSummary').innerHTML = `当前保留告警 <b>${num(sum.retained_total)}</b> 条（严重 ${num(rt.critical || 0)} · 高危 ${num(rt.high || 0)} · 中危 ${num(rt.medium || 0)} · 低危 ${num(rt.low || 0)}），`
@@ -677,11 +789,221 @@ async function loadAlerts() {
     <td>${ipLink(a.src_ip)}<div class="muted">${esc(a.location || '')}</div></td>
     <td class="mono">${a.method ? esc(a.method) + ' ' : ''}${esc(a.target)}${a.status ? ` <span class="muted">[${a.status}]</span>` : ''}</td>
     <td>${resTag(a.result)}</td><td class="evidence">${esc(a.evidence)}</td></tr>`).join('');
-  $('#alTable').innerHTML = `<thead><tr><th>时间</th><th>等级</th><th>攻击类型</th><th>来源</th><th>目标</th><th>结果研判</th><th>证据 / 载荷</th></tr></thead><tbody>${rows || empty(7)}</tbody>`;
+  const none = drillState.alerts && meta.archive ? '内存中没有符合条件的告警（只保留最近的告警），可点击上方“在归档库中查询”查看更早的告警' : '暂无符合条件的告警';
+  $('#alTable').innerHTML = `<thead><tr><th>时间</th><th>等级</th><th>攻击类型</th><th>来源</th><th>目标</th><th>结果研判</th><th>证据 / 载荷</th></tr></thead><tbody>${rows || empty(7, none)}</tbody>`;
 }
 let alDebounce;
 $('#alSearch').addEventListener('input', () => { clearTimeout(alDebounce); alDebounce = setTimeout(loadAlerts, 300); });
 ['#alSev', '#alCat', '#alResult', '#alKind'].forEach((s) => $(s).addEventListener('change', loadAlerts));
+
+// ---------------- 历史告警（PostgreSQL 归档，可选） ----------------
+let alMode = 'live';
+const HS_PAGE = 100;
+const hs = { offset: 0, key: '', stats: null, inited: false, seq: 0 };
+// toInput 把时刻转换为 datetime-local 控件的值（按展示时区，与服务端解析时区一致）
+const toInput = (d) => { const p = timeParts(d); return `${p.y}-${p.mo}-${p.d}T${p.h}:${p.mi}`; };
+function setAlertMode(m) {
+  alMode = m === 'history' && meta.archive ? 'history' : 'live';
+  $$('#alMode button').forEach((b) => { b.classList.toggle('active', b.dataset.m === alMode); b.setAttribute('aria-selected', b.dataset.m === alMode); });
+  $('#alLive').hidden = alMode !== 'live';
+  $('#alHistory').hidden = alMode !== 'history';
+  $('#alModeHint').textContent = alMode === 'live'
+    ? '内存中最近的告警，实时更新'
+    : '归档在 PostgreSQL 中的全部告警，可按时间、IP / 网段、规则等条件检索与导出';
+}
+$$('#alMode button').forEach((b) => b.addEventListener('click', () => {
+  setAlertMode(b.dataset.m);
+  loaders.alerts();
+}));
+function hsRange(days) {
+  $$('#hsRange button').forEach((b) => b.classList.toggle('active', b.dataset.d === String(days)));
+  $('#hsTo').value = '';
+  $('#hsFrom').value = days === 'all' ? '' : toInput(new Date(Date.now() - days * 86400e3));
+}
+function fillHistFilters() {
+  const cat = $('#hsCat');
+  if (cat.options.length <= 1 && lastOverview) (lastOverview.categories || []).forEach((c) => cat.add(new Option(c.name, c.name)));
+  const res = $('#hsResult');
+  if (res.options.length <= 1) Object.entries(RESULT).forEach(([k, v]) => res.add(new Option(v, k)));
+  const ph = $('#hsPhase');
+  if (ph.options.length <= 1) PHASES.forEach((p) => ph.add(new Option(PHASE[p], p)));
+  if (!hs.inited) { hs.inited = true; hsRange(7); }
+}
+// openHistoryFromDrill 按实时告警的下钻条件在归档库中查询（时间段、阶段、目标与列表自带的筛选项）
+function openHistoryFromDrill() {
+  fillHistFilters();
+  const p = drillParams('alerts');
+  $('#hsIP').value = '';
+  $('#hsRule').value = '';
+  $('#hsQ').value = p.target || $('#alSearch').value.trim();
+  $('#hsPhase').value = p.phase || '';
+  $('#hsSev').value = $('#alSev').value;
+  $('#hsCat').value = $('#alCat').value;
+  $('#hsResult').value = $('#alResult').value;
+  $('#hsKind').value = $('#alKind').value;
+  if (p.from) {
+    $$('#hsRange button').forEach((b) => b.classList.remove('active'));
+    $('#hsFrom').value = toInput(new Date(p.from * 1000));
+    // datetime-local 精确到分钟：结束时间向上取整，避免漏掉该分钟内的告警
+    $('#hsTo').value = p.to ? toInput(new Date(Math.ceil(p.to / 60) * 60000)) : '';
+  } else hsRange(30);
+  setAlertMode('history');
+  loadHistory(true);
+}
+function hsParams() {
+  const p = new URLSearchParams();
+  const from = $('#hsFrom').value;
+  // “全部”：从很早的时间开始查询（服务端未指定开始时间时默认最近 7 天）
+  p.set('from', from || '2000-01-01T00:00');
+  if ($('#hsTo').value) p.set('to', $('#hsTo').value);
+  for (const [k, id] of [['ip', '#hsIP'], ['rule', '#hsRule'], ['q', '#hsQ'], ['severity', '#hsSev'], ['category', '#hsCat'], ['result', '#hsResult'], ['kind', '#hsKind'], ['phase', '#hsPhase']]) {
+    const v = $(id).value.trim();
+    if (v) p.set(k, v);
+  }
+  return p;
+}
+// hsCheck 在提交前校验输入，错误时提示并返回 false
+function hsCheck() {
+  const ip = $('#hsIP').value.trim();
+  const bad = ip && !/^[0-9a-fA-F.:]+(\/\d{1,3})?$/.test(ip);
+  $('#hsIP').classList.toggle('invalid', !!bad);
+  const from = $('#hsFrom').value, to = $('#hsTo').value;
+  let msg = bad ? 'IP 或网段格式无效，例如 203.0.113.7、10.0.0.0/8、2001:db8::/32' : '';
+  if (!msg && from && to && to <= from) msg = '结束时间必须晚于开始时间';
+  $('#hsMsg').textContent = msg;
+  return !msg;
+}
+async function loadHistory(reset) {
+  fillHistFilters();
+  if (!hsCheck()) return;
+  const p = hsParams();
+  const key = p.toString();
+  if (reset || key !== hs.key) hs.offset = 0;
+  const needStats = key !== hs.key || !hs.stats || reset;
+  hs.key = key;
+  const seq = ++hs.seq; // 只渲染最后一次查询的结果，避免慢查询覆盖新结果
+  $('#hsSubmit').setAttribute('disabled', '');
+  $('#hsCount').textContent = '查询中…';
+  try {
+    const page = new URLSearchParams(p);
+    page.set('limit', HS_PAGE);
+    page.set('offset', hs.offset);
+    const [list, st] = await Promise.all([api('/api/archive/alerts?' + page), needStats ? api('/api/archive/stats?' + p) : hs.stats]);
+    if (seq !== hs.seq) return;
+    hs.stats = st;
+    $('#hsMsg').textContent = '';
+    renderHistStats(st, p);
+    renderHistTable(list);
+  } catch (e) {
+    if (seq !== hs.seq) return;
+    hs.key = ''; // 失败后重新查询时刷新统计
+    $('#hsCount').textContent = '';
+    $('#hsMsg').textContent = e.code === 'archive_unavailable' ? '归档数据库暂不可用：' + e.message : e.message;
+    if (e.code === 'archive_disabled') { meta.archive = false; $('#alModeBar').hidden = true; setAlertMode('live'); }
+  } finally {
+    if (seq === hs.seq) $('#hsSubmit').removeAttribute('disabled');
+  }
+}
+function renderHistStats(st, p) {
+  const sev = st.by_severity || {};
+  const from = p.get('from').startsWith('2000-') ? '全部' : p.get('from').replace('T', ' ');
+  $('#hsRangeText').textContent = `${from} ~ ${(p.get('to') || '现在').replace('T', ' ')}`;
+  const chips = (items, attr, fmt) => (items || []).map((x) => `<span class="chip clickable" ${attr}="${esc(x.name)}" title="点击按此筛选">${fmt(x)}</span>`).join('') || '<span class="muted">-</span>';
+  $('#hsSummary').innerHTML = st.total
+    ? `<div><span class="hs-total">${num(st.total)}</span>条告警
+        <span class="muted">${esc(fmtTime(st.first_seen))} ~ ${esc(fmtTime(st.last_seen))}</span></div>
+      <div class="hs-sev">${['critical', 'high', 'medium', 'low', 'info'].filter((l) => sev[l]).map((l) => `<span>${badge(l)} <b>${num(sev[l])}</b></span>`).join('')}</div>
+      <div class="hs-sub">来源 IP TOP 10</div><div>${chips(st.top_ips, 'data-hip', (x) => `${esc(x.name)}${x.label ? ` <span class="muted">${esc(x.label)}</span>` : ''} · ${num(x.count)}`)}</div>
+      <div class="hs-sub">命中规则 TOP 10</div><div>${chips(st.top_rules, 'data-hrule', (x) => `${esc(x.label || x.name)} · ${num(x.count)}`)}</div>`
+    : '<div class="empty">该条件下没有历史告警</div>';
+  const days = st.trend || [];
+  hs.trend = days;
+  hs.bucket = st.bucket;
+  $('#hsTrendUnit').textContent = { hour: '按小时', day: '按天', month: '按月' }[st.bucket] || '';
+  chart('cHsDay').setOption({
+    tooltip: { ...baseTooltip, trigger: 'axis', axisPointer: { type: 'shadow' }, formatter: (ps) => `${esc(days[ps[0].dataIndex]?.name || '')}：${num(ps[0].value)} 条${hintLine('点击缩小到该时段')}` },
+    grid: { left: 8, right: 16, top: 12, bottom: 4, containLabel: true },
+    xAxis: { type: 'category', triggerEvent: true, data: days.map((d) => (st.bucket === 'month' ? d.name : d.name.slice(5))), axisLabel: { color: TEXT, fontSize: 10 }, axisLine: { lineStyle: { color: GRID_LINE } }, axisTick: { show: false } },
+    yAxis: { type: 'value', minInterval: 1, axisLabel: { color: TEXT, fontSize: 10 }, splitLine: { lineStyle: { color: GRID_LINE } } },
+    series: [{ type: 'bar', name: '告警数', data: days.map((d) => d.count), barMaxWidth: 18,
+      itemStyle: { borderRadius: [3, 3, 0, 0], color: new echarts.graphic.LinearGradient(0, 0, 0, 1, [{ offset: 0, color: '#36cfc9' }, { offset: 1, color: '#1d4f8f' }]) } }],
+    graphic: days.length ? [] : [{ type: 'text', left: 'center', top: 'middle', style: { text: '暂无数据', fill: TEXT, fontSize: 12 } }],
+  }, true);
+}
+// 历史趋势图：点击某个时段，把查询时间范围缩小到该小时 / 天 / 月
+chartSetup.cHsDay = (c) => c.on('click', (x) => {
+  const d = hs.trend?.[x.dataIndex ?? (x.componentType === 'xAxis' ? hs.trend.findIndex((t) => t.name.endsWith(x.value)) : -1)];
+  if (!d) return;
+  const m = /^(\d{4})-(\d{2})(?:-(\d{2})(?: (\d{2}))?)?/.exec(d.name);
+  if (!m) return;
+  // 时段名称是展示时区下的本地时间，用 UTC 运算避免浏览器时区影响
+  const start = Date.UTC(+m[1], +m[2] - 1, +(m[3] || 1), +(m[4] || 0));
+  const e = new Date(start);
+  if (hs.bucket === 'hour') e.setUTCHours(e.getUTCHours() + 1);
+  else if (hs.bucket === 'month') e.setUTCMonth(e.getUTCMonth() + 1);
+  else e.setUTCDate(e.getUTCDate() + 1);
+  const fmt = (t) => new Date(t).toISOString().slice(0, 16);
+  $('#hsFrom').value = fmt(start);
+  $('#hsTo').value = fmt(e.getTime());
+  $$('#hsRange button').forEach((b) => b.classList.remove('active'));
+  loadHistory(true);
+});
+function renderHistTable(list) {
+  const items = list.items || [];
+  const rows = items.map((a) => `<tr>
+    <td class="nowrap muted">${esc(fmtTime(a.time))}${a.instance ? `<div style="font-size:11px">${esc(a.instance)}</div>` : ''}</td><td>${badge(a.severity)}</td>
+    <td><b>${esc(a.name)}</b><div class="muted">${esc(a.category || '-')}${a.phase ? ' · ' + esc(PHASE[a.phase] || a.phase) : ''}</div><div class="muted mono rule-id">${esc(a.rule_id)}</div></td>
+    <td>${ipLink(a.src_ip)}<div class="muted">${esc(a.location || '')}</div></td>
+    <td class="mono">${a.method ? esc(a.method) + ' ' : ''}${esc(a.target || '-')}${a.status ? ` <span class="muted">[${a.status}]</span>` : ''}</td>
+    <td>${a.result ? resTag(a.result) : '-'}</td><td class="evidence">${esc(a.evidence || '')}</td></tr>`).join('');
+  $('#hsTable').innerHTML = `<thead><tr><th>时间</th><th>等级</th><th>攻击类型 / 规则</th><th>来源</th><th>目标</th><th>结果研判</th><th>证据 / 载荷</th></tr></thead><tbody>${rows || empty(7, '没有符合条件的历史告警')}</tbody>`;
+  const page = Math.floor(hs.offset / HS_PAGE) + 1;
+  const total = hs.stats?.total ?? 0;
+  const pages = Math.max(1, Math.ceil(Math.min(total, 100000 + HS_PAGE) / HS_PAGE));
+  $('#hsCount').textContent = items.length ? `第 ${num(hs.offset + 1)} ~ ${num(hs.offset + items.length)} 条，共 ${num(total)} 条` : '';
+  $('#hsPager').innerHTML = `<button type="button" class="btn" id="hsPrev" ${page <= 1 ? 'disabled' : ''}>上一页</button><span class="muted">${page} / ${num(pages)}</span>`
+    + `<button type="button" class="btn" id="hsNext" ${list.has_more && hs.offset + HS_PAGE <= 100000 ? '' : 'disabled'}>下一页</button>`;
+  $('#hsPrev').onclick = () => { hs.offset = Math.max(0, hs.offset - HS_PAGE); loadHistory(false); };
+  $('#hsNext').onclick = () => { hs.offset += HS_PAGE; loadHistory(false); };
+}
+$('#hsForm').addEventListener('submit', (e) => { e.preventDefault(); loadHistory(true); });
+$$('#hsRange button').forEach((b) => b.addEventListener('click', () => { hsRange(b.dataset.d === 'all' ? 'all' : +b.dataset.d); loadHistory(true); }));
+['#hsFrom', '#hsTo'].forEach((s) => $(s).addEventListener('change', () => $$('#hsRange button').forEach((b) => b.classList.remove('active'))));
+['#hsSev', '#hsCat', '#hsResult', '#hsKind', '#hsPhase'].forEach((s) => $(s).addEventListener('change', () => loadHistory(true)));
+$('#hsIP').addEventListener('input', () => { $('#hsIP').classList.remove('invalid'); });
+$('#hsReset').addEventListener('click', () => {
+  ['#hsIP', '#hsRule', '#hsQ', '#hsSev', '#hsCat', '#hsResult', '#hsKind', '#hsPhase'].forEach((s) => { $(s).value = ''; });
+  hsRange(7);
+  loadHistory(true);
+});
+$('#hsSummary').addEventListener('click', (e) => {
+  const c = e.target.closest('[data-hip],[data-hrule]');
+  if (!c) return;
+  if (c.dataset.hip) $('#hsIP').value = c.dataset.hip;
+  else $('#hsRule').value = c.dataset.hrule;
+  loadHistory(true);
+});
+$('#hsExport').addEventListener('click', () => {
+  if (!hsCheck()) return;
+  const total = hs.stats?.total ?? 0;
+  if (total > 200000 && !confirm(`符合条件的告警共 ${num(total)} 条，单次最多导出最近的 20 万条。继续导出？`)) return;
+  const a = document.createElement('a');
+  a.href = '/api/archive/export?' + hsParams();
+  a.download = '';
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+});
+// openHistory 从 IP 详情等处跳转到历史告警并按 IP 查询最近 90 天
+function openHistory(ip) {
+  fillHistFilters();
+  ['#hsRule', '#hsQ', '#hsSev', '#hsCat', '#hsResult', '#hsKind', '#hsPhase'].forEach((s) => { $(s).value = ''; });
+  $('#hsIP').value = ip;
+  hsRange(90);
+  setAlertMode('history');
+  closeDrawer();
+  switchTab('alerts');
+}
 
 // ---------------- 攻击面分析 ----------------
 async function loadSurface() {
@@ -728,9 +1050,34 @@ async function loadSources() {
     <div class="k">特征规则</div><div>${meta.rules} 条 + 行为检测（CC / 目录扫描 / 暴力破解 / 端口扫描 / 主机探测 / 洪水）</div>
     <div class="k">时区</div><div>${esc(meta.timezone || '服务器本地时区')}${meta.time_correction ? ' · <span class="muted">实时日志与实际时间相差整时区时自动校正（time_correction: auto）</span>' : ' · <span class="muted">未开启时区自动校正</span>'}</div>
     <div class="k">Syslog 接收</div><div>${sl.enabled ? `UDP ${esc(sl.udp || '-')} · TCP ${esc(sl.tcp || '-')}` : '未启用'}</div>
+    <div class="k">告警归档</div><div>${meta.archive ? 'PostgreSQL（历史告警可在“告警事件 → 历史告警”中查询与导出）' : '未启用 <span class="muted">（配置 archive.dsn 后可长期留存与检索历史告警）</span>'}</div>
     <div class="k">支持的日志格式</div><div>nginx/Apache combined、main(XFF)、vhost、JSON、自定义 log_format；iptables/UFW/firewalld、pfSense/OPNsense、Windows 防火墙、Cisco ASA、FortiGate/华为/H3C/深信服等 key=value、JSON 防火墙日志</div>
     <div class="k">日志时区</div><div>${esc(meta.timezone || '系统时区')}</div>
     <div class="k">版本</div><div>netsa ${esc(meta.version)} · ${esc(rt.go || '')} · 启动于 ${esc(fmtTime(meta.started))}</div></div>`;
+  if (meta.archive) await loadArchiveStatus();
+}
+const fmtBytes = (b) => (b >= 1 << 30 ? (b / (1 << 30)).toFixed(2) + ' GB' : b >= 1 << 20 ? (b / (1 << 20)).toFixed(1) + ' MB' : Math.round(b / 1024) + ' KB');
+async function loadArchiveStatus() {
+  const st = await api('/api/archive/status');
+  $('#arcPanel').hidden = false;
+  const conn = st.connected ? '<span class="nt-on">● 已连接</span>' : '<span class="lv-high">● 未连接（后台自动重试，期间告警在内存队列中缓冲）</span>';
+  $('#arcSummary').textContent = `${st.server || ''} · 保留 ${st.retention_months < 0 ? '永久' : st.retention_months + ' 个月'}`;
+  const errRecent = st.last_error && !zero(st.last_error_at) && (zero(st.last_write) || st.last_error_at > st.last_write);
+  const parts = (st.partitions || []).map((p) => `<tr><td class="mono">${esc(p.name)}</td>
+    <td class="nowrap">${p.default ? '<span class="muted">默认分区（超出月分区范围的数据）</span>' : `${esc(fmtTime(p.from).slice(0, 10))} ~ ${esc(fmtTime(p.to).slice(0, 10))}`}</td>
+    <td class="num">${num(p.rows)}</td><td class="num">${esc(fmtBytes(p.bytes))}</td></tr>`).join('');
+  $('#arcBody').innerHTML = `<div class="arc-grid"><div class="kv">
+      <div class="k">连接状态</div><div>${conn}</div>
+      <div class="k">已写入</div><div>${num(st.written)} 条 <span class="muted">（本次启动以来）</span></div>
+      <div class="k">待写入队列</div><div>${num(st.queued)} 条</div>
+      <div class="k">丢弃</div><div>${st.dropped ? `<span class="lv-high">${num(st.dropped)} 条</span> <span class="muted">（队列满或数据无法写入）</span>` : '0'}</div>
+      <div class="k">重复跳过</div><div>${num(st.duplicates)} 条 <span class="muted">（同一份日志被重复分析时，已归档的告警不会重复写入）</span></div>
+      <div class="k">超出保留期</div><div>${num(st.expired)} 条 <span class="muted">（早于保留期的告警不写入）</span></div>
+      <div class="k">写入失败批次</div><div>${st.failed_batches ? `<span class="lv-medium">${num(st.failed_batches)}</span>（已自动重试）` : '0'}</div>
+      <div class="k">最近写入</div><div>${esc(fmtTime(st.last_write))}</div>
+      ${st.last_error ? `<div class="k">最近错误</div><div class="${errRecent ? 'arc-err' : 'muted'}">${esc(fmtTime(st.last_error_at))} ${esc(st.last_error)}${errRecent ? '' : '（已恢复）'}</div>` : ''}
+    </div>
+    <div class="scroll"><table class="table"><thead><tr><th>分区</th><th>时间范围</th><th class="num">行数（估算）</th><th class="num">占用空间</th></tr></thead><tbody>${parts || empty(4, st.connected ? '暂无分区' : '未连接')}</tbody></table></div></div>`;
 }
 $$('.exports .btn[data-fmt]').forEach((b) => b.addEventListener('click', () => {
   window.location.href = `/api/export/blocklist?format=${b.dataset.fmt}&level=${$('#blLevel').value}`;
@@ -824,7 +1171,7 @@ async function openIP(ip) {
     <h4>多源定位比对</h4>
     <table class="table"><thead><tr><th>数据源</th><th>国家</th><th>省/州</th><th>城市</th><th>运营商/组织</th><th>ASN</th><th>坐标</th></tr></thead><tbody>${sources || empty(7)}</tbody></table>
     ${g.has_coord ? '<div class="chart mini-map" id="cMiniMap"></div>' : ''}
-    <div style="margin-top:8px"><a class="btn" id="rdapBtn">查询 WHOIS / RDAP 注册信息</a></div>
+    <div style="margin-top:8px"><button type="button" class="btn" id="rdapBtn">查询 WHOIS / RDAP 注册信息</button></div>
     <div id="rdapBox"></div>
 
     <h4>攻击画像</h4>
@@ -840,7 +1187,7 @@ async function openIP(ip) {
     ${ports ? `<h4>探测端口</h4><div class="chips">${ports}</div>` : ''}
     ${status ? `<h4>响应状态码</h4><div class="chips">${status}</div>` : ''}
     ${uas ? `<h4>User-Agent</h4>${uas}` : ''}
-    <h4>最近告警</h4><div class="scroll"><table class="table"><thead><tr><th>时间</th><th>规则</th><th>结果</th><th>目标</th><th>证据</th></tr></thead><tbody>${recent || empty(5)}</tbody></table></div>
+    <h4>最近告警${meta.archive ? ' <button type="button" class="btn" id="hsFromIP" style="margin-left:8px;font-weight:400">查看全部历史告警（归档库）</button>' : ''}</h4><div class="scroll"><table class="table"><thead><tr><th>时间</th><th>规则</th><th>结果</th><th>目标</th><th>证据</th></tr></thead><tbody>${recent || empty(5)}</tbody></table></div>
     ${relHTML}
     <h4>处置建议</h4>
     ${advice.map((a) => `<div class="note" style="color:#b7eb8f">• ${esc(a)}</div>`).join('')}
@@ -873,6 +1220,7 @@ netsh advfirewall firewall add rule name="netsa-block-${esc(ip)}" dir=in action=
       });
     } catch (e) { console.error(e); }
   }
+  if ($('#hsFromIP')) $('#hsFromIP').onclick = () => openHistory(ip);
   $('#rdapBtn').onclick = async () => {
     const box = $('#rdapBox');
     box.innerHTML = '<div class="muted">查询中...</div>';
@@ -1244,7 +1592,7 @@ $('#userTable').addEventListener('click', async (e) => {
 const loaders = {
   overview: () => Promise.all([loadOverview(), loadTrend(), loadMap(), loadTopAttackers()]).catch(console.error),
   attackers: () => loadAttackers().catch(console.error),
-  alerts: () => loadAlerts().catch(console.error),
+  alerts: () => (alMode === 'history' ? loadHistory(false) : loadAlerts()).catch(console.error),
   surface: () => loadSurface().catch(console.error),
   notify: () => loadNotify().catch(console.error),
   system: () => loadSystem().catch(console.error),
@@ -1268,6 +1616,7 @@ document.addEventListener('fullscreenchange', () => setTimeout(resizeCharts, 200
   if (me.must_change) { openPasswordForm(true); return; }
   try { meta = await api('/api/meta'); } catch (e) { console.error(e); }
   setDisplayTimezone(meta.timezone);
+  $('#alModeBar').hidden = !meta.archive;
   $('#clock').title = meta.timezone ? `时区：${meta.timezone}（与服务端配置一致）` : '时区：浏览器本地时区';
   initMapEvents();
   loaders.overview();
@@ -1292,7 +1641,7 @@ setInterval(() => {
     loadOverview().catch(console.error);
     loadTrend().catch(console.error);
     loadTopAttackers().catch(console.error);
-  } else if (currentTab === 'alerts' && $('#alAuto').checked) {
+  } else if (currentTab === 'alerts' && alMode === 'live' && $('#alAuto').checked) {
     loadAlerts().catch(console.error);
   } else if (currentTab === 'notify' && $('#ntModal').hidden) {
     loadNotify().catch(console.error);

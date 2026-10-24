@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"netsa/internal/alert"
+	"netsa/internal/archive"
 	"netsa/internal/auth"
 	"netsa/internal/config"
 	"netsa/internal/detect"
@@ -40,7 +41,8 @@ type Server struct {
 	Version  string
 	Broker   *Broker
 	Notifier *alert.Notifier
-	Auth     *auth.Manager // 为 nil 表示未开启登录
+	Auth     *auth.Manager    // 为 nil 表示未开启登录
+	Archive  *archive.Archive // 为 nil 表示未启用告警归档
 
 	started time.Time
 	rdapSem chan struct{}
@@ -76,9 +78,14 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/surface", cached(3*time.Second, func(w http.ResponseWriter, r *http.Request) { writeJSON(w, s.Store.Surface()) }))
 	mux.HandleFunc("GET /api/sources", s.sources)
 	mux.HandleFunc("GET /api/rules", func(w http.ResponseWriter, r *http.Request) { writeJSON(w, s.Engine.Rules()) })
-	mux.HandleFunc("GET /api/stream", s.Broker.ServeHTTP)
+	mux.HandleFunc("GET /api/stream", func(w http.ResponseWriter, r *http.Request) { s.Broker.Serve(w, r, s.sessionAlive(r)) })
 	mux.HandleFunc("GET /api/export/blocklist", s.blocklist)
 	mux.HandleFunc("GET /api/report", s.report)
+	// 历史告警（PostgreSQL 归档）
+	mux.HandleFunc("GET /api/archive/status", s.archiveStatus)
+	mux.HandleFunc("GET /api/archive/alerts", s.archiveAlerts)
+	mux.HandleFunc("GET /api/archive/stats", s.archiveStats)
+	mux.HandleFunc("GET /api/archive/export", s.archiveExport)
 	// 登录与账号管理
 	mux.HandleFunc("POST /api/auth/login", s.authLogin)
 	mux.HandleFunc("GET /api/auth/session", s.authSession)
@@ -156,6 +163,18 @@ func qint(r *http.Request, key string, def int) int {
 	return def
 }
 
+// qtime 解析查询参数中的时间：Unix 秒或 RFC3339，无效时返回零值（不限制）。
+func qtime(v string) time.Time {
+	if v == "" {
+		return time.Time{}
+	}
+	if n, err := strconv.ParseInt(v, 10, 64); err == nil && n > 0 && n < 1<<40 {
+		return time.Unix(n, 0)
+	}
+	t, _ := time.Parse(time.RFC3339, v)
+	return t
+}
+
 // displayTimezone 返回页面展示时间所用的 IANA 时区名：配置项 timezone，未配置时取进程的 TZ 环境变量
 // （容器镜像默认 Asia/Shanghai）；都没有时返回空，页面使用浏览器本地时区。
 func (s *Server) displayTimezone() string {
@@ -185,8 +204,8 @@ func clamp(v, lo, hi int) int {
 func (s *Server) meta(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]any{
 		"version": s.Version, "home": s.Cfg.Home, "started": s.started, "timezone": s.displayTimezone(),
-		"time_correction": s.Cfg.TimeCorrection != "off",
-		"geo_providers":   s.Geo.ProviderNames(), "rdap": s.RDAP != nil, "rules": len(s.Engine.Rules()),
+		"time_correction": s.Cfg.TimeCorrection != "off", "archive": s.Archive != nil,
+		"geo_providers": s.Geo.ProviderNames(), "rdap": s.RDAP != nil, "rules": len(s.Engine.Rules()),
 		"china_maps": s.Geo.Gazetteer().ChinaMaps(),
 	})
 }
@@ -196,6 +215,8 @@ func (s *Server) attackers(w http.ResponseWriter, r *http.Request) {
 	list, total := s.Store.Attackers(store.AttackerQuery{
 		MinLevel: model.ParseSeverity(q.Get("level")), Search: q.Get("q"), Sort: q.Get("sort"),
 		Limit: clamp(qint(r, "limit", 50), 1, 1000), Offset: max(qint(r, "offset", 0), 0),
+		Country: q.Get("country"), City: q.Get("city"), NetType: q.Get("net_type"), ISP: q.Get("isp"), World: q.Get("world"),
+		Province: q.Get("province"), CityMap: q.Get("city_map"), Place: q.Get("place"), Category: q.Get("category"), Phase: q.Get("phase"),
 	})
 	if list == nil {
 		list = []store.AttackerSummary{}
@@ -246,6 +267,7 @@ func (s *Server) alerts(w http.ResponseWriter, r *http.Request) {
 		MinSeverity: model.ParseSeverity(q.Get("severity")), Category: q.Get("category"), IP: q.Get("ip"),
 		Result: q.Get("result"), Kind: q.Get("kind"), Search: q.Get("q"), SinceID: since,
 		Limit: clamp(qint(r, "limit", 200), 1, 2000),
+		Phase: q.Get("phase"), Target: q.Get("target"), From: qtime(q.Get("from")), To: qtime(q.Get("to")),
 	})
 	if list == nil {
 		list = []*model.Alert{}
@@ -388,6 +410,8 @@ type Broker struct {
 	subs   map[chan []byte]struct{}
 	tokens float64
 	last   time.Time
+	// PingEvery 是心跳间隔（默认 20 秒），同时也是检查登录会话是否仍然有效的周期
+	PingEvery time.Duration
 }
 
 func NewBroker() *Broker { return &Broker{subs: map[chan []byte]struct{}{}} }
@@ -414,7 +438,11 @@ func (b *Broker) Publish(a *model.Alert) {
 	}
 }
 
-func (b *Broker) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+func (b *Broker) ServeHTTP(w http.ResponseWriter, r *http.Request) { b.Serve(w, r, nil) }
+
+// Serve 推送实时告警流。alive 不为空时每次心跳检查登录会话是否仍然有效：
+// 退出登录、修改密码、删除账号或调整角色后，已建立的长连接也会在 20 秒内断开，不会继续收到告警。
+func (b *Broker) Serve(w http.ResponseWriter, r *http.Request, alive func() bool) {
 	fl, ok := w.(http.Flusher)
 	if !ok {
 		http.Error(w, "streaming unsupported", http.StatusInternalServerError)
@@ -439,7 +467,11 @@ func (b *Broker) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("X-Accel-Buffering", "no")
 	fmt.Fprint(w, "retry: 5000\n: connected\n\n")
 	fl.Flush()
-	ping := time.NewTicker(20 * time.Second)
+	every := b.PingEvery
+	if every <= 0 {
+		every = 20 * time.Second
+	}
+	ping := time.NewTicker(every)
 	defer ping.Stop()
 	for {
 		select {
@@ -449,6 +481,9 @@ func (b *Broker) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			fmt.Fprintf(w, "event: alert\ndata: %s\n\n", msg)
 			fl.Flush()
 		case <-ping.C:
+			if alive != nil && !alive() {
+				return
+			}
 			fmt.Fprint(w, ": ping\n\n")
 			fl.Flush()
 		}
