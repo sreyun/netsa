@@ -149,6 +149,22 @@ func (s *Server) clearCookie(w http.ResponseWriter, r *http.Request) {
 		Secure: r.TLS != nil || strings.EqualFold(r.Header.Get("X-Forwarded-Proto"), "https")})
 }
 
+// audit 记录一次操作审计（未开启登录时不记录）。err 不为空表示操作失败。
+func (s *Server) audit(r *http.Request, action, detail string, err error) {
+	if s.Auth == nil {
+		return
+	}
+	user := ""
+	if sess := sessionOf(r); sess != nil {
+		user = sess.User
+	}
+	reason := ""
+	if err != nil {
+		reason = err.Error()
+	}
+	s.Auth.LogAction(user, s.clientIP(r), action, detail, err == nil, reason)
+}
+
 func writeErrorCode(w http.ResponseWriter, code int, msg, reason string) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
@@ -157,7 +173,7 @@ func writeErrorCode(w http.ResponseWriter, code int, msg, reason string) {
 }
 
 func sessionView(sess *auth.Session, enabled bool) map[string]any {
-	return map[string]any{"user": sess.User, "role": sess.Role, "must_change": sess.MustChange, "auth_enabled": enabled, "expires": sess.Expires}
+	return map[string]any{"authenticated": true, "user": sess.User, "role": sess.Role, "must_change": sess.MustChange, "auth_enabled": enabled, "expires": sess.Expires}
 }
 
 func (s *Server) authLogin(w http.ResponseWriter, r *http.Request) {
@@ -199,8 +215,8 @@ func (s *Server) authLogin(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) authSession(w http.ResponseWriter, r *http.Request) {
 	sess := sessionOf(r)
-	if sess == nil {
-		writeErrorCode(w, http.StatusUnauthorized, "未登录", "unauthenticated")
+	if sess == nil { // 未登录不视为错误（登录页据此判断），避免浏览器控制台出现 401 报错
+		writeJSON(w, map[string]any{"authenticated": false, "auth_enabled": true})
 		return
 	}
 	writeJSON(w, sessionView(sess, s.Auth != nil))
@@ -208,6 +224,7 @@ func (s *Server) authSession(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) authLogout(w http.ResponseWriter, r *http.Request) {
 	if s.Auth != nil {
+		s.audit(r, "退出登录", "", nil)
 		s.Auth.Logout(sessionOf(r))
 	}
 	s.clearCookie(w, r)
@@ -233,6 +250,7 @@ func (s *Server) authPassword(w http.ResponseWriter, r *http.Request) {
 	}
 	token, err := s.Auth.ChangePassword(sess.User, f.Current, f.New)
 	s.releaseHash()
+	s.audit(r, "修改密码", "", err)
 	if err != nil {
 		writeErrorCode(w, http.StatusBadRequest, err.Error(), "bad_request")
 		return
@@ -264,7 +282,9 @@ func (s *Server) authUserCreate(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
-	if err := s.Auth.CreateUser(strings.TrimSpace(f.Name), f.Role, f.Password); err != nil {
+	err := s.Auth.CreateUser(strings.TrimSpace(f.Name), f.Role, f.Password)
+	s.audit(r, "创建账号", strings.TrimSpace(f.Name)+"（"+f.Role+"）", err)
+	if err != nil {
 		writeErrorCode(w, http.StatusBadRequest, err.Error(), "bad_request")
 		return
 	}
@@ -282,7 +302,16 @@ func (s *Server) authUserUpdate(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
-	if err := s.Auth.UpdateUser(r.PathValue("name"), f.Role, f.Password); err != nil {
+	err := s.Auth.UpdateUser(r.PathValue("name"), f.Role, f.Password)
+	detail := r.PathValue("name")
+	if f.Role != "" {
+		detail += " 角色改为 " + f.Role
+	}
+	if f.Password != "" {
+		detail += " 重置密码"
+	}
+	s.audit(r, "修改账号", detail, err)
+	if err != nil {
 		writeErrorCode(w, statusFor(err), err.Error(), "bad_request")
 		return
 	}
@@ -295,7 +324,9 @@ func (s *Server) authUserDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	name := r.PathValue("name")
-	if err := s.Auth.DeleteUser(name); err != nil {
+	err := s.Auth.DeleteUser(name)
+	s.audit(r, "删除账号", name, err)
+	if err != nil {
 		writeErrorCode(w, statusFor(err), err.Error(), "bad_request")
 		return
 	}

@@ -228,3 +228,36 @@ func TestLoginFlow(t *testing.T) {
 		t.Fatalf("登录审计记录不足: %d", len(audit))
 	}
 }
+
+// 安全加固：CSV 公式注入、安全响应头、未登录的会话查询、操作审计。
+func TestSecurityHardening(t *testing.T) {
+	row := csvSafe([]string{"198.51.100.1", "=HYPERLINK(\"http://evil\")", "+1", "-2", "@SUM(A1)", "\tx", "正常"})
+	for i, want := range []string{"198.51.100.1", "'=HYPERLINK(\"http://evil\")", "'+1", "'-2", "'@SUM(A1)", "'\tx", "正常"} {
+		if row[i] != want {
+			t.Errorf("csvSafe[%d]=%q want %q", i, row[i], want)
+		}
+	}
+	s, _ := testServer(t, "admin", "Adm1n-secret")
+	h := s.Handler()
+	rec := do(h, http.MethodGet, "/api/auth/session", "", nil)
+	if rec.Code != 200 || !strings.Contains(rec.Body.String(), `"authenticated":false`) {
+		t.Fatalf("未登录查询会话应返回 200 与 authenticated=false: %d %s", rec.Code, rec.Body.String())
+	}
+	for _, hdr := range []string{"Content-Security-Policy", "X-Frame-Options", "Permissions-Policy", "Cross-Origin-Opener-Policy", "X-Content-Type-Options"} {
+		if rec.Header().Get(hdr) == "" {
+			t.Errorf("缺少安全响应头 %s", hdr)
+		}
+	}
+	admin := login(t, h, "admin", "Adm1n-secret")
+	do(h, http.MethodPost, "/api/auth/users", `{"name":"ops2","role":"viewer","password":"Op5-pass-1"}`, admin)
+	do(h, http.MethodGet, "/api/export/blocklist?format=csv&level=high", "", admin)
+	var audit []auth.Record
+	json.Unmarshal(do(h, http.MethodGet, "/api/auth/audit", "", admin).Body.Bytes(), &audit)
+	got := map[string]bool{}
+	for _, a := range audit {
+		got[a.Action] = true
+	}
+	if !got["创建账号"] || !got["导出封禁列表"] {
+		t.Fatalf("操作审计缺失: %+v", audit)
+	}
+}

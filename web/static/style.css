@@ -354,3 +354,7 @@ pre.cmd { background: #050b18; border: 1px solid var(--border); padding: 8px 10p
 .user-drop button { background: none; border: 0; color: var(--text); text-align: left; padding: 8px 12px; cursor: pointer; border-radius: 4px; font-size: 13px; }
 .user-drop button:hover { background: rgba(58,139,255,.18); }
 #userTable td { vertical-align: middle; }
+
+/* 连接中断提示 */
+.conn-banner { position: sticky; top: 0; z-index: 25; text-align: center; padding: 6px 12px; font-size: 13px; color: #fff;
+  background: linear-gradient(90deg, rgba(255,77,79,.85), rgba(255,122,69,.85)); box-shadow: 0 4px 16px rgba(0,0,0,.4); }

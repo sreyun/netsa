@@ -59,11 +59,13 @@ type Session struct {
 	Expires    time.Time
 }
 
-// Record 是一条登录审计记录。
+// Record 是一条审计记录：登录尝试，以及账号、告警推送等配置变更与数据导出操作。
 type Record struct {
 	Time   time.Time `json:"time"`
 	User   string    `json:"user"`
 	IP     string    `json:"ip"`
+	Action string    `json:"action,omitempty"` // 为空表示登录
+	Detail string    `json:"detail,omitempty"`
 	OK     bool      `json:"ok"`
 	Reason string    `json:"reason,omitempty"`
 	Agent  string    `json:"agent,omitempty"`
@@ -380,6 +382,20 @@ func (m *Manager) recordLocked(user, ip, agent string, ok bool, reason string) {
 	if !ok {
 		log.Printf("[auth] 登录失败: 用户 %q 来源 %s（%s）", user, ip, reason)
 	}
+}
+
+// LogAction 记录一次操作（账号与配置变更、数据导出等），持久化到账号文件。
+func (m *Manager) LogAction(user, ip, action, detail string, ok bool, reason string) {
+	if len(detail) > 200 {
+		detail = detail[:200]
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.audit = append(m.audit, Record{Time: m.now(), User: user, IP: ip, Action: action, Detail: detail, OK: ok, Reason: reason})
+	if len(m.audit) > auditCap {
+		m.audit = append([]Record(nil), m.audit[len(m.audit)-auditCap:]...)
+	}
+	m.saveLocked()
 }
 
 // ---------------- 会话令牌 ----------------

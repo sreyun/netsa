@@ -60,6 +60,7 @@ func (s *Server) robotCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	v, err := s.Notifier.Create(f.robot())
+	s.audit(r, "添加告警机器人", f.Name+"（"+f.Type+"）", errIfNoID(v, err))
 	if err != nil && v.ID == "" {
 		s.alertError(w, err)
 		return
@@ -73,6 +74,7 @@ func (s *Server) robotUpdate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	v, err := s.Notifier.Update(r.PathValue("id"), f.robot(), f.ClearSecret)
+	s.audit(r, "修改告警机器人", f.Name, errIfNoID(v, err))
 	if err != nil && v.ID == "" {
 		s.alertError(w, err)
 		return
@@ -81,7 +83,9 @@ func (s *Server) robotUpdate(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) robotDelete(w http.ResponseWriter, r *http.Request) {
-	if err := s.Notifier.Delete(r.PathValue("id")); err != nil && !strings.HasPrefix(err.Error(), "保存") {
+	err := s.Notifier.Delete(r.PathValue("id"))
+	s.audit(r, "删除告警机器人", r.PathValue("id"), err)
+	if err != nil && !strings.HasPrefix(err.Error(), "保存") {
 		s.alertError(w, err)
 		return
 	}
@@ -95,11 +99,20 @@ func (s *Server) robotTest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	err := s.Notifier.Test(r.Context(), r.PathValue("id"), f.robot())
+	s.audit(r, "发送测试消息", f.Name, err)
 	if errors.Is(err, alert.ErrNotFound) {
 		s.alertError(w, err)
 		return
 	}
 	writeJSON(w, map[string]any{"ok": err == nil, "error": errText(err)})
+}
+
+// errIfNoID 返回操作是否失败：保存文件失败但配置已生效（返回了机器人）时视为成功。
+func errIfNoID(v alert.RobotView, err error) error {
+	if v.ID != "" {
+		return nil
+	}
+	return err
 }
 
 func errText(err error) string {
