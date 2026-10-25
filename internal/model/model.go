@@ -89,6 +89,7 @@ const (
 	PhaseExploit     = "exploit"     // 漏洞利用
 	PhaseCredential  = "credential"  // 凭证攻击 / 暴力破解
 	PhasePersistence = "persistence" // 后门控制
+	PhaseCollection  = "collection"  // 数据窃取（接口遍历、批量爬取）
 	PhaseImpact      = "impact"      // 拒绝服务 / 资源消耗
 )
 

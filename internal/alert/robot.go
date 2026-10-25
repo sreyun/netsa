@@ -37,6 +37,7 @@ type Robot struct {
 	Secret  string    `json:"secret,omitempty"` // 钉钉 / 飞书“加签”密钥
 	Levels  []string  `json:"levels"`           // 推送等级，可多选：medium / high / critical
 	Enabled bool      `json:"enabled"`
+	Report  bool      `json:"report"` // 接收每日安全日报
 	Source  string    `json:"source"` // ui：界面添加，可编辑；config：配置文件
 	Created time.Time `json:"created"`
 }
@@ -215,7 +216,7 @@ func localTime(t time.Time) time.Time {
 
 // Event 是一条待推送的安全事件。
 type Event struct {
-	Kind       string         `json:"kind"` // alert 告警事件 / escalation 攻击源威胁升级 / test 测试消息
+	Kind       string         `json:"kind"` // alert 告警事件 / escalation 攻击源威胁升级 / test 测试消息 / report 安全日报
 	Severity   model.Severity `json:"severity"`
 	Title      string         `json:"title"`
 	Category   string         `json:"category,omitempty"`
@@ -231,6 +232,7 @@ type Event struct {
 	Attacks    int64          `json:"attacks,omitempty"`
 	Categories []string       `json:"categories,omitempty"`
 	Source     string         `json:"source,omitempty"`
+	Lines      []string       `json:"lines,omitempty"` // 安全日报的各行内容
 	Time       time.Time      `json:"time"`
 }
 
@@ -241,7 +243,7 @@ var resultLabel = map[string]string{
 
 var phaseLabel = map[string]string{
 	model.PhaseRecon: "侦察扫描", model.PhaseExploit: "漏洞利用", model.PhaseCredential: "凭证攻击",
-	model.PhasePersistence: "后门控制", model.PhaseImpact: "破坏影响",
+	model.PhasePersistence: "后门控制", model.PhaseCollection: "数据窃取", model.PhaseImpact: "破坏影响",
 }
 
 // sanitize 处理来自日志的文本（攻击载荷、URL、UA 等均可被攻击者控制）：去除控制字符、截断，
@@ -383,6 +385,9 @@ func (b *Batch) maxSeverity() model.Severity {
 }
 
 func (b *Batch) detailURL() string {
+	if b.BaseURL != "" && len(b.Events) == 1 && b.Events[0].Kind == "report" {
+		return strings.TrimRight(b.BaseURL, "/") + "/#tab=assess"
+	}
 	if b.BaseURL == "" || len(b.Events) != 1 || b.Events[0].IP == "" {
 		return strings.TrimRight(b.BaseURL, "/")
 	}
@@ -394,6 +399,9 @@ func (b *Batch) title() string {
 	if len(b.Events) == 1 && b.suppressedTotal() == 0 {
 		if b.Events[0].Kind == "test" {
 			return "netsa 告警推送测试"
+		}
+		if b.Events[0].Kind == "report" {
+			return "netsa 安全告警日报 " + sanitize(b.Events[0].Title, 60)
 		}
 		return "netsa 安全告警 " + b.Events[0].headline()
 	}
@@ -438,6 +446,16 @@ func (b *Batch) markdown(typ string) string {
 			sb.WriteString("> 发送时间：" + localTime(e.Time).Format("2006-01-02 15:04:05"))
 			return sb.String()
 		}
+		if e.Kind == "report" {
+			sb.WriteString("### " + b.title() + "\n\n")
+			for _, l := range e.Lines {
+				sb.WriteString("- " + sanitize(l, 300) + "\n")
+			}
+			if u := b.detailURL(); u != "" {
+				sb.WriteString("\n[查看安全评估](" + u + ")")
+			}
+			return sb.String()
+		}
 		sb.WriteString("### netsa 安全告警\n\n")
 		sb.WriteString("**" + color(e.Severity, e.headline()) + "**\n\n")
 		for _, f := range e.fields() {
@@ -479,6 +497,13 @@ func (b *Batch) feishuCard() map[string]any {
 		if e.Kind == "test" {
 			md.WriteString("机器人「" + sanitize(e.Title, 40) + "」配置正确，将推送以下等级的告警事件：" + sanitize(e.Category, 40) + "\n发送时间：" + localTime(e.Time).Format("2006-01-02 15:04:05"))
 			template = "green"
+		} else if e.Kind == "report" {
+			for _, l := range e.Lines {
+				md.WriteString("• " + sanitize(l, 300) + "\n")
+			}
+			if e.Severity <= model.SevLow {
+				template = "green"
+			}
 		} else {
 			md.WriteString("**" + e.headline() + "**\n")
 			for _, f := range e.fields() {
@@ -502,6 +527,9 @@ func (b *Batch) feishuCard() map[string]any {
 		label := "查看态势大屏"
 		if len(b.Events) == 1 && b.Events[0].IP != "" {
 			label = "查看溯源详情"
+		}
+		if len(b.Events) == 1 && b.Events[0].Kind == "report" {
+			label = "查看安全评估"
 		}
 		elements = append(elements, map[string]any{"tag": "action", "actions": []any{map[string]any{
 			"tag": "button", "type": "primary", "url": u, "text": map[string]any{"tag": "plain_text", "content": label},

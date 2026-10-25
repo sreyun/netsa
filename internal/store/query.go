@@ -306,7 +306,7 @@ type AttackerSummary struct {
 	ViaProxy   bool           `json:"via_proxy,omitempty"`
 }
 
-var phaseOrder = []string{model.PhaseRecon, model.PhaseCredential, model.PhaseExploit, model.PhasePersistence, model.PhaseImpact}
+var phaseOrder = []string{model.PhaseRecon, model.PhaseCredential, model.PhaseExploit, model.PhasePersistence, model.PhaseCollection, model.PhaseImpact}
 
 func summarize(p *IPProfile) AttackerSummary {
 	a := AttackerSummary{

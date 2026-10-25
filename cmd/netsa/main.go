@@ -40,7 +40,7 @@ import (
 	"netsa/web"
 )
 
-const version = "1.4.0"
+const version = "1.5.0"
 
 func usage() {
 	fmt.Fprintf(os.Stderr, `netsa %s —— 网络安全态势感知与攻击面分析系统
@@ -102,6 +102,7 @@ type app struct {
 	ingest   *ingest.Manager
 	rdap     *geo.RDAPClient
 	archive  *archive.Archive // 可选的 PostgreSQL 告警归档
+	api      *api.Server
 }
 
 func build(cfg *config.Config) (*app, error) {
@@ -193,6 +194,7 @@ func (a *app) server(listen string) (*http.Server, error) {
 		RDAP: a.rdap, Static: staticFS(a.cfg), Version: version, Broker: a.broker, Notifier: a.notifier,
 		Archive: a.archive,
 	}
+	a.api = s
 	if a.cfg.Server.AuthEnabled() {
 		m, initial, err := auth.New(auth.Options{
 			ConfigUser: a.cfg.Server.Username, ConfigPassword: a.cfg.Server.Password, File: usersFile(a.cfg),
@@ -214,10 +216,11 @@ func (a *app) server(listen string) (*http.Server, error) {
 	} else {
 		log.Printf("[auth] 警告: 已关闭登录认证（server.auth: false），任何能访问该端口的人都可以查看和修改配置")
 	}
-	// 不设置 Read/WriteTimeout：SSE 长连接会被其超时中断；读取请求头与请求体分别限时，防止慢速攻击
+	// 读取请求（含请求体）与写出响应都限时，防止慢速发送请求体 / 慢速读取响应的连接长期占用资源；
+	// 实时告警流与历史告警导出在处理时用 http.ResponseController 单独解除 / 延长期限。
 	return &http.Server{
-		Addr: listen, Handler: s.Handler(), ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 120 * time.Second, MaxHeaderBytes: 64 << 10,
-		TLSConfig: &tls.Config{MinVersion: tls.VersionTLS12},
+		Addr: listen, Handler: s.Handler(), ReadHeaderTimeout: 10 * time.Second, ReadTimeout: api.ReadTimeout, WriteTimeout: api.WriteTimeout,
+		IdleTimeout: 120 * time.Second, MaxHeaderBytes: 64 << 10, TLSConfig: &tls.Config{MinVersion: tls.VersionTLS12},
 	}, nil
 }
 
@@ -312,6 +315,7 @@ func cmdServe(args []string) error {
 	if err != nil {
 		return err
 	}
+	go a.api.RunBackground(ctx) // 每小时记录安全评分，每日推送安全日报
 	go func() {
 		log.Printf("[web] 态势感知大屏: %s://%s", a.scheme(), displayAddr(cfg.Server.Listen))
 		if err := a.listen(srv); err != nil && !errors.Is(err, http.ErrServerClosed) {

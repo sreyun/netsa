@@ -83,3 +83,16 @@ func TestArchiveRetention(t *testing.T) {
 		}
 	}
 }
+
+func TestReportTime(t *testing.T) {
+	for v, ok := range map[string]bool{"09:00": true, "23:59": true, "off": true, "": true, "9am": false, "25:00": false} {
+		c := Default()
+		c.Alert.ReportTime = v
+		if err := c.Validate(); (err == nil) != ok {
+			t.Errorf("report_time %q: %v", v, err)
+		}
+	}
+	if Default().Alert.ReportTime != "09:00" {
+		t.Fatal("默认 09:00 推送日报")
+	}
+}

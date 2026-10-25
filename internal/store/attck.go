@@ -1,6 +1,7 @@
 package store
 
 import (
+	"math/bits"
 	"sort"
 
 	"netsa/internal/model"
@@ -8,6 +9,12 @@ import (
 
 // CatC2 是内网主机（或本机）外连威胁情报地址的攻击类型，属于失陷迹象。
 const CatC2 = "恶意外连"
+
+// CatBeacon 是内网主机按固定间隔回连同一外部地址（疑似 C2 心跳），CatCrawl 是接口遍历 / 批量爬取。
+const (
+	CatBeacon = "可疑外连"
+	CatCrawl  = "数据爬取/越权遍历"
+)
 
 // CatMalware 是安全设备（IDS / IPS / 防火墙威胁日志）报出的恶意软件与远控通信。
 const CatMalware = "恶意软件/远控"
@@ -30,7 +37,7 @@ type Technique struct {
 var tactics = []Tactic{
 	{"TA0043", "侦察", "Reconnaissance"}, {"TA0001", "初始访问", "Initial Access"}, {"TA0002", "执行", "Execution"},
 	{"TA0003", "持久化", "Persistence"}, {"TA0005", "防御规避", "Defense Evasion"}, {"TA0006", "凭证访问", "Credential Access"},
-	{"TA0007", "发现", "Discovery"}, {"TA0011", "命令与控制", "Command and Control"}, {"TA0040", "影响", "Impact"},
+	{"TA0007", "发现", "Discovery"}, {"TA0009", "收集", "Collection"}, {"TA0011", "命令与控制", "Command and Control"}, {"TA0040", "影响", "Impact"},
 }
 
 var techniques = map[string]Technique{
@@ -48,6 +55,7 @@ var techniques = map[string]Technique{
 	"T1083":     {"T1083", "文件和目录发现", "TA0007"},
 	"T1046":     {"T1046", "网络服务发现", "TA0007"},
 	"T1018":     {"T1018", "远程系统发现", "TA0007"},
+	"T1119":     {"T1119", "自动化收集（接口遍历 / 爬取）", "TA0009"},
 	"T1071":     {"T1071", "应用层协议通信（外连 C2）", "TA0011"},
 	"T1498":     {"T1498", "网络拒绝服务", "TA0040"},
 	"T1499":     {"T1499", "终端拒绝服务（CC）", "TA0040"},
@@ -82,6 +90,8 @@ var categoryTechniques = map[string][]string{
 	"洪水攻击":       {"T1498"},
 	CatC2:        {"T1071"},
 	CatMalware:   {"T1071"},
+	CatBeacon:    {"T1071"},
+	CatCrawl:     {"T1119"},
 }
 
 // techniqueCategories 是 categoryTechniques 的反向索引。
@@ -96,6 +106,26 @@ var techniqueCategories = func() map[string][]string {
 		sort.Strings(cats)
 	}
 	return m
+}()
+
+// techIndex 为每个技术分配位下标，catTechMask 为每个攻击类型对应技术的位掩码（技术数不超过 64）。
+var techIndex, catTechMask = func() (map[string]int, map[string]uint64) {
+	ids := make([]string, 0, len(techniques))
+	for id := range techniques {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	idx := map[string]int{}
+	for i, id := range ids {
+		idx[id] = i
+	}
+	masks := map[string]uint64{}
+	for cat, ts := range categoryTechniques {
+		for _, t := range ts {
+			masks[cat] |= 1 << idx[t]
+		}
+	}
+	return idx, masks
 }()
 
 // TechniqueCategories 返回映射到该 ATT&CK 技术的攻击类型（用于按技术下钻）。
@@ -172,34 +202,50 @@ type AttackMatrix struct {
 
 // attackMatrixLocked 汇总 ATT&CK 矩阵（调用方持读锁）。所有可检测的技术都会列出，未观测到的命中数为 0，
 // 便于同时看出攻击者用到了哪些手法、平台对哪些手法具备检测能力。
-func (s *Store) attackMatrixLocked() *AttackMatrix {
-	type agg struct {
-		attackers int
-		maxSev    model.Severity
+// matrixAcc 累计各技术的攻击源数与最高等级。每个攻击源用位掩码记录用到的技术、计数放在数组中，
+// 遍历数万个画像时不做 map 分配，缩短读锁占用；安全评估在收集其他指标的同一次遍历中累计。
+type matrixAcc struct {
+	attackers [64]int
+	maxSev    [64]model.Severity
+	mask      uint64 // 当前画像用到的技术
+}
+
+// category 累计当前画像的一个攻击类型。
+func (a *matrixAcc) category(cat string, sev model.Severity) {
+	m := catTechMask[cat]
+	a.mask |= m
+	for b := m; b != 0; b &= b - 1 {
+		if i := bits.TrailingZeros64(b); sev > a.maxSev[i] {
+			a.maxSev[i] = sev
+		}
 	}
-	per := map[string]*agg{}
+}
+
+// done 结束当前画像。
+func (a *matrixAcc) done() {
+	for b := a.mask; b != 0; b &= b - 1 {
+		a.attackers[bits.TrailingZeros64(b)]++
+	}
+	a.mask = 0
+}
+
+func (s *Store) attackMatrixLocked() *AttackMatrix {
+	var acc matrixAcc
 	for _, p := range s.ips {
 		if p.Attacks == 0 {
 			continue
 		}
-		seen := map[string]bool{}
 		for cat := range p.Categories {
-			for _, t := range categoryTechniques[cat] {
-				a := per[t]
-				if a == nil {
-					a = &agg{}
-					per[t] = a
-				}
-				if !seen[t] {
-					seen[t] = true
-					a.attackers++
-				}
-				if sev := p.CatSev[cat]; sev > a.maxSev {
-					a.maxSev = sev
-				}
-			}
+			acc.category(cat, p.CatSev[cat])
 		}
+		acc.done()
 	}
+	return s.buildMatrixLocked(&acc)
+}
+
+// buildMatrixLocked 由累计结果生成 ATT&CK 矩阵（调用方持读锁）。
+func (s *Store) buildMatrixLocked(acc *matrixAcc) *AttackMatrix {
+	attackers, maxSev := acc.attackers, acc.maxSev
 	m := &AttackMatrix{Total: len(techniques)}
 	for cat, n := range s.categories {
 		if len(categoryTechniques[cat]) == 0 {
@@ -216,8 +262,8 @@ func (s *Store) attackMatrixLocked() *AttackMatrix {
 			for _, cat := range st.Categories {
 				st.Hits += s.categories[cat]
 			}
-			if a := per[id]; a != nil {
-				st.Attackers, st.MaxSeverity = a.attackers, a.maxSev
+			if i, ok := techIndex[id]; ok {
+				st.Attackers, st.MaxSeverity = attackers[i], maxSev[i]
 			}
 			if st.Hits > 0 {
 				m.Observed++

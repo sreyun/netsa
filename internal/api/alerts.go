@@ -19,10 +19,11 @@ type robotForm struct {
 	ClearSecret bool     `json:"clear_secret"`
 	Levels      []string `json:"levels"`
 	Enabled     bool     `json:"enabled"`
+	Report      bool     `json:"report"`
 }
 
 func (f robotForm) robot() alert.Robot {
-	return alert.Robot{Name: f.Name, Type: f.Type, URL: f.URL, Secret: f.Secret, Levels: f.Levels, Enabled: f.Enabled}
+	return alert.Robot{Name: f.Name, Type: f.Type, URL: f.URL, Secret: f.Secret, Levels: f.Levels, Enabled: f.Enabled, Report: f.Report}
 }
 
 func decodeForm(w http.ResponseWriter, r *http.Request, v any) bool {
@@ -51,7 +52,9 @@ func (s *Server) alertError(w http.ResponseWriter, err error) {
 }
 
 func (s *Server) alertInfo(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, s.Notifier.Info())
+	info := s.Notifier.Info()
+	info.ReportTime = s.Cfg.Alert.ReportTime
+	writeJSON(w, info)
 }
 
 func (s *Server) robotCreate(w http.ResponseWriter, r *http.Request) {

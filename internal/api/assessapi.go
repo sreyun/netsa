@@ -13,9 +13,10 @@ import (
 
 // visibility 汇总评估“日志与检测覆盖”所需的部署信息。
 func (s *Server) visibility(r *http.Request) store.Visibility {
+	// r 为空时（后台任务）只按配置判断是否使用 HTTPS
 	v := store.Visibility{ParseRate: 1, Archive: s.Archive != nil, AuthEnabled: s.Auth != nil,
 		Intel:         len(s.Cfg.Intel.Blocklists),
-		HTTPS:         s.Cfg.Server.TLSCert != "" || r.TLS != nil || strings.EqualFold(r.Header.Get("X-Forwarded-Proto"), "https"),
+		HTTPS:         s.Cfg.Server.TLSCert != "" || r != nil && (r.TLS != nil || strings.EqualFold(r.Header.Get("X-Forwarded-Proto"), "https")),
 		AllowNetworks: len(s.Cfg.Server.AllowNetworks) > 0,
 	}
 	if s.Cfg.Intel.TorExitURL != "" {

@@ -102,6 +102,9 @@ func (g *gzipWriter) WriteHeader(code int) {
 	g.ResponseWriter.WriteHeader(code)
 }
 
+// Unwrap 返回底层的 ResponseWriter，供 http.ResponseController 调整连接期限、刷新缓冲。
+func (g *gzipWriter) Unwrap() http.ResponseWriter { return g.ResponseWriter }
+
 func (g *gzipWriter) Write(b []byte) (int, error) {
 	if !g.wroteHeader {
 		g.WriteHeader(http.StatusOK)

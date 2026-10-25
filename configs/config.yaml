@@ -140,6 +140,12 @@ detect:
     host_sweep: 20
     brute_conns: 30
     flood_events: 5000
+    dist_window: 10m             # 分布式暴力破解（撞库）：窗口内同一登录接口
+    dist_brute_logins: 100       #   失败登录（401/403/429）达到该次数
+    dist_brute_ips: 20           #   且来自该数量以上的不同来源
+    enum_window: 10m             # 接口遍历 / 批量爬取：窗口内同一来源对同一接口
+    enum_ids: 300                #   请求的不同 ID 数达到该值
+    beacon_conns: 8              # 周期性外连（疑似 C2 心跳）：内网主机按固定间隔连接同一外部地址的次数
 
 # 告警推送（威胁等级提升至高危及以上、疑似攻击成功时推送）
 # 告警推送：钉钉 / 企业微信 / 飞书群机器人，推荐直接在大屏“告警推送”页面添加（可测试、可分别选择推送等级）。
@@ -147,6 +153,7 @@ detect:
 alert:
   base_url: ""          # 大屏访问地址（如 https://soc.example.com），设置后告警消息附带“查看溯源详情”链接
   dedup_window: 10m     # 同一 IP、同一规则、同一研判结果在该时间内只推送一次
+  report_time: "09:00"  # 每日安全日报推送时间（按 timezone），推送给勾选了“接收每日安全日报”的机器人；off 关闭
   robots_file: ""       # 界面中添加的机器人保存位置，默认与 storage.snapshot 同目录的 alert-robots.json
   webhooks: []
   #  - name: 钉钉安全群

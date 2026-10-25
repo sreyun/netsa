@@ -297,3 +297,52 @@ func TestMessageTimeZone(t *testing.T) {
 		t.Fatalf("时间未按 Asia/Shanghai 展示:\n%s", md)
 	}
 }
+
+// 安全日报：只发送给勾选了“接收日报”的启用机器人；标题包含“告警”关键词；内容中的日志文本经过安全处理；
+// 指定机器人时（界面“发送日报”）不受勾选限制。
+func TestDailyReport(t *testing.T) {
+	var mu sync.Mutex
+	var got []map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var m map[string]any
+		json.NewDecoder(r.Body).Decode(&m)
+		mu.Lock()
+		got = append(got, m)
+		mu.Unlock()
+	}))
+	defer srv.Close()
+	n, err := New(config.AlertConfig{BaseURL: "https://soc.example.com", Webhooks: []config.WebhookConfig{
+		{Name: "daily", Type: "generic", URL: srv.URL, Report: true},
+		{Name: "no-report", Type: "generic", URL: srv.URL},
+		{Name: "disabled", Type: "generic", URL: srv.URL, Report: true, Disabled: true},
+	}}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ev := Event{Severity: model.SevHigh, Title: "2026-10-25（安全评分 52 · D 较差）", Time: time.Now(),
+		Lines: []string{"安全评分 52 分", "主要攻击源：198.51.100.7（[点我](http://evil.example)）"}}
+	sent, err := n.SendReport(context.Background(), "", ev)
+	if err != nil || sent != 1 || len(got) != 1 {
+		t.Fatalf("应只发送给 1 个机器人: sent=%d err=%v got=%d", sent, err, len(got))
+	}
+	if !strings.Contains(got[0]["title"].(string), "告警") || !strings.HasSuffix(got[0]["url"].(string), "/#tab=assess") {
+		t.Fatalf("日报标题与链接: %v", got[0])
+	}
+	// 钉钉 Markdown：日志文本中的链接被拆开，不会渲染为可点击链接
+	b := &Batch{Events: []Event{{Kind: "report", Severity: model.SevHigh, Title: ev.Title, Lines: ev.Lines}}, BaseURL: "https://soc.example.com"}
+	md := b.markdown(TypeDingTalk)
+	if !strings.Contains(md, "安全告警日报") || strings.Contains(md, "](http://evil") || !strings.Contains(md, "[查看安全评估](https://soc.example.com/#tab=assess)") {
+		t.Fatalf("日报 Markdown: %s", md)
+	}
+	card := b.feishuCard()
+	if card["header"].(map[string]any)["template"] != "orange" {
+		t.Fatalf("飞书卡片颜色: %v", card["header"])
+	}
+	// 指定机器人发送（不受“接收日报”限制）
+	if sent, err := n.SendReport(context.Background(), "config-2", ev); err != nil || sent != 1 {
+		t.Fatalf("指定机器人发送: %d %v", sent, err)
+	}
+	if _, err := n.SendReport(context.Background(), "nope", ev); err != ErrNotFound {
+		t.Fatalf("不存在的机器人: %v", err)
+	}
+}
