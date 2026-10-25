@@ -101,7 +101,7 @@ func New(cfg config.AlertConfig, path string) (*Notifier, error) {
 	}
 	for i, h := range cfg.Webhooks {
 		r := Robot{ID: fmt.Sprintf("config-%d", i+1), Name: h.Name, Type: h.Type, URL: h.URL, Secret: h.Secret,
-			Levels: h.Levels, Enabled: !h.Disabled, Source: "config"}
+			Levels: h.Levels, Enabled: !h.Disabled, Report: h.Report, Source: "config"}
 		if len(r.Levels) == 0 {
 			r.Levels = levelsFrom(h.MinSeverity)
 		}
@@ -377,6 +377,7 @@ type RobotView struct {
 	HasSecret bool      `json:"has_secret"`
 	Levels    []string  `json:"levels"`
 	Enabled   bool      `json:"enabled"`
+	Report    bool      `json:"report"`
 	Source    string    `json:"source"`
 	Created   time.Time `json:"created"`
 	Stats     Stats     `json:"stats"`
@@ -389,6 +390,7 @@ type Info struct {
 	File        string      `json:"file,omitempty"`
 	BaseURL     string      `json:"base_url"`
 	DedupWindow string      `json:"dedup_window"`
+	ReportTime  string      `json:"report_time"` // 每日安全日报的推送时间（由 API 层填写）
 	History     []Record    `json:"history"`
 }
 
@@ -406,7 +408,7 @@ func (n *Notifier) Info() Info {
 		st.Queued = len(w.q)
 		info.Robots = append(info.Robots, RobotView{
 			ID: r.ID, Name: r.Name, Type: r.Type, TypeLabel: TypeLabel(r.Type), URL: r.MaskedURL(), HasSecret: r.Secret != "",
-			Levels: append([]string(nil), r.Levels...), Enabled: r.Enabled, Source: r.Source, Created: r.Created, Stats: st,
+			Levels: append([]string(nil), r.Levels...), Enabled: r.Enabled, Report: r.Report, Source: r.Source, Created: r.Created, Stats: st,
 		})
 	}
 	for i := len(n.history) - 1; i >= 0; i-- {
@@ -540,6 +542,37 @@ func (n *Notifier) Test(ctx context.Context, id string, r Robot) error {
 	err := post(c, n.client, &r, b)
 	n.record(r.Name, "测试消息", 0, err)
 	return err
+}
+
+// SendReport 立即发送安全日报（不经过告警队列，不与告警合并）。id 不为空时只发送给该机器人（界面中的“发送日报”），
+// 否则发送给所有启用且勾选了“接收日报”的机器人。返回成功发送的机器人数与第一个错误。
+func (n *Notifier) SendReport(ctx context.Context, id string, ev Event) (int, error) {
+	ev.Kind = "report"
+	n.mu.Lock()
+	var targets []*worker
+	for _, wid := range n.order {
+		w := n.workers[wid]
+		r := w.snapshot()
+		if id != "" && wid == id || id == "" && r.Enabled && r.Report {
+			targets = append(targets, w)
+		}
+	}
+	n.mu.Unlock()
+	if id != "" && len(targets) == 0 {
+		return 0, ErrNotFound
+	}
+	sent := 0
+	var first error
+	for _, w := range targets {
+		if err := n.deliver(ctx, w, &Batch{Events: []Event{ev}, BaseURL: n.baseURL}); err != nil {
+			if first == nil {
+				first = err
+			}
+			continue
+		}
+		sent++
+	}
+	return sent, first
 }
 
 func (n *Notifier) view(id string) RobotView {

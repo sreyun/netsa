@@ -2,7 +2,9 @@ package detect
 
 import (
 	"fmt"
+	"math"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -51,6 +53,40 @@ type fwWin struct {
 	fired  int
 }
 
+// loginWin 是一个登录接口的全局窗口，用于发现分布式暴力破解（撞库）：每个来源只尝试少量几次，
+// 按来源统计达不到阈值，但同一接口在短时间内收到大量来自不同来源的失败登录。
+type loginWin struct {
+	start   time.Time
+	fails   int
+	ips     map[string]struct{} // 失败登录的来源（有上限）
+	alerted map[string]struct{} // 已告警的来源（每个来源只告警一次）
+}
+
+// enumWin 是一个来源的接口遍历窗口：同一接口按 ID 依次请求大量不同对象（越权遍历、批量爬取数据）。
+// 接口以哈希为键、ID 以整数保存，统计时不分配字符串；同一接口请求达到 enumLazy 次后才开始记录 ID 集合，
+// 正常访客浏览几个带 ID 的页面只占用一个计数。
+type enumWin struct {
+	start time.Time
+	keys  map[uint64]*enumState
+}
+
+type enumState struct {
+	n     int
+	ids   map[uint64]struct{}
+	fired bool
+}
+
+const enumLazy = 20
+
+// beacon 记录内网主机到同一外部地址与端口的连接时间，用于发现按固定间隔回连的 C2 心跳。
+type beacon struct {
+	times [12]int64 // 最近的连接时间（Unix 秒，环形）
+	n     int
+	last  int64
+	fired bool
+	seen  time.Time
+}
+
 // Behavior 基于时间窗口识别 CC、目录扫描、暴力破解、端口扫描等行为。
 // 窗口以日志自身时间为准，因此同样适用于历史日志的离线分析。
 type Behavior struct {
@@ -58,22 +94,28 @@ type Behavior struct {
 	th        config.Thresholds
 	web       map[string]*webWin
 	fw        map[string]*fwWin
-	latest    time.Time // 已处理事件的最新时间（排除未来时间的异常日志），作为窗口过期的基准
-	lastPrune time.Time // 上次清理的系统时间
+	logins    map[string]*loginWin // 登录接口 → 全局窗口
+	enum      map[string]*enumWin  // 来源 → 接口遍历窗口
+	beacons   map[string]*beacon   // 内网主机>外部地址:端口 → 连接时间
+	latest    time.Time            // 已处理事件的最新时间（排除未来时间的异常日志），作为窗口过期的基准
+	lastPrune time.Time            // 上次清理的系统时间
 }
 
 // maxWindows 是同时跟踪的行为窗口上限：大量不同来源（如伪造源地址的扫描）时不再为新来源建窗口，防止内存耗尽。
 const maxWindows = 300000
 
 func NewBehavior(th config.Thresholds) *Behavior {
-	return &Behavior{th: th, web: map[string]*webWin{}, fw: map[string]*fwWin{}}
+	return &Behavior{th: th, web: map[string]*webWin{}, fw: map[string]*fwWin{}, logins: map[string]*loginWin{},
+		enum: map[string]*enumWin{}, beacons: map[string]*beacon{}}
 }
 
 // Observe 处理一个事件并返回触发的行为告警。
 func (b *Behavior) Observe(ev *model.Event) []model.Hit {
 	// 出站流量（内网主机访问公网）不做扫描 / 洪泛 / 暴力破解判定：正常上网会连接大量不同的公网地址与端口，
-	// 按入站攻击的阈值判断会产生大量误报。内网主机之间的横向扫描（目的为内网地址）仍会检测。
-	if ev.Outbound || IsEgress(ev) {
+	// 按入站攻击的阈值判断会产生大量误报；只检测按固定间隔回连同一地址的 C2 心跳。
+	// 内网主机之间的横向扫描（目的为内网地址）仍按入站规则检测。
+	egress := ev.Outbound || IsEgress(ev)
+	if egress && ev.Kind != model.KindFirewall {
 		return nil
 	}
 	b.mu.Lock()
@@ -83,9 +125,12 @@ func (b *Behavior) Observe(ev *model.Event) []model.Hit {
 		b.latest = ev.Time
 	}
 	// 按系统时间定期清理：若按日志时间调度，一条未来时间的异常日志会使清理长期不再执行
-	if now.Sub(b.lastPrune) > 30*time.Second || len(b.web)+len(b.fw) >= maxWindows {
+	if now.Sub(b.lastPrune) > 30*time.Second || len(b.web)+len(b.fw) >= maxWindows || len(b.beacons) >= 200000 {
 		b.prune(b.latest)
 		b.lastPrune = now
+	}
+	if egress {
+		return b.observeBeacon(ev)
 	}
 	if ev.Kind == model.KindWeb {
 		return b.observeWeb(ev)
@@ -168,7 +213,248 @@ func (b *Behavior) observeWeb(ev *model.Event) []model.Hit {
 		return model.Hit{RuleID: "bhv-5xx", Name: "异常请求引发大量服务端错误", Category: CatProtocol,
 			Severity: model.SevMedium, Phase: model.PhaseExploit, Evidence: fmt.Sprintf("%s内 5xx 响应 %d 次", win, w.n5xx)}
 	})
+	if isLogin {
+		if h, ok := b.distBrute(ev, path); ok {
+			hits = append(hits, h)
+		}
+	}
+	if ev.Status >= 200 && ev.Status < 300 && (ev.Method == "GET" || ev.Method == "POST") {
+		if h, ok := b.enumerate(ev); ok {
+			hits = append(hits, h)
+		}
+	}
 	return hits
+}
+
+// distBrute 检测分布式暴力破解（撞库）：同一登录接口在窗口内收到大量来自不同来源的失败登录（401 / 403 / 429）。
+// 达到阈值后，继续参与的每个来源各告警一次。
+func (b *Behavior) distBrute(ev *model.Event, path string) (model.Hit, bool) {
+	key := ev.Host + " " + path
+	lw := b.logins[key]
+	if lw == nil || outside(ev.Time, lw.start, b.th.DistWindow) {
+		if lw == nil && len(b.logins) >= 5000 {
+			return model.Hit{}, false
+		}
+		lw = &loginWin{start: ev.Time, ips: map[string]struct{}{}, alerted: map[string]struct{}{}}
+		b.logins[key] = lw
+	}
+	if ev.Status != 401 && ev.Status != 403 && ev.Status != 429 {
+		return model.Hit{}, false
+	}
+	lw.fails++
+	if len(lw.ips) < 20000 {
+		lw.ips[ev.SrcIP] = struct{}{}
+	}
+	if lw.fails < b.th.DistBruteLogins || len(lw.ips) < b.th.DistBruteIPs {
+		return model.Hit{}, false
+	}
+	if _, done := lw.alerted[ev.SrcIP]; done || len(lw.alerted) >= 20000 {
+		return model.Hit{}, false
+	}
+	lw.alerted[ev.SrcIP] = struct{}{}
+	return model.Hit{RuleID: "bhv-distbrute", Name: "分布式暴力破解/撞库", Category: CatBruteForce, Severity: model.SevHigh,
+		Phase: model.PhaseCredential, Result: model.ResultFailed,
+		Evidence: fmt.Sprintf("%s内 %d 个来源对 %s 失败登录 %d 次（单个来源次数少，疑似僵尸网络撞库）", fmtDur(b.th.DistWindow), len(lw.ips), Printable(path, 80), lw.fails)}, true
+}
+
+// 搜索引擎爬虫按 ID 抓取页面属于正常行为，不作为接口遍历告警（可伪造的 UA 仍会被其他规则检测）
+var reSearchBot = regexp.MustCompile(`(?i)googlebot|bingbot|baiduspider|yandexbot|sogou|360spider|bytespider|yisouspider|applebot|duckduckbot`)
+
+// 涉及个人信息、订单、账户的接口被遍历时风险更高
+var reSensitiveAPI = regexp.MustCompile(`(?i)user|member|account|customer|order|invoice|profile|address|phone|mobile|card|admin|employee|patient|student|contract`)
+
+// enumParts 找出接口遍历统计用的对象 ID：路径中第一个纯数字段，或名称像 ID 的纯数字查询参数。
+// 返回 ID 前后的文本（接口键为 prefix + "{id}" + suffix），不分配内存。
+func enumParts(uri string) (prefix, suffix, id string, ok bool) {
+	path, query := uri, ""
+	if i := strings.IndexByte(uri, '?'); i >= 0 {
+		path, query = uri[:i], uri[i+1:]
+	}
+	for start := 0; start < len(path); {
+		end := strings.IndexByte(path[start:], '/')
+		if end < 0 {
+			end = len(path)
+		} else {
+			end += start
+		}
+		if seg := path[start:end]; seg != "" && len(seg) <= 18 && allDigits(seg) {
+			return path[:start], path[end:], seg, true
+		}
+		start = end + 1
+	}
+	for query != "" {
+		kv := query
+		if i := strings.IndexByte(query, '&'); i >= 0 {
+			kv, query = query[:i], query[i+1:]
+		} else {
+			query = ""
+		}
+		if eq := strings.IndexByte(kv, '='); eq > 0 {
+			if k, v := kv[:eq], kv[eq+1:]; v != "" && len(v) <= 18 && allDigits(v) && isIDParam(k) {
+				return path + "?" + k + "=", "", v, true // 仅在命中时拼接（查询参数形式较少见）
+			}
+		}
+	}
+	return "", "", "", false
+}
+
+// enumKey 返回接口键与对象 ID（用于测试与告警证据）。
+func enumKey(uri string) (key, id string) {
+	p, s, id, ok := enumParts(uri)
+	if !ok {
+		return "", ""
+	}
+	if strings.HasSuffix(p, "=") {
+		return p + "{id}", id
+	}
+	return p + "{id}" + s, id
+}
+
+// isIDParam 判断查询参数名是否表示对象 ID（id、uid、user_id、orderNo、item_code 等）；搜索词、页码等数字参数不计入。
+func isIDParam(k string) bool {
+	if len(k) == 0 || len(k) > 32 {
+		return false
+	}
+	for i := 0; i < len(k); i++ {
+		if c := k[i] | 0x20; (c < 'a' || c > 'z') && k[i] != '_' {
+			return false
+		}
+	}
+	for _, suf := range [...]string{"id", "no", "num", "number", "code"} {
+		if len(k) >= len(suf) && strings.EqualFold(k[len(k)-len(suf):], suf) {
+			return true
+		}
+	}
+	return false
+}
+
+// fnvStr 计算字符串的 FNV-1a 哈希（不分配内存），可分段累计。
+func fnvStr(h uint64, s string) uint64 {
+	for i := 0; i < len(s); i++ {
+		h ^= uint64(s[i])
+		h *= 1099511628211
+	}
+	return h
+}
+
+const fnvOffset = 14695981039346656037
+
+func allDigits(s string) bool {
+	for i := 0; i < len(s); i++ {
+		if s[i] < '0' || s[i] > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+// enumerate 检测接口遍历 / 批量爬取：同一来源在窗口内对同一接口请求了大量不同的对象 ID 且返回成功。
+func (b *Behavior) enumerate(ev *model.Event) (model.Hit, bool) {
+	prefix, suffix, id, ok := enumParts(ev.URI)
+	if !ok {
+		return model.Hit{}, false
+	}
+	ew := b.enum[ev.SrcIP]
+	if ew == nil || outside(ev.Time, ew.start, b.th.EnumWindow) {
+		if ew == nil && len(b.enum) >= maxWindows/4 {
+			return model.Hit{}, false
+		}
+		ew = &enumWin{start: ev.Time, keys: map[uint64]*enumState{}}
+		b.enum[ev.SrcIP] = ew
+	}
+	k := fnvStr(fnvStr(fnvStr(fnvOffset, prefix), "{id}"), suffix)
+	st := ew.keys[k]
+	if st == nil {
+		if len(ew.keys) >= 32 {
+			return model.Hit{}, false
+		}
+		st = &enumState{}
+		ew.keys[k] = st
+	}
+	st.n++
+	if st.fired || st.n < enumLazy {
+		return model.Hit{}, false
+	}
+	if st.ids == nil {
+		st.ids = map[uint64]struct{}{}
+	}
+	if len(st.ids) < b.th.EnumIDs {
+		n, _ := strconv.ParseUint(id, 10, 64)
+		st.ids[n] = struct{}{}
+	}
+	// 前 enumLazy 次请求未记录 ID，阈值相应扣除
+	if len(st.ids)+enumLazy-1 < b.th.EnumIDs {
+		return model.Hit{}, false
+	}
+	st.fired = true
+	if reSearchBot.MatchString(ev.UA) { // 搜索引擎爬虫只在即将告警时判断，避免每个请求都执行正则
+		return model.Hit{}, false
+	}
+	key, _ := enumKey(ev.URI)
+	set := st.ids
+	sev := model.SevMedium
+	if reSensitiveAPI.MatchString(key) {
+		sev = model.SevHigh
+	}
+	return model.Hit{RuleID: "bhv-enum", Name: "接口遍历/批量爬取", Category: CatCrawl, Severity: sev, Phase: model.PhaseCollection,
+		Result:   model.ResultPassed,
+		Evidence: fmt.Sprintf("%s内对 %s 请求了 %d 个以上不同 ID 并成功返回（疑似越权遍历或批量爬取数据）", fmtDur(b.th.EnumWindow), Printable(key, 100), len(set)+enumLazy-1)}, true
+}
+
+// approxDur 把秒数格式化为“约 N 秒 / N.N 分钟”。
+func approxDur(sec float64) string {
+	if sec >= 120 {
+		return fmt.Sprintf("%.1f 分钟", sec/60)
+	}
+	return fmt.Sprintf("%.0f 秒", sec)
+}
+
+// observeBeacon 检测内网主机按固定间隔连接同一外部地址（C2 心跳）：最近的连接间隔稳定（波动不超过 12%），
+// 平均间隔在 1 分钟到 1 小时之间。DNS、NTP 等天然周期性的服务不检测。
+func (b *Behavior) observeBeacon(ev *model.Event) []model.Hit {
+	if ev.DstIP == "" || ev.DstPort == 53 || ev.DstPort == 123 || ev.DstPort == 853 {
+		return nil
+	}
+	key := ev.SrcIP + ">" + ev.DstIP + ":" + strconv.Itoa(ev.DstPort)
+	bc := b.beacons[key]
+	if bc == nil {
+		if len(b.beacons) >= 200000 {
+			return nil
+		}
+		bc = &beacon{}
+		b.beacons[key] = bc
+	}
+	t := ev.Time.Unix()
+	if bc.n > 0 && t-bc.last < 5 { // 同一会话的多条连接日志、或乱序日志
+		return nil
+	}
+	bc.times[bc.n%len(bc.times)] = t
+	bc.n++
+	bc.last, bc.seen = t, ev.Time
+	if bc.fired || bc.n < b.th.BeaconConns {
+		return nil
+	}
+	k := min(bc.n, len(bc.times))
+	ts := make([]int64, 0, k)
+	for i := bc.n - k; i < bc.n; i++ {
+		ts = append(ts, bc.times[i%len(bc.times)])
+	}
+	var sum, sq float64
+	for i := 1; i < len(ts); i++ {
+		d := float64(ts[i] - ts[i-1])
+		sum += d
+		sq += d * d
+	}
+	cnt := float64(len(ts) - 1)
+	mean := sum / cnt
+	std := math.Sqrt(math.Max(0, sq/cnt-mean*mean))
+	if mean < 60 || mean > 3600 || std/mean > 0.12 {
+		return nil
+	}
+	bc.fired = true
+	return []model.Hit{{RuleID: "bhv-beacon", Name: "周期性外连（疑似C2心跳）", Category: CatBeacon, Severity: model.SevMedium,
+		Phase: model.PhasePersistence, Result: fwResult(ev),
+		Evidence: fmt.Sprintf("%s 每隔约 %s 连接 %s:%d（连续 %d 次，间隔波动 %.0f%%）", ev.SrcIP, approxDur(mean), ev.DstIP, ev.DstPort, bc.n, 100*std/mean)}}
 }
 
 // looksLikeLoginSuccess 判断本次登录响应是否与此前的失败响应明显不同：
@@ -282,6 +568,21 @@ func (b *Behavior) Size() int {
 }
 
 func (b *Behavior) prune(now time.Time) {
+	for k, w := range b.logins {
+		if now.Sub(w.start) > 2*b.th.DistWindow || w.start.Sub(now) > 2*b.th.DistWindow {
+			delete(b.logins, k)
+		}
+	}
+	for k, w := range b.enum {
+		if now.Sub(w.start) > 2*b.th.EnumWindow || w.start.Sub(now) > 2*b.th.EnumWindow {
+			delete(b.enum, k)
+		}
+	}
+	for k, bc := range b.beacons {
+		if d := now.Sub(bc.seen); d > 3*time.Hour || d < -3*time.Hour {
+			delete(b.beacons, k)
+		}
+	}
 	for ip, w := range b.web {
 		if now.Sub(w.start) > 2*b.th.WebWindow || w.start.Sub(now) > 2*b.th.WebWindow {
 			delete(b.web, ip)

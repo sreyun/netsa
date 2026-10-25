@@ -108,6 +108,7 @@ detect:
 alert:
   base_url: ""          # 大屏访问地址（如 https://soc.example.com），设置后告警消息附带“查看溯源详情”链接
   dedup_window: 10m     # 同一 IP、同一规则、同一研判结果在该时间内只推送一次
+  report_time: "09:00"  # 每日安全日报推送时间（按 timezone），推送给勾选了“接收每日安全日报”的机器人；off 关闭
   robots_file: ""       # 界面中添加的机器人保存位置，默认与 storage.snapshot 同目录的 alert-robots.json
   webhooks: []
   #  - name: 钉钉安全群

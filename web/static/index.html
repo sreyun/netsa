@@ -189,6 +189,7 @@
       <div class="panel"><h3>评估维度</h3><div class="chart" id="cRadar" style="min-height:250px"></div></div>
       <div class="panel"><h3>待处置事项</h3><div id="asCounts" class="as-counts"></div></div>
     </div>
+    <div class="panel"><h3>评分趋势 <small id="asHistInfo"></small></h3><div class="chart" id="cScoreTrend" style="min-height:180px"></div></div>
     <div class="panel"><h3>处置建议 <small id="asActCount"></small></h3><div id="asActions" class="as-actions"></div></div>
     <div class="panel" id="asCompPanel"><h3>失陷研判 <small id="asCompCount"></small></h3><div class="table-wrap"><table class="table" id="asComp"></table></div></div>
     <div class="panel"><h3>各维度评估</h3><div id="asDims" class="as-dims"></div></div>
@@ -303,6 +304,7 @@
           <label><input type="checkbox" value="medium"> <span class="badge lv-medium bg-medium">中危</span></label>
         </span></div>
       <label class="inline"><input type="checkbox" id="ntEnabled"> 启用推送</label>
+      <label class="inline"><input type="checkbox" id="ntReport"> 接收每日安全日报 <span class="muted" id="ntReportTime"></span></label>
       <div class="nt-help" id="ntHelp"></div>
       <div class="form-msg" id="ntMsg" role="status"></div>
     </div>

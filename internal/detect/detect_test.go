@@ -2,6 +2,7 @@ package detect
 
 import (
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -275,6 +276,102 @@ func TestBlindAttackNotSuccess(t *testing.T) {
 			if !h.TagOnly && h.Result == model.ResultSuccess {
 				t.Errorf("%s 命中 %s 不应研判为疑似成功", uri, h.RuleID)
 			}
+		}
+	}
+}
+
+// 分布式暴力破解（撞库）：每个来源只失败几次，按来源统计不触发，但同一登录接口的失败总数与来源数达到阈值后告警。
+func TestDistributedBrute(t *testing.T) {
+	th := config.Default().Detect.Thresholds
+	b := NewBehavior(th)
+	now := time.Now()
+	var hits []model.Hit
+	for i := 0; i < 40; i++ {
+		for j := 0; j < 4; j++ {
+			ev := &model.Event{Kind: model.KindWeb, SrcIP: fmt.Sprintf("198.51.100.%d", i+1), Method: "POST", URI: "/login", Status: 401,
+				Time: now.Add(time.Duration(i*4+j) * time.Second)}
+			hits = append(hits, b.Observe(ev)...)
+		}
+	}
+	var dist int
+	for _, h := range hits {
+		if h.RuleID == "bhv-webbrute" {
+			t.Fatal("单个来源只失败 4 次，不应触发单源暴力破解")
+		}
+		if h.RuleID == "bhv-distbrute" {
+			dist++
+		}
+	}
+	// 失败 100 次后（第 25 个来源）开始告警，之后参与的来源各告警一次
+	if dist < 10 || dist > 20 {
+		t.Fatalf("分布式暴力破解告警 %d 次", dist)
+	}
+	// 正常登录（200）不计入失败
+	b2 := NewBehavior(th)
+	for i := 0; i < 300; i++ {
+		if hs := b2.Observe(&model.Event{Kind: model.KindWeb, SrcIP: fmt.Sprintf("203.0.113.%d", i%200+1), Method: "POST", URI: "/login", Status: 302, Time: now}); len(hs) > 0 {
+			t.Fatalf("正常登录不应告警: %+v", hs)
+		}
+	}
+}
+
+// 接口遍历 / 批量爬取：同一来源按 ID 请求大量不同对象并成功返回；搜索引擎爬虫与失败的请求不计入。
+func TestEnumeration(t *testing.T) {
+	th := config.Default().Detect.Thresholds
+	b := NewBehavior(th)
+	now := time.Now()
+	var hits []model.Hit
+	for i := 0; i < th.EnumIDs+20; i++ {
+		hits = append(hits, b.Observe(&model.Event{Kind: model.KindWeb, SrcIP: "198.51.100.7", Method: "GET",
+			URI: fmt.Sprintf("/api/v1/user/%d/profile", 10000+i), Status: 200, Time: now.Add(time.Duration(i) * time.Second)})...)
+		hits = append(hits, b.Observe(&model.Event{Kind: model.KindWeb, SrcIP: "66.249.66.1", Method: "GET", UA: "Mozilla/5.0 (compatible; Googlebot/2.1)",
+			URI: fmt.Sprintf("/products/%d", i), Status: 200, Time: now.Add(time.Duration(i) * time.Second)})...)
+		hits = append(hits, b.Observe(&model.Event{Kind: model.KindWeb, SrcIP: "198.51.100.8", Method: "GET",
+			URI: fmt.Sprintf("/order?id=%d", i), Status: 404, Time: now.Add(time.Duration(i) * time.Second)})...)
+	}
+	var enum []model.Hit
+	for _, h := range hits {
+		if h.RuleID == "bhv-enum" {
+			enum = append(enum, h)
+		}
+	}
+	if len(enum) != 1 || enum[0].Severity != model.SevHigh || enum[0].Phase != model.PhaseCollection || !strings.Contains(enum[0].Evidence, "/api/v1/user/{id}/profile") {
+		t.Fatalf("接口遍历: %+v", enum)
+	}
+	if k, id := enumKey("/order/detail?no=20261025001&x=a"); k != "/order/detail?no={id}" || id != "20261025001" {
+		t.Fatalf("查询参数中的 ID: %s %s", k, id)
+	}
+}
+
+// 周期性外连：内网主机按约 7 分钟的固定间隔连接同一外部地址时告警；间隔随机或连接 DNS 不告警。
+func TestBeacon(t *testing.T) {
+	th := config.Default().Detect.Thresholds
+	b := NewBehavior(th)
+	base := time.Now().Add(-2 * time.Hour)
+	var hits []model.Hit
+	for i := 0; i < th.BeaconConns+2; i++ {
+		jitter := time.Duration((i*37)%30) * time.Second
+		at := base.Add(time.Duration(i)*7*time.Minute + jitter)
+		hits = append(hits, b.Observe(&model.Event{Kind: model.KindFirewall, SrcIP: "10.0.0.31", DstIP: "198.51.100.66", DstPort: 443, Action: model.ActionAllow, Time: at})...)
+		// 同一会话中的多条连接日志不影响间隔判断
+		hits = append(hits, b.Observe(&model.Event{Kind: model.KindFirewall, SrcIP: "10.0.0.31", DstIP: "198.51.100.66", DstPort: 443, Action: model.ActionAllow, Time: at.Add(time.Second)})...)
+		// 随机间隔的正常访问
+		hits = append(hits, b.Observe(&model.Event{Kind: model.KindFirewall, SrcIP: "10.0.0.45", DstIP: "93.184.216.34", DstPort: 443, Action: model.ActionAllow,
+			Time: base.Add(time.Duration(i*i*97) * time.Second)})...)
+		hits = append(hits, b.Observe(&model.Event{Kind: model.KindFirewall, SrcIP: "10.0.0.45", DstIP: "8.8.8.8", DstPort: 53, Action: model.ActionAllow, Time: at})...)
+	}
+	if len(hits) != 1 || hits[0].Category != CatBeacon || hits[0].Severity != model.SevMedium || !strings.Contains(hits[0].Evidence, "10.0.0.31") {
+		t.Fatalf("周期性外连: %+v", hits)
+	}
+}
+
+func TestEnumKeyParams(t *testing.T) {
+	for uri, want := range map[string]string{
+		"/order?id=1001": "/order?id={id}", "/u?user_id=7": "/u?user_id={id}", "/o?orderNo=2026": "/o?orderNo={id}", "/a?uid=5&x=1": "/a?uid={id}",
+		"/search?q=12345": "", "/list?page=2": "", "/list?size=20&page=3": "", "/static/app.js": "",
+	} {
+		if k, _ := enumKey(uri); k != want {
+			t.Errorf("%s: %q，期望 %q", uri, k, want)
 		}
 	}
 }

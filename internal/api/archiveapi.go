@@ -145,6 +145,7 @@ func (s *Server) archiveExport(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		loc = time.Local
 	}
+	extendDeadline(w, 6*time.Minute) // 导出最长 5 分钟，超过服务默认的读写超时
 	started := false
 	var cw *csv.Writer
 	n, err := s.Archive.Export(r.Context(), q, func(row archive.Row) error {

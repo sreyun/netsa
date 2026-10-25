@@ -31,6 +31,7 @@ type snapshotHead struct {
 	MinTime    time.Time         `json:"min_time"`
 	MaxTime    time.Time         `json:"max_time"`
 	Surface    *surface          `json:"surface"`
+	Scores     []ScorePoint      `json:"score_history,omitempty"`
 }
 
 type snapshot struct {
@@ -80,7 +81,7 @@ func (s *Store) writeSnapshot(f io.Writer, compress bool) error {
 	head := snapshotHead{
 		Version: 1, SavedAt: time.Now(), NextID: s.nextID, Buckets: s.buckets, Totals: s.totals,
 		Categories: s.categories, Rules: s.rules, RuleNames: s.ruleNames, SevCount: s.sevCount, Phases: s.phases,
-		Results: s.results, MinTime: s.minTime, MaxTime: s.maxTime, Surface: s.surf,
+		Results: s.results, MinTime: s.minTime, MaxTime: s.maxTime, Surface: s.surf, Scores: s.scores,
 	}
 	n := len(s.alerts)
 	head.Alerts = make([]*model.Alert, 0, n)
@@ -243,5 +244,9 @@ func (s *Store) Load(path string) error {
 		}
 		s.surf = sf
 	}
+	if len(snap.Scores) > maxScorePoints {
+		snap.Scores = snap.Scores[len(snap.Scores)-maxScorePoints:]
+	}
+	s.scores = snap.Scores
 	return nil
 }

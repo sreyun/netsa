@@ -81,7 +81,8 @@ func (s *Store) compromisedLocked() []*Compromised {
 			out = append(out, c)
 		}
 		cat := strings.TrimPrefix(f.Title, "疑似攻击成功: ")
-		if kind == "host" || highImpact[cat] {
+		// 主机：命中情报的外连与安全设备报出的恶意软件为高置信；仅凭周期性外连判断的为中置信
+		if kind == "host" && f.Severity >= model.SevHigh || kind == "web" && highImpact[cat] {
 			c.Confidence = "high"
 		}
 		if f.Severity > c.Severity {

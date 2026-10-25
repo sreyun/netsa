@@ -1,6 +1,8 @@
 package store
 
 import (
+	"fmt"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -24,7 +26,7 @@ func TestAttackMapping(t *testing.T) {
 	for _, cat := range []string{detect.CatSQLi, detect.CatXSS, detect.CatTraversal, detect.CatCmdExec, detect.CatExpr, detect.CatSSRF,
 		detect.CatXXE, detect.CatDeser, detect.CatWebShell, detect.CatCVE, detect.CatSensitive, detect.CatAdminProbe, detect.CatScanner,
 		detect.CatMapping, detect.CatAutomation, detect.CatProtocol, detect.CatCC, detect.CatDirScan, detect.CatBruteForce, detect.CatPortScan,
-		detect.CatHostSweep, detect.CatFlood, detect.CatIoT, detect.CatRiskService, detect.CatSpoof, CatC2, CatMalware} {
+		detect.CatHostSweep, detect.CatFlood, detect.CatIoT, detect.CatRiskService, detect.CatSpoof, detect.CatCrawl, detect.CatBeacon, CatC2, CatMalware} {
 		ts := categoryTechniques[cat]
 		if len(ts) == 0 {
 			t.Errorf("攻击类型 %s 未映射到 ATT&CK", cat)
@@ -233,5 +235,112 @@ func TestSuccessBaseline(t *testing.T) {
 	}
 	if h := sqli("/search?q=1'+and+sleep(5)", 4000); h.Result != model.ResultSuccess {
 		t.Fatalf("响应大小波动大的接口无法判断，应保留疑似成功: %+v", h)
+	}
+}
+
+// 周期性外连（无情报命中）：记录告警并作为中置信失陷迹象；出站流量本身不计入攻击源统计。
+func TestBeaconCompromise(t *testing.T) {
+	s := newTestStore()
+	ev := &model.Event{Kind: model.KindFirewall, SrcIP: "10.0.0.31", DstIP: "198.51.100.66", DstPort: 443, Action: model.ActionAllow, Outbound: true, Time: time.Now()}
+	r := s.Record(ev, []model.Hit{{RuleID: "bhv-beacon", Name: "周期性外连", Category: detect.CatBeacon, Severity: model.SevMedium, Phase: model.PhasePersistence, Result: model.ResultAllowed, Evidence: "每隔约 7 分钟"}})
+	if len(r.Alerts) != 1 {
+		t.Fatalf("出站流量命中周期性外连应告警: %+v", r)
+	}
+	c := s.CompromisedAssets()
+	if len(c) != 1 || c[0].Asset != "10.0.0.31" || c[0].Confidence != "medium" || c[0].IPs[0] != "198.51.100.66" {
+		t.Fatalf("周期性外连应为中置信失陷: %+v", c)
+	}
+	if s.Record(&model.Event{Kind: model.KindFirewall, SrcIP: "10.0.0.31", DstIP: "1.1.1.1", DstPort: 443, Outbound: true, Time: time.Now()}, nil).NewIP {
+		t.Fatal("普通出站流量不应建立画像")
+	}
+}
+
+// assessBenchStore 构造 5 万个攻击源的状态库（每个攻击源命中 3 类攻击）。
+func assessBenchStore(b *testing.B) *Store {
+	s := New(100000, 20000, 5, 7*24*time.Hour)
+	cats := []string{detect.CatSQLi, detect.CatXSS, detect.CatScanner, detect.CatDirScan, detect.CatBruteForce, detect.CatPortScan, detect.CatCmdExec, detect.CatSensitive}
+	now := time.Now()
+	evs := make([]*model.Event, 0, 1024)
+	hits := make([][]model.Hit, 0, 1024)
+	for i := 0; i < 50000; i++ {
+		ip := fmt.Sprintf("10.%d.%d.%d", i/65536, i/256%256, i%256)
+		for j := 0; j < 3; j++ {
+			c := cats[(i+j)%len(cats)]
+			evs = append(evs, &model.Event{Kind: model.KindWeb, SrcIP: ip, Method: "GET", URI: "/x", Status: 403, Time: now})
+			hits = append(hits, []model.Hit{{RuleID: c, Name: c, Category: c, Severity: model.Severity(1 + (i+j)%4), Phase: model.PhaseExploit, Result: model.ResultBlocked}})
+		}
+		if len(evs) >= 1000 {
+			s.RecordBatch(evs, hits)
+			evs, hits = evs[:0], hits[:0]
+		}
+	}
+	s.RecordBatch(evs, hits)
+	return s
+}
+
+func BenchmarkAttackMatrix(b *testing.B) {
+	s := assessBenchStore(b)
+	b.ResetTimer()
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		s.AttackMatrix()
+	}
+}
+
+func BenchmarkAssess(b *testing.B) {
+	s := assessBenchStore(b)
+	b.ResetTimer()
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		s.Assess(Visibility{ParseRate: 1})
+	}
+}
+
+func BenchmarkOverview(b *testing.B) {
+	s := assessBenchStore(b)
+	b.ResetTimer()
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		s.Overview()
+	}
+}
+
+// 评分历史：同一小时内覆盖、超过 30 天截断，并随快照保存与恢复；日报统计近 24 小时的攻击态势。
+func TestScoreHistoryAndDaily(t *testing.T) {
+	s := newTestStore()
+	now := time.Now()
+	hit := func(ip string, at time.Time, sev model.Severity) {
+		s.Record(&model.Event{Kind: model.KindWeb, SrcIP: ip, Method: "GET", URI: "/x", Status: 403, Time: at},
+			[]model.Hit{{RuleID: "r", Name: "r", Category: detect.CatSQLi, Severity: sev, Phase: model.PhaseExploit, Result: model.ResultBlocked}})
+	}
+	hit("198.51.100.1", now.Add(-30*time.Hour), model.SevMedium)
+	hit("198.51.100.1", now.Add(-2*time.Hour), model.SevHigh)
+	hit("198.51.100.2", now.Add(-1*time.Hour), model.SevCritical)
+	d := s.DailySummary(24 * time.Hour)
+	if d.Attacks != 2 || d.PrevAttacks != 1 || d.Attackers != 2 || d.NewAttackers != 1 || d.Blocked != 2 || len(d.TopAttackers) != 2 || d.TopCats[0].Name != detect.CatSQLi {
+		t.Fatalf("日报统计: %+v", d)
+	}
+	a := s.Assess(Visibility{ParseRate: 1})
+	s.RecordScore(a)
+	s.RecordScore(a) // 同一小时内覆盖
+	if h := s.ScoreHistory(); len(h) != 1 || h[0].Score != a.Score || h[0].Dims["compromise"] != 100 {
+		t.Fatalf("评分历史: %+v", h)
+	}
+	s.mu.Lock()
+	for i := 0; i < maxScorePoints+5; i++ {
+		s.scores = append(s.scores, ScorePoint{T: now.Add(-time.Duration(maxScorePoints+10-i) * time.Hour), Score: i % 100})
+	}
+	s.mu.Unlock()
+	s.RecordScore(a)
+	if n := len(s.ScoreHistory()); n != maxScorePoints {
+		t.Fatalf("评分历史应截断为 %d 条: %d", maxScorePoints, n)
+	}
+	path := filepath.Join(t.TempDir(), "s.json.gz")
+	if err := s.Save(path); err != nil {
+		t.Fatal(err)
+	}
+	s2 := newTestStore()
+	if err := s2.Load(path); err != nil || len(s2.ScoreHistory()) != maxScorePoints || len(s2.Assess(Visibility{}).History) != maxScorePoints {
+		t.Fatalf("评分历史应随快照恢复: %v", err)
 	}
 }

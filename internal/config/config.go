@@ -159,6 +159,15 @@ type Thresholds struct {
 	HostSweep     int           `yaml:"host_sweep"`
 	BruteConns    int           `yaml:"brute_conns"`
 	FloodEvents   int           `yaml:"flood_events"`
+	// 分布式暴力破解（撞库）：窗口内同一登录接口的失败登录次数与来源数同时达到阈值
+	DistWindow      time.Duration `yaml:"dist_window"`
+	DistBruteLogins int           `yaml:"dist_brute_logins"`
+	DistBruteIPs    int           `yaml:"dist_brute_ips"`
+	// 接口遍历 / 批量爬取：窗口内同一来源对同一接口请求的不同 ID 数达到阈值
+	EnumWindow time.Duration `yaml:"enum_window"`
+	EnumIDs    int           `yaml:"enum_ids"`
+	// 周期性外连（疑似 C2 心跳）：内网主机按固定间隔连接同一外部地址的次数达到阈值
+	BeaconConns int `yaml:"beacon_conns"`
 }
 
 type AlertConfig struct {
@@ -169,6 +178,8 @@ type AlertConfig struct {
 	// RobotsFile 保存在界面中添加的机器人；为空时放在 storage.snapshot 所在目录（alert-robots.json）
 	RobotsFile string          `yaml:"robots_file"`
 	Webhooks   []WebhookConfig `yaml:"webhooks"`
+	// ReportTime 每日安全日报的推送时间（HH:MM，按 timezone），推送给勾选了“接收日报”的机器人；off 表示关闭
+	ReportTime string `yaml:"report_time"`
 }
 
 // WebhookConfig 是配置文件中的告警推送机器人。
@@ -182,6 +193,8 @@ type WebhookConfig struct {
 	// MinSeverity 兼容旧配置：推送不低于该等级的告警（设置了 levels 时忽略）
 	MinSeverity string `yaml:"min_severity"`
 	Disabled    bool   `yaml:"disabled"`
+	// Report 接收每日安全日报（推送时间见 alert.report_time）
+	Report bool `yaml:"report"`
 }
 
 // ArchiveConfig 是可选的告警归档：配置 PostgreSQL 后，告警异步批量写入按月分区的表，长期留存并可按时间 / IP / 规则查询。
@@ -237,20 +250,26 @@ func Default() *Config {
 			SuccessMinBytes: 1,
 			AlertsPerRule:   5,
 			Thresholds: Thresholds{
-				WebWindow:     time.Minute,
-				CCRequests:    600,
-				Scan404:       40,
-				ScanPaths:     30,
-				BruteLogin:    15,
-				Server5xx:     30,
-				FwWindow:      5 * time.Minute,
-				PortScanPorts: 20,
-				HostSweep:     20,
-				BruteConns:    30,
-				FloodEvents:   5000,
+				WebWindow:       time.Minute,
+				CCRequests:      600,
+				Scan404:         40,
+				ScanPaths:       30,
+				BruteLogin:      15,
+				Server5xx:       30,
+				FwWindow:        5 * time.Minute,
+				PortScanPorts:   20,
+				HostSweep:       20,
+				BruteConns:      30,
+				FloodEvents:     5000,
+				DistWindow:      10 * time.Minute,
+				DistBruteLogins: 100,
+				DistBruteIPs:    20,
+				EnumWindow:      10 * time.Minute,
+				EnumIDs:         300,
+				BeaconConns:     8,
 			},
 		},
-		Alert: AlertConfig{DedupWindow: 10 * time.Minute},
+		Alert: AlertConfig{DedupWindow: 10 * time.Minute, ReportTime: "09:00"},
 		Storage: StorageConfig{
 			Interval:  time.Minute,
 			MaxIPs:    200000,
@@ -315,6 +334,11 @@ func (c *Config) Validate() error {
 	}
 	if (c.Server.Username == "") != (c.Server.Password == "") {
 		return fmt.Errorf("server.username 与 server.password 需同时设置")
+	}
+	if t := strings.TrimSpace(c.Alert.ReportTime); t != "" && t != "off" {
+		if _, err := time.Parse("15:04", t); err != nil {
+			return fmt.Errorf("alert.report_time 格式应为 HH:MM（如 09:00），或 off 关闭日报: %q", t)
+		}
 	}
 	for _, n := range c.Server.AllowNetworks {
 		if _, err := ParseNetwork(n); err != nil {
@@ -406,6 +430,12 @@ func (c *Config) fill() {
 	if t.FwWindow <= 0 {
 		t.FwWindow = dt.FwWindow
 	}
+	if t.DistWindow <= 0 {
+		t.DistWindow = dt.DistWindow
+	}
+	if t.EnumWindow <= 0 {
+		t.EnumWindow = dt.EnumWindow
+	}
 	for _, p := range []struct {
 		v   *int
 		def int
@@ -413,6 +443,7 @@ func (c *Config) fill() {
 		{&t.CCRequests, dt.CCRequests}, {&t.Scan404, dt.Scan404}, {&t.ScanPaths, dt.ScanPaths},
 		{&t.BruteLogin, dt.BruteLogin}, {&t.Server5xx, dt.Server5xx}, {&t.PortScanPorts, dt.PortScanPorts},
 		{&t.HostSweep, dt.HostSweep}, {&t.BruteConns, dt.BruteConns}, {&t.FloodEvents, dt.FloodEvents},
+		{&t.DistBruteLogins, dt.DistBruteLogins}, {&t.DistBruteIPs, dt.DistBruteIPs}, {&t.EnumIDs, dt.EnumIDs}, {&t.BeaconConns, dt.BeaconConns},
 		{&c.Detect.AlertsPerRule, d.Detect.AlertsPerRule},
 		{&c.Storage.MaxIPs, d.Storage.MaxIPs}, {&c.Storage.MaxAlerts, d.Storage.MaxAlerts},
 		{&c.Geo.CacheSize, d.Geo.CacheSize},

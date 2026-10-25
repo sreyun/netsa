@@ -196,6 +196,7 @@ type Store struct {
 	maxTime    time.Time
 	surf       *surface
 	ruleBits   map[string]int // 规则 ID → 指纹位下标（同源关联分析用）
+	scores     []ScorePoint   // 安全评分历史（每小时一次）
 
 	// GeoLookup / IntelMatch 在创建新画像时调用。
 	GeoLookup  func(ip string) *geo.Info
@@ -264,7 +265,7 @@ func (s *Store) recordLocked(ev *model.Event, hits []model.Hit) RecordResult {
 	}
 	if ev.Outbound {
 		s.totals.Outbound++
-		if c2 == nil {
+		if c2 == nil && !hasAttack(hits) { // 出站流量只记录外连恶意地址、周期性外连等失陷迹象
 			return res
 		}
 	}
@@ -424,6 +425,11 @@ func (s *Store) recordLocked(ev *model.Event, hits []model.Hit) RecordResult {
 	}
 	if ev.Kind == model.KindWeb {
 		s.surf.observeWeb(ev, hits, attacked)
+	} else if c2 == nil && (geo.IsPrivate(ev.SrcIP) || ev.Outbound) && hasCategory(hits, CatBeacon) {
+		// 按固定间隔回连同一外部地址：疑似 C2 心跳，置信度低于命中情报的外连
+		h := hitOf(hits, CatBeacon)
+		s.surf.finding("beacon:"+ev.SrcIP+">"+ev.DstIP, "内网主机周期性外连（疑似 C2 心跳）", "失陷迹象", h.Severity, ev.SrcIP, h.Evidence,
+			"核查该主机上连接该地址的进程（netstat / 任务管理器 / EDR），确认是否为正常软件的更新或监控；无法解释时按失陷处置并封禁该地址", ev.DstIP, ev.Time)
 	} else if c2 == nil && geo.IsPrivate(ev.SrcIP) && hasCategory(hits, CatMalware) {
 		// 安全设备报出内网主机的恶意软件 / 远控通信，同样是失陷迹象
 		h := hitOf(hits, CatMalware)

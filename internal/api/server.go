@@ -28,6 +28,24 @@ import (
 	"netsa/internal/store"
 )
 
+// HTTP 服务的读写超时。处理时间可能超过该时长的接口（实时告警流、历史告警导出）需自行调整连接期限：
+// 设置 ReadTimeout 后，服务端在请求读完后检测连接关闭的后台读取也受该期限约束，超时会取消请求上下文。
+const (
+	ReadTimeout  = 30 * time.Second
+	WriteTimeout = 2 * time.Minute
+)
+
+// extendDeadline 为长时间运行的请求调整连接读写期限（d 为 0 表示不限制）。不支持的 ResponseWriter（如测试中的录制器）忽略。
+func extendDeadline(w http.ResponseWriter, d time.Duration) {
+	var t time.Time
+	if d > 0 {
+		t = time.Now().Add(d)
+	}
+	rc := http.NewResponseController(w)
+	_ = rc.SetReadDeadline(t)
+	_ = rc.SetWriteDeadline(t)
+}
+
 // Server 是 HTTP 服务。
 type Server struct {
 	Cfg      *config.Config
@@ -103,6 +121,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("PUT /api/alert/robots/{id}", s.robotUpdate)
 	mux.HandleFunc("DELETE /api/alert/robots/{id}", s.robotDelete)
 	mux.HandleFunc("POST /api/alert/robots/{id}/test", s.robotTest)
+	mux.HandleFunc("POST /api/alert/robots/{id}/report", s.sendReport)
 	mux.HandleFunc("POST /api/alert/test", s.robotTest)
 	if s.Static != nil {
 		files := http.FileServer(http.FS(s.Static))
@@ -447,6 +466,7 @@ func (b *Broker) ServeHTTP(w http.ResponseWriter, r *http.Request) { b.Serve(w, 
 // Serve 推送实时告警流。alive 不为空时每次心跳检查登录会话是否仍然有效：
 // 退出登录、修改密码、删除账号或调整角色后，已建立的长连接也会在 20 秒内断开，不会继续收到告警。
 func (b *Broker) Serve(w http.ResponseWriter, r *http.Request, alive func() bool) {
+	extendDeadline(w, 0) // 长连接：不受服务的读写超时限制（连接断开由心跳与会话复核发现）
 	fl, ok := w.(http.Flusher)
 	if !ok {
 		http.Error(w, "streaming unsupported", http.StatusInternalServerError)

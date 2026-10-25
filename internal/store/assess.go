@@ -78,6 +78,7 @@ type Assessment struct {
 	ActionCount map[string]int `json:"action_count"`
 	Compromised []*Compromised `json:"compromised"`
 	Matrix      *AttackMatrix  `json:"matrix"`
+	History     []ScorePoint   `json:"history"` // 评分趋势（每小时一次，最近 30 天）
 	From        time.Time      `json:"from"`
 	To          time.Time      `json:"to"`
 	GeneratedAt time.Time      `json:"generated_at"`
@@ -101,7 +102,7 @@ type assessData struct {
 }
 
 func (s *Store) collectAssessLocked() *assessData {
-	d := &assessData{totals: s.totals, from: s.minTime, to: s.maxTime, comp: s.compromisedLocked(), matrix: s.attackMatrixLocked(),
+	d := &assessData{totals: s.totals, from: s.minTime, to: s.maxTime, comp: s.compromisedLocked(),
 		endpoints: len(s.surf.Endpoints), probedPorts: len(s.surf.Ports), exploitBlocked: s.surf.ExploitBlocked, exploitPassed: s.surf.ExploitPassed,
 		bruteHits: s.categories["暴力破解"]}
 	for _, f := range s.surf.Findings {
@@ -127,6 +128,8 @@ func (s *Store) collectAssessLocked() *assessData {
 	}
 	sort.Slice(d.services, func(i, j int) bool { return d.services[i].Risk > d.services[j].Risk })
 	recentCut := s.maxTime.Add(-time.Hour)
+	// 一次遍历画像同时完成各项计数与 ATT&CK 矩阵累计；每个画像只遍历自身的攻击类型，不按名称逐个查表
+	var acc matrixAcc
 	for _, p := range s.ips {
 		if !isAttacker(p) {
 			continue
@@ -137,19 +140,27 @@ func (s *Store) collectAssessLocked() *assessData {
 		if len(p.Intel) > 0 {
 			d.intelHits++
 		}
-		if p.Categories["暴力破解"] > 0 {
-			d.brute++
+		var brute, scan, cc, port bool
+		for cat := range p.Categories {
+			switch cat {
+			case "暴力破解":
+				brute = true
+			case "扫描器", "网络空间测绘", "目录扫描":
+				scan = true
+			case "CC攻击", "洪水攻击":
+				cc = true
+			case "端口扫描", "主机探测", "高危服务探测":
+				port = true
+			}
+			acc.category(cat, p.CatSev[cat])
 		}
-		if p.Categories["扫描器"]+p.Categories["网络空间测绘"]+p.Categories["目录扫描"] > 0 {
-			d.scanners++
-		}
-		if p.Categories["CC攻击"]+p.Categories["洪水攻击"] > 0 {
-			d.ccSources++
-		}
-		if p.Categories["端口扫描"]+p.Categories["主机探测"]+p.Categories["高危服务探测"] > 0 {
-			d.portScanners++
-		}
+		acc.done()
+		d.brute += int64(b2i(brute))
+		d.scanners += b2i(scan)
+		d.ccSources += b2i(cc)
+		d.portScanners += b2i(port)
 	}
+	d.matrix = s.buildMatrixLocked(&acc)
 	var weighted float64
 	cut := recentCut.Unix() / 60
 	for k, b := range s.buckets {
@@ -174,9 +185,10 @@ func (s *Store) collectAssessLocked() *assessData {
 func (s *Store) Assess(v Visibility) *Assessment {
 	s.mu.RLock()
 	d := s.collectAssessLocked()
+	history := append([]ScorePoint{}, s.scores...)
 	s.mu.RUnlock()
 
-	a := &Assessment{Compromised: d.comp, Matrix: d.matrix, From: d.from, To: d.to, GeneratedAt: time.Now(), ActionCount: map[string]int{}}
+	a := &Assessment{Compromised: d.comp, Matrix: d.matrix, From: d.from, To: d.to, GeneratedAt: time.Now(), ActionCount: map[string]int{}, History: history}
 	if a.Compromised == nil {
 		a.Compromised = []*Compromised{}
 	}
@@ -221,6 +233,13 @@ func (s *Store) Assess(v Visibility) *Assessment {
 		a.Verdict = "未发现失陷迹象，按建议持续加固可进一步降低风险"
 	}
 	return a
+}
+
+func b2i(b bool) int {
+	if b {
+		return 1
+	}
+	return 0
 }
 
 func levelOf(score int) string {

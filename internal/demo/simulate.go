@@ -59,6 +59,8 @@ type Sim struct {
 	normal    []string
 	attackers []attacker
 	server    string
+	botnet    []string // 分布式撞库的僵尸网络来源
+	nextID    int      // 接口遍历的下一个用户 ID
 }
 
 type attacker struct {
@@ -103,7 +105,8 @@ func New(seed int64) *Sim {
 	}
 	kinds := []string{"dirscan", "sqli", "xss", "rce", "log4j", "webshell", "brute", "cc", "sensitive", "portscan",
 		"sshbrute", "redis", "iot", "mapping", "mixed", "mixed", "dirscan", "sqli", "portscan", "sshbrute", "rce", "iot",
-		"dirscan", "sqli", "xss", "rce", "brute", "portscan", "sshbrute", "iot", "mapping", "sensitive", "mixed", "webshell", "log4j", "dirscan"}
+		"dirscan", "sqli", "xss", "rce", "brute", "portscan", "sshbrute", "iot", "mapping", "sensitive", "mixed", "webshell", "log4j", "dirscan",
+		"crawler", "botnet"}
 	for i, k := range kinds {
 		a := attacker{ip: s.randIP(), kind: k, ua: pick(s.r, browserUA), viaCDN: i%5 == 0}
 		switch k {
@@ -117,9 +120,15 @@ func New(seed int64) *Sim {
 			a.ua = "python-requests/2.31.0"
 		case "rce":
 			a.ua = pick(s.r, []string{"Mozilla/5.0 (Windows NT 10.0; Win64; x64)", "Go-http-client/1.1", "curl/8.4.0"})
+		case "crawler":
+			a.ua = "python-httpx/0.27.0"
 		}
 		s.attackers = append(s.attackers, a)
 	}
+	for i := 0; i < 30; i++ {
+		s.botnet = append(s.botnet, s.randIP())
+	}
+	s.nextID = 100000
 	return s
 }
 
@@ -297,6 +306,20 @@ func (s *Sim) attack(w *writer, t time.Time, a attacker) {
 		web("GET", "/", 200, 5321)
 		for _, p := range []int{22, 80, 443, 8080, 3389} {
 			fmt.Fprintln(w.ufw, s.ufwLine(s.sec(t), a.ip, p, p != 80 && p != 443))
+		}
+	case "crawler":
+		// 按顺序遍历用户资料接口（越权遍历 / 批量爬取个人信息）
+		for i := 0; i < 320; i++ {
+			s.nextID++
+			web("GET", fmt.Sprintf("/api/v1/user/%d/profile", s.nextID), 200, 800+s.r.Intn(200))
+		}
+	case "botnet":
+		// 僵尸网络撞库：30 个来源各尝试几次，单个来源达不到暴力破解阈值
+		for _, ip := range s.botnet {
+			b := attacker{ip: ip, ua: pick(s.r, browserUA)}
+			for j := 0; j < 4; j++ {
+				fmt.Fprintln(w.nginx, s.nginxLine(s.sec(t), b, "POST", "/wp-login.php", 401, 320))
+			}
 		}
 	case "mixed":
 		for i := 0; i < 6; i++ {

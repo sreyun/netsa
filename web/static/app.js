@@ -9,8 +9,8 @@ const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '
 const LV = { critical: '严重', high: '高危', medium: '中危', low: '低危', info: '信息' };
 const LV_COLOR = { critical: '#ff4d4f', high: '#ff7a45', medium: '#ffc53d', low: '#40a9ff', info: '#8c9ab8' };
 const LEVELS = ['critical', 'high', 'medium', 'low', 'info'];
-const PHASE = { recon: '侦察扫描', credential: '凭证攻击', exploit: '漏洞利用', persistence: '后门控制', impact: '拒绝服务' };
-const PHASES = ['recon', 'credential', 'exploit', 'persistence', 'impact'];
+const PHASE = { recon: '侦察扫描', credential: '凭证攻击', exploit: '漏洞利用', persistence: '后门控制', collection: '数据窃取', impact: '拒绝服务' };
+const PHASES = ['recon', 'credential', 'exploit', 'persistence', 'collection', 'impact'];
 const RESULT = { blocked: '已拦截', failed: '失败', error: '服务异常', success: '疑似成功', passed: '未拦截', allowed: '防火墙放行', unknown: '未知' };
 const CONF = { high: '高', medium: '中', low: '低' };
 const SRC = { custom: '自定义网段', ip2region: 'ip2region 离线库', maxmind: 'MaxMind GeoLite2', 'ip-api': 'ip-api 在线库', private: '内网地址', rdns: '反向 DNS', gazetteer: '区划地名库（离线城市定位）' };
@@ -355,7 +355,7 @@ async function loadOverview() {
     xAxis: { type: 'value', axisLabel: { color: TEXT, fontSize: 10 }, splitLine: { lineStyle: { color: GRID_LINE } } },
     yAxis: { type: 'category', inverse: true, triggerEvent: true, data: PHASES.map((p) => PHASE[p]), axisLabel: { color: TEXT }, axisTick: { show: false }, axisLine: { lineStyle: { color: GRID_LINE } } },
     series: [{ type: 'bar', barMaxWidth: 14, label: { show: true, position: 'right', color: TEXT, fontSize: 10 },
-      data: PHASES.map((p, i) => ({ value: ph[p] || 0, itemStyle: { color: ['#40a9ff', '#ffc53d', '#ff7a45', '#ff4d4f', '#9254de'][i], borderRadius: [0, 3, 3, 0] } })) }],
+      data: PHASES.map((p, i) => ({ value: ph[p] || 0, itemStyle: { color: ['#40a9ff', '#ffc53d', '#ff7a45', '#ff4d4f', '#f759ab', '#9254de'][i], borderRadius: [0, 3, 3, 0] } })) }],
   }, true);
   barChart('cCountry', (o.top_countries || []).slice(0, 10), ['#1d4fa8', '#3a8bff'], true, '点击查看该地区攻击源');
   barChart('cCity', (o.top_cities || []).slice(0, 10), ['#126e6a', '#36cfc9'], true, '点击查看该城市攻击源');
@@ -1155,7 +1155,10 @@ async function openIP(ip) {
   mask.classList.add('open');
   const tags = Object.keys(p.tags || {}).map((t) => `<span class="chip">${esc(t)}</span>`).join('');
   const intel = (p.intel || []).map((t) => `<span class="chip warn">情报: ${esc(t)}</span>`).join('');
-  $('#drawerTitle').innerHTML = `<div class="ipbig">${esc(ip)} ${badge(s.level)} <span style="font-size:14px">威胁评分 <b style="color:${LV_COLOR[s.level]}">${Math.round(s.score)}</b></span></div><div>${intel}${tags}</div>`;
+  // 失陷迹象：外连恶意地址、安全设备报出的恶意软件、周期性外连（该地址是本方主机，不是外部攻击者）
+  const comp = ['恶意外连', '恶意软件/远控', '可疑外连'].filter((c) => (p.categories || {})[c]);
+  const compBanner = comp.length ? `<div class="comp-banner">⚠ 该主机疑似已失陷（${comp.map(esc).join('、')}）：请立即隔离排查，详见“安全评估 → 失陷研判”</div>` : '';
+  $('#drawerTitle').innerHTML = `<div class="ipbig">${esc(ip)} ${badge(s.level)} <span style="font-size:14px">威胁评分 <b style="color:${LV_COLOR[s.level]}">${Math.round(s.score)}</b></span></div><div>${intel}${tags}</div>${compBanner}`;
 
   const loc = [g.country, g.province, g.city, g.district].filter(Boolean).filter((v, i, a) => a.indexOf(v) === i).join(' / ') || '未知';
   const coord = g.has_coord
@@ -1216,7 +1219,7 @@ async function openIP(ip) {
     </div>
     ${(g.notes || []).map((n) => `<div class="note">• ${esc(n)}</div>`).join('')}
     <h4>多源定位比对</h4>
-    <table class="table"><thead><tr><th>数据源</th><th>国家</th><th>省/州</th><th>城市</th><th>运营商/组织</th><th>ASN</th><th>坐标</th></tr></thead><tbody>${sources || empty(7)}</tbody></table>
+    <div class="table-wrap"><table class="table"><thead><tr><th>数据源</th><th>国家</th><th>省/州</th><th>城市</th><th>运营商/组织</th><th>ASN</th><th>坐标</th></tr></thead><tbody>${sources || empty(7)}</tbody></table></div>
     ${g.has_coord ? '<div class="chart mini-map" id="cMiniMap"></div>' : ''}
     <div style="margin-top:8px"><button type="button" class="btn" id="rdapBtn">查询 WHOIS / RDAP 注册信息</button></div>
     <div id="rdapBox"></div>
@@ -1346,9 +1349,12 @@ async function loadAssess() {
       lineStyle: { color: c, width: 2 }, itemStyle: { color: c }, areaStyle: { color: c + '33' },
     }],
   }, true);
-  // 处置建议：P0 / P1 默认展开操作步骤
+  renderScoreTrend(a.history || []);
+  // 处置建议：P0 / P1 默认展开操作步骤；定时刷新时保留用户手动展开 / 收起的状态
+  const opened = new Map($$('#asActions details').map((d) => [d.dataset.key, d.open]));
+  const isOpen = (x) => (opened.has(x.priority + x.title) ? opened.get(x.priority + x.title) : x.priority <= 'P1');
   $('#asActCount').textContent = a.actions.length ? `共 ${a.actions.length} 项，按优先级排序` : '';
-  $('#asActions').innerHTML = a.actions.map((x, i) => `<details class="as-act prio-${x.priority}" data-prio="${x.priority}" ${x.priority <= 'P1' ? 'open' : ''}>
+  $('#asActions').innerHTML = a.actions.map((x, i) => `<details class="as-act prio-${x.priority}" data-prio="${x.priority}" data-key="${esc(x.priority + x.title)}" ${isOpen(x) ? 'open' : ''}>
       <summary><span class="prio prio-${x.priority}">${x.priority} ${PRIO[x.priority]}</span><b>${esc(x.title)}</b><span class="spacer"></span>
         <span class="chip">${esc((a.dimensions.find((d) => d.key === x.dimension) || {}).name || '')}</span>
         ${x.drill ? `<button type="button" class="btn" data-act="${i}">${esc(x.drill.label || '查看明细')} ›</button>` : ''}</summary>
@@ -1379,6 +1385,7 @@ async function loadAssess() {
   // ATT&CK 矩阵：按命中量着色，可点击查看对应告警
   const m = a.matrix;
   const maxHits = Math.max(1, ...m.tactics.flatMap((t) => t.techniques.map((x) => x.hits)));
+  $('#asMatrix').style.setProperty('--cols', m.tactics.length);
   $('#asMatrixInfo').textContent = `观测到 ${m.observed} / ${m.total} 项技术${m.unmapped ? ` · ${num(m.unmapped)} 次命中来自威胁情报 / 自定义规则，未映射` : ''}`;
   $('#asMatrix').innerHTML = m.tactics.map((t) => `<div class="attck-col"><div class="attck-tac"><b>${esc(t.name)}</b><span>${esc(t.id)} ${esc(t.en)}</span><em>${num(t.hits)}</em></div>
       ${t.techniques.map((x) => {
@@ -1388,6 +1395,24 @@ async function loadAssess() {
           title="${esc(x.id)} ${esc(x.name)}&#10;对应检测：${esc(x.categories.join('、'))}${x.hits ? `&#10;命中 ${num(x.hits)} 次 · 攻击源 ${num(x.attackers)} 个 · 点击查看告警` : '&#10;暂未观测到'}">
           <span class="tid">${esc(x.id)}</span><span class="tname">${esc(x.name)}</span>${x.hits ? `<span class="thits">${num(x.hits)} 次 · ${num(x.attackers)} 源</span>` : ''}</button>`;
       }).join('')}</div>`).join('');
+}
+// 评分趋势：每小时记录一次，展示整改效果
+function renderScoreTrend(h) {
+  $('#asHistInfo').textContent = h.length ? `每小时记录一次，共 ${h.length} 次${h.length > 1 ? `，较首次 ${h[h.length - 1].score - h[0].score >= 0 ? '+' : ''}${h[h.length - 1].score - h[0].score} 分` : ''}` : '';
+  const labels = h.map((p) => fmtTime(p.t).slice(5, 16));
+  chart('cScoreTrend').setOption({
+    tooltip: {
+      ...baseTooltip, trigger: 'axis',
+      formatter: (ps) => { const p = h[ps[0].dataIndex]; return `${esc(fmtTime(p.t))}<br/>安全评分 <b>${p.score}</b>（${esc(p.grade)}）<br/>P0 事项 ${p.p0} · 疑似失陷 ${p.compromised}`; },
+    },
+    grid: { left: 8, right: 16, top: 16, bottom: 4, containLabel: true },
+    xAxis: { type: 'category', data: labels, boundaryGap: false, axisLabel: { color: TEXT, fontSize: 10 }, axisLine: { lineStyle: { color: GRID_LINE } } },
+    yAxis: { type: 'value', min: 0, max: 100, interval: 20, axisLabel: { color: TEXT, fontSize: 10 }, splitLine: { lineStyle: { color: GRID_LINE } } },
+    visualMap: { show: false, dimension: 1, pieces: [{ lt: 40, color: '#ff4d4f' }, { gte: 40, lt: 60, color: '#ff7a45' }, { gte: 60, lt: 80, color: '#ffc53d' }, { gte: 80, color: '#52c41a' }] },
+    series: [{ type: 'line', data: h.map((p) => p.score), showSymbol: h.length < 48, symbolSize: 5, lineStyle: { width: 2 },
+      markLine: { silent: true, symbol: 'none', lineStyle: { color: 'rgba(125,141,179,.5)', type: 'dashed' }, label: { color: TEXT, fontSize: 10 }, data: [{ yAxis: 60, label: { formatter: '及格 60' } }, { yAxis: 80, label: { formatter: '良好 80' } }] } }],
+    graphic: h.length > 1 ? [] : [{ type: 'text', left: 'center', top: 'middle', style: { text: '评分每小时记录一次，持续运行后显示趋势', fill: TEXT, fontSize: 12 } }],
+  }, true);
 }
 $('#asActions').addEventListener('click', (e) => {
   const b = e.target.closest('[data-act]');
@@ -1402,7 +1427,10 @@ $('#asComp').addEventListener('click', (e) => {
   if (!tr || !lastAssess) return;
   const x = lastAssess.compromised[+tr.dataset.comp];
   if (x.kind === 'host') openIP(x.asset);
-  else openDrill({ tab: 'alerts', params: { q: x.asset.slice(x.asset.indexOf('/')) } }, `失陷研判：${x.asset}`);
+  else {
+    const i = x.asset.indexOf('/');
+    openDrill({ tab: 'alerts', params: { q: i >= 0 ? x.asset.slice(i) : x.asset } }, `失陷研判：${x.asset}`);
+  }
 });
 $('#asCounts').addEventListener('click', (e) => {
   const b = e.target.closest('[data-prio],[data-jump]');
@@ -1454,12 +1482,13 @@ async function loadNotify() {
       + `<div class="muted">${zero(st.last_ok) ? '尚未成功推送' : '最近成功 ' + esc(fmtShort(st.last_ok))}${st.suppressed ? ` · 合并 ${num(st.suppressed)} 条` : ''}${st.queued ? ` · 待发送 ${st.queued}` : ''}</div>`;
     const ui = r.source === 'ui';
     const acts = !isAdmin() ? '<span class="muted">只读</span>' : `<button class="btn" data-act="test" data-id="${esc(r.id)}">测试</button>`
+      + ` <button class="btn" data-act="report" data-id="${esc(r.id)}" title="立即向该机器人发送一份安全日报">发送日报</button>`
       + (ui ? ` <button class="btn" data-act="toggle" data-id="${esc(r.id)}">${r.enabled ? '停用' : '启用'}</button>`
         + ` <button class="btn" data-act="edit" data-id="${esc(r.id)}">编辑</button>`
         + ` <button class="btn danger" data-act="del" data-id="${esc(r.id)}">删除</button>`
         : ' <span class="chip" title="来自配置文件 alert.webhooks，请在配置文件中修改">配置文件</span>');
     return `<tr><td><b>${esc(r.name)}</b>${r.has_secret ? '<div class="muted">已启用加签</div>' : ''}</td>
-      <td class="nowrap">${esc(r.type_label)}</td><td class="nowrap">${levelChips(r.levels)}</td>
+      <td class="nowrap">${esc(r.type_label)}</td><td class="nowrap">${levelChips(r.levels)}${r.report ? ' <span class="chip" title="接收每日安全日报">日报</span>' : ''}</td>
       <td class="mono nt-url" title="${esc(r.url)}">${esc(r.url)}</td><td>${status}</td><td>${stats}</td><td class="nowrap num">${acts}</td></tr>`;
   }).join('');
   $('#ntTable').innerHTML = '<thead><tr><th>名称</th><th>类型</th><th>推送等级</th><th>Webhook</th><th>状态</th><th>推送统计</th><th class="num">操作</th></tr></thead>'
@@ -1474,6 +1503,7 @@ async function loadNotify() {
     <li><b>去重</b>：同一 IP、同一规则、同一研判结果在 ${esc(fmtDur(info.dedup_window))}内只推送一次（<span class="mono">alert.dedup_window</span>）。</li>
     <li><b>合并</b>：2 秒内的多条告警合并为一条消息，最多逐条列出 10 条。</li>
     <li><b>限速</b>：钉钉、企业微信每个机器人每分钟最多 18 条，飞书 60 条（低于平台限制）；超出部分在下一条消息中汇总为“另有 N 条”，不会静默丢失。</li>
+    <li><b>安全日报</b>：${info.report_time && info.report_time !== 'off' ? `每天 ${esc(info.report_time)}（<span class="mono">alert.report_time</span>）` : '已关闭（<span class="mono">alert.report_time: off</span>）'}向勾选了“接收每日安全日报”的机器人推送安全评分、近 24 小时攻击态势、疑似失陷资产与优先处置事项；也可在列表中点击“发送日报”立即发送。</li>
     <li><b>失败重试</b>：网络错误或平台限流时 10 秒后自动重试一次；失败原因显示在机器人状态中。</li>
     <li><b>安全</b>：日志中的攻击载荷与链接已做转义，不会在群聊中显示为可点击的链接或图片；界面只允许填写钉钉、企业微信、飞书的官方 Webhook 地址，令牌与密钥不会回显到页面。</li>
   </ul>`;
@@ -1512,6 +1542,9 @@ function openRobotForm(r) {
   const levels = r ? r.levels : ['critical', 'high'];
   $$('#ntLevels input').forEach((c) => { c.checked = levels.includes(c.value); });
   $('#ntEnabled').checked = r ? r.enabled : true;
+  $('#ntReport').checked = r ? !!r.report : false;
+  const rt = ntState.info && ntState.info.report_time;
+  $('#ntReportTime').textContent = rt && rt !== 'off' ? `（每天 ${rt}：安全评分、近 24 小时攻击态势、失陷资产与优先处置事项）` : '（日报已关闭：alert.report_time 为 off）';
   $$('#ntType button').forEach((b) => { b.disabled = !!r; }); // 编辑时不能更改类型
   ntSetType(r ? r.type : 'dingtalk');
   ntMsg('');
@@ -1529,6 +1562,7 @@ function ntCollect() {
     name: $('#ntName').value.trim(), type: ntState.type, url: $('#ntUrl').value.trim(),
     secret: NT_TYPES[ntState.type].secret ? $('#ntSecret').value.trim() : '', clear_secret: $('#ntClear').checked,
     levels: $$('#ntLevels input').filter((c) => c.checked).map((c) => c.value), enabled: $('#ntEnabled').checked,
+    report: $('#ntReport').checked,
   };
 }
 
@@ -1594,7 +1628,13 @@ $('#ntTable').addEventListener('click', async (e) => {
         });
         break;
       case 'toggle':
-        await api(path, 'PUT', { name: r.name, type: r.type, levels: r.levels, enabled: !r.enabled });
+        await api(path, 'PUT', { name: r.name, type: r.type, levels: r.levels, enabled: !r.enabled, report: !!r.report });
+        break;
+      case 'report':
+        await ntBusy(b, async () => {
+          const res = await api(path + '/report', 'POST');
+          alert(res.ok ? `安全日报已发送到「${r.name}」，请在群中查看。` : `发送到「${r.name}」失败：${res.error}`);
+        });
         break;
       case 'del':
         if (!confirm(`确定删除机器人「${r.name}」？删除后将不再向该群推送告警。`)) return;
@@ -1808,6 +1848,9 @@ document.addEventListener('fullscreenchange', () => setTimeout(resizeCharts, 200
 
 // 告警消息中的“查看溯源详情”链接形如 /#ip=1.2.3.4，打开后直接显示该 IP 的溯源详情
 function openFromHash() {
+  // #tab=assess：日报消息中的“查看安全评估”链接
+  const t = /^#tab=(\w+)$/.exec(location.hash);
+  if (t && loaders[t[1]] && !$('#tabs [data-tab="' + t[1] + '"]').hidden) { switchTab(t[1]); return; }
   const m = /^#ip=(.+)$/.exec(location.hash);
   if (!m) return;
   let ip = '';

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/csv"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -13,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"netsa/internal/alert"
 	"netsa/internal/auth"
 	"netsa/internal/config"
 	"netsa/internal/detect"
@@ -380,5 +382,84 @@ func TestAssessmentAPI(t *testing.T) {
 	json.Unmarshal(get(h, "/api/report").Body.Bytes(), &rep)
 	if rep["assessment"] == nil {
 		t.Fatal("分析报告应包含安全评估")
+	}
+}
+
+// 服务设置了读写超时后，实时告警长连接仍能持续推送（处理时调整了连接期限），不会在超时后被断开。
+func TestStreamOutlivesServerTimeouts(t *testing.T) {
+	s, _ := testServer(t, "", "")
+	s.Broker.PingEvery = 40 * time.Millisecond
+	srv := httptest.NewUnstartedServer(s.Handler())
+	srv.Config.ReadTimeout, srv.Config.WriteTimeout = 200*time.Millisecond, 200*time.Millisecond
+	srv.Start()
+	defer srv.Close()
+	resp, err := http.Get(srv.URL + "/api/stream")
+	if err != nil || resp.StatusCode != 200 {
+		t.Fatalf("建立长连接: %v", err)
+	}
+	defer resp.Body.Close()
+	pings := make(chan struct{}, 100)
+	go func() {
+		buf := make([]byte, 256)
+		for {
+			n, err := resp.Body.Read(buf)
+			if strings.Contains(string(buf[:n]), "ping") {
+				pings <- struct{}{}
+			}
+			if err != nil {
+				close(pings)
+				return
+			}
+		}
+	}()
+	deadline := time.After(time.Second)
+	got := 0
+	for {
+		select {
+		case _, ok := <-pings:
+			if !ok {
+				t.Fatalf("长连接在 %d 次心跳后被断开", got)
+			}
+			got++
+		case <-deadline:
+			if got < 10 {
+				t.Fatalf("1 秒内只收到 %d 次心跳", got)
+			}
+			return
+		}
+	}
+}
+
+// 立即发送安全日报：管理员可发送，日报内容包含评分与近 24 小时统计；只读账号无权发送。
+func TestSendReportAPI(t *testing.T) {
+	var got map[string]any
+	robot := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { json.NewDecoder(r.Body).Decode(&got) }))
+	defer robot.Close()
+	s, st := testServer(t, "admin", "Adm1n-secret")
+	n, err := alert.New(config.AlertConfig{Webhooks: []config.WebhookConfig{{Name: "soc", Type: "generic", URL: robot.URL}}}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.Notifier = n
+	st.Record(&model.Event{Kind: model.KindWeb, SrcIP: "198.51.100.50", Method: "GET", URI: "/x", Status: 403, Time: time.Now()},
+		[]model.Hit{{RuleID: "r", Name: "r", Category: "SQL注入", Severity: model.SevHigh, Phase: model.PhaseExploit, Result: model.ResultBlocked}})
+	h := s.Handler()
+	admin := login(t, h, "admin", "Adm1n-secret")
+	rec := do(h, http.MethodPost, "/api/alert/robots/config-1/report", "", admin)
+	var res struct {
+		OK    bool   `json:"ok"`
+		Error string `json:"error"`
+	}
+	json.Unmarshal(rec.Body.Bytes(), &res)
+	if rec.Code != 200 || !res.OK || got == nil {
+		t.Fatalf("发送日报: %d %+v", rec.Code, res)
+	}
+	ev := got["events"].([]any)[0].(map[string]any)
+	lines := fmt.Sprint(ev["lines"])
+	if ev["kind"] != "report" || !strings.Contains(lines, "安全评分") || !strings.Contains(lines, "近 24 小时攻击 1 次") || !strings.Contains(lines, "198.51.100.50") {
+		t.Fatalf("日报内容: %v", ev)
+	}
+	if rec := do(h, http.MethodPost, "/api/alert/robots/nope/report", "", admin); rec.Code != 404 {
+		t.Fatalf("不存在的机器人: %d", rec.Code)
 	}
 }
