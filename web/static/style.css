@@ -61,14 +61,40 @@ small { color: var(--muted); font-weight: normal; font-size: 12px; margin-left: 
 .logo .tick { fill: none; stroke: #07203a; stroke-width: 2.6; stroke-linecap: round; stroke-linejoin: round; }
 .brand .title { font-size: 18px; font-weight: 700; letter-spacing: 2px; background: linear-gradient(90deg, #8fe9ff, #3a8bff); -webkit-background-clip: text; background-clip: text; color: transparent; }
 .brand .subtitle { font-size: 11px; color: var(--muted); letter-spacing: 1px; }
-.tabs { display: flex; gap: 4px; flex: 1; flex-wrap: nowrap; min-width: 0; overflow-x: auto; scrollbar-width: none; }
-.tabs::-webkit-scrollbar { display: none; }
+.tabs { display: flex; gap: 4px; flex: 1; flex-wrap: wrap; min-width: 0; align-items: center; }
 .tabs button {
   background: transparent; border: 1px solid transparent; color: var(--muted);
   padding: 6px 14px; border-radius: 4px; cursor: pointer; font-size: 14px; white-space: nowrap; flex: none;
 }
 .tabs button:hover { color: var(--text); }
 .tabs button.active { color: #fff; border-color: var(--border-hi); background: rgba(58,139,255,.18); box-shadow: inset 0 -2px 0 var(--accent); }
+/* 导航分组：一级为分组按钮，悬停 / 键盘聚焦时展开下拉 */
+.nav-group { position: relative; display: flex; }
+.tabs .nav-g { display: inline-flex; align-items: center; gap: 4px; }
+.nav-g .caret { font-size: 10px; opacity: .7; transition: transform .15s; }
+.nav-group.active > .nav-g { color: #fff; border-color: var(--border-hi); background: rgba(58,139,255,.18); box-shadow: inset 0 -2px 0 var(--accent); }
+.nav-menu { display: none; position: absolute; top: 100%; left: 0; z-index: 30; min-width: 250px; padding: 6px; margin-top: 6px;
+  background: #0b1630; border: 1px solid var(--border-hi); border-radius: 6px; box-shadow: 0 10px 30px rgba(0,0,0,.55); }
+.nav-menu::before { content: ""; position: absolute; left: 0; right: 0; top: -8px; height: 8px; } /* 鼠标从按钮移到菜单时不中断悬停 */
+.nav-menu.nav-menu-end { left: auto; right: 0; }
+.tabs .nav-menu button { display: flex; flex-direction: column; align-items: flex-start; gap: 2px; width: 100%; padding: 7px 10px; text-align: left; font-size: 13px; border-radius: 4px; box-shadow: none; }
+.tabs .nav-menu button b { font-weight: 600; color: var(--text); }
+.tabs .nav-menu button span { font-size: 11px; color: var(--muted); white-space: normal; }
+.tabs .nav-menu button:hover, .tabs .nav-menu button:focus-visible { background: rgba(58,139,255,.16); border-color: transparent; outline: none; }
+.tabs .nav-menu button.active { background: rgba(54,207,201,.12); border-color: rgba(54,207,201,.35); box-shadow: inset 2px 0 0 var(--accent); }
+.tabs .nav-menu button.active b { color: #fff; }
+@media (hover: hover) {
+  .nav-group:hover .nav-menu, .nav-group:focus-within .nav-menu { display: block; }
+  .nav-group:hover .caret, .nav-group:focus-within .caret { transform: rotate(180deg); }
+}
+.nav-group.nav-closed .nav-menu { display: none !important; }
+/* 二级菜单：当前分组的页面，位于顶栏第二行 */
+.subnav { order: 10; flex: 1 1 100%; display: flex; align-items: center; gap: 4px; flex-wrap: wrap; margin: -2px 0 -4px; padding-top: 6px; border-top: 1px solid rgba(43,74,128,.45); }
+.subnav-title { font-size: 12px; color: var(--muted); margin-right: 8px; padding-left: 2px; }
+.subnav-title::after { content: " ›"; color: var(--border-hi); }
+.subnav button { background: transparent; border: 1px solid transparent; color: var(--muted); padding: 3px 12px; border-radius: 12px; cursor: pointer; font-size: 13px; font-family: inherit; }
+.subnav button:hover { color: var(--text); background: rgba(58,139,255,.1); }
+.subnav button.active { color: #fff; background: rgba(54,207,201,.16); border-color: rgba(54,207,201,.45); }
 .status { display: flex; align-items: center; gap: 14px; font-size: 12px; }
 .threat { padding: 3px 10px; border-radius: 12px; border: 1px solid var(--border-hi); }
 .live { color: var(--muted); }
@@ -315,7 +341,7 @@ pre.cmd { background: #050b18; border: 1px solid var(--border); padding: 8px 10p
 @media (max-width: 1100px) {
   /* 窄屏时导航单独占一行并横向滚动，避免顶栏换行后遮挡内容 */
   .topbar { flex-wrap: wrap; gap: 8px 16px; padding: 8px 12px; }
-  .tabs { order: 3; flex: 1 1 100%; flex-wrap: nowrap; overflow-x: auto; scrollbar-width: none; }
+  .tabs { order: 3; flex: 1 1 100%; }
   .tabs button { white-space: nowrap; padding: 5px 12px; }
   .status { margin-left: auto; }
 }
@@ -608,3 +634,10 @@ pre.cmd { background: #050b18; border: 1px solid var(--border); padding: 8px 10p
   .inc-bulk, #incFoot { display: none !important; }
 }
 @media (max-width: 1400px) { .rp-grid { grid-template-columns: minmax(0, 1fr); } }
+/* 触屏没有悬停下拉：隐藏箭头；手机宽度下一级 / 二级菜单单行横向滑动 */
+@media (hover: none) { .nav-g .caret { display: none; } }
+@media (max-width: 560px) {
+  .tabs, .subnav { flex-wrap: nowrap; overflow-x: auto; scrollbar-width: none; }
+  .tabs::-webkit-scrollbar, .subnav::-webkit-scrollbar { display: none; }
+  .subnav button, .subnav-title { flex: none; white-space: nowrap; }
+}

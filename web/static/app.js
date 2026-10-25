@@ -242,15 +242,68 @@ function pie(id, items, rose = false, hint = '') {
 setInterval(() => { $('#clock').textContent = fmtTime(new Date().toISOString()); }, 1000);
 
 let currentTab = 'overview';
-$$('#tabs button').forEach((b) => b.addEventListener('click', () => switchTab(b.dataset.tab)));
 function switchTab(tab) {
   currentTab = tab;
-  $$('#tabs button').forEach((b) => b.classList.toggle('active', b.dataset.tab === tab));
+  $$('#tabs [data-tab]').forEach((b) => b.classList.toggle('active', b.dataset.tab === tab));
   $$('.tab').forEach((s) => s.classList.toggle('active', s.id === 'tab-' + tab));
+  renderNav(tab);
   loaders[tab]?.();
   // 等浏览器完成新标签页的布局后再校正尺寸；只处理可见图表，隐藏的图表保持原尺寸
   requestAnimationFrame(() => requestAnimationFrame(resizeCharts));
 }
+
+// 导航分组：一级菜单为“态势总览 / 威胁分析 / 事件处置 / 风险管理 / 系统配置”，分组悬停展开下拉可直达；
+// 进入分组后顶栏下方显示该组的二级菜单。点击分组本身回到该组最近访问的页面。
+const navLast = {};
+const navKids = (g) => $$('.nav-menu [data-tab]', g).filter((b) => !b.hidden); // 当前角色可见的页面
+function renderNav(tab) {
+  let cur = null;
+  $$('#tabs .nav-group').forEach((g) => {
+    const kids = navKids(g);
+    g.hidden = kids.length === 0; // 组内页面都无权访问时隐藏整个分组
+    const on = kids.some((b) => b.dataset.tab === tab);
+    g.classList.toggle('active', on);
+    if (on) cur = g;
+  });
+  const sub = $('#subnav');
+  const nav = $('#tabs');
+  if (!cur) {
+    sub.hidden = true;
+    revealIn(nav, $(`#tabs > [data-tab="${tab}"]`));
+    return;
+  }
+  navLast[cur.dataset.group] = tab;
+  sub.hidden = false;
+  sub.innerHTML = `<span class="subnav-title">${esc(cur.dataset.label)}</span>` + navKids(cur).map((b) => `<button type="button" data-sub="${esc(b.dataset.tab)}"`
+    + ` class="${b.dataset.tab === tab ? 'active' : ''}"${b.dataset.tab === tab ? ' aria-current="page"' : ''}>${esc(b.dataset.label)}</button>`).join('');
+  revealIn(nav, cur);
+  revealIn(sub, $('.active', sub));
+}
+// revealIn 在可横向滚动的菜单（手机宽度）中把当前项滚动到中间，只滚动菜单本身，不移动页面
+function revealIn(box, el) {
+  if (!el || box.scrollWidth <= box.clientWidth) return;
+  const d = el.getBoundingClientRect().left - box.getBoundingClientRect().left;
+  box.scrollLeft += d - (box.clientWidth - el.offsetWidth) / 2;
+}
+$$('#tabs [data-tab]').forEach((b) => b.addEventListener('click', () => {
+  switchTab(b.dataset.tab);
+  const g = b.closest('.nav-group');
+  if (g) { g.classList.add('nav-closed'); b.blur(); } // 选择后收起下拉，鼠标移出后恢复
+}));
+$$('#tabs .nav-group').forEach((g) => {
+  $('.nav-g', g).addEventListener('click', () => {
+    const kids = navKids(g);
+    const last = navLast[g.dataset.group];
+    switchTab(kids.some((b) => b.dataset.tab === last) ? last : kids[0].dataset.tab);
+  });
+  g.addEventListener('mouseleave', () => g.classList.remove('nav-closed'));
+  g.addEventListener('keydown', (e) => { if (e.key === 'Escape') { g.classList.add('nav-closed'); $('.nav-g', g).focus(); } });
+  g.addEventListener('focusin', (e) => { if (!g.contains(e.relatedTarget)) g.classList.remove('nav-closed'); }); // 键盘重新进入分组时恢复下拉
+});
+$('#subnav').addEventListener('click', (e) => {
+  const b = e.target.closest('[data-sub]');
+  if (b) switchTab(b.dataset.sub);
+});
 
 // ---------------- 下钻 ----------------
 // 态势总览中的 KPI、图表、排行与地图均可点击，跳转到攻击源或告警列表并带上筛选条件；
@@ -1693,6 +1746,7 @@ function applyRoles() {
   $$('.need-admin').forEach((el) => { el.hidden = !isAdmin(); });
   $$('.need-analyst').forEach((el) => { if (!canOperate()) el.hidden = true; });
   $$('.need-admin-enable input').forEach((el) => { el.disabled = !isAdmin(); });
+  renderNav(currentTab); // 无权访问的页面从菜单中隐藏后，同步分组与二级菜单
 }
 
 function toggleUserDrop(open) {

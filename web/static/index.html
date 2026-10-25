@@ -16,20 +16,37 @@
       <div class="subtitle">流量分析 · 攻击溯源 · 攻击面管理</div>
     </div>
   </div>
-  <nav class="tabs" id="tabs">
+  <!-- 一级菜单按工作场景分组：悬停分组可直接跳转到其中的页面，进入分组后顶栏下方显示该组的二级菜单 -->
+  <nav class="tabs" id="tabs" aria-label="主菜单">
     <button data-tab="overview" class="active">态势总览</button>
-    <button data-tab="attackers">攻击溯源</button>
-    <button data-tab="alerts">告警事件</button>
+    <div class="nav-group" data-group="threat" data-label="威胁分析">
+      <button type="button" class="nav-g" aria-haspopup="true">威胁分析<span class="caret" aria-hidden="true">▾</span></button>
+      <div class="nav-menu" role="menu">
+        <button data-tab="attackers" data-label="攻击溯源" role="menuitem"><b>攻击溯源</b><span>攻击源画像、定位与同源关联</span></button>
+        <button data-tab="alerts" data-label="告警事件" role="menuitem"><b>告警事件</b><span>实时告警与归档告警检索</span></button>
+        <button data-tab="rawlog" data-label="日志检索" role="menuitem" class="need-analyst"><b>日志检索</b><span>原始日志回溯与取证导出</span></button>
+        <button data-tab="surface" data-label="攻击面分析" role="menuitem"><b>攻击面分析</b><span>暴露的服务、入口与风险发现</span></button>
+      </div>
+    </div>
     <button data-tab="incidents">事件处置<span class="tab-badge" id="incBadge" hidden></span></button>
-    <button data-tab="surface">攻击面分析</button>
-    <button data-tab="assets">资产漏洞</button>
-    <button data-tab="assess">安全评估</button>
-    <button data-tab="reports">报表合规</button>
-    <button data-tab="rawlog" class="need-analyst">日志检索</button>
-    <button data-tab="notify">告警推送</button>
-    <button data-tab="sources">数据源</button>
-    <button data-tab="system" id="tabSystem" hidden>系统管理</button>
+    <div class="nav-group" data-group="risk" data-label="风险管理">
+      <button type="button" class="nav-g" aria-haspopup="true">风险管理<span class="caret" aria-hidden="true">▾</span></button>
+      <div class="nav-menu" role="menu">
+        <button data-tab="assess" data-label="安全评估" role="menuitem"><b>安全评估</b><span>安全评分、失陷研判与处置建议</span></button>
+        <button data-tab="assets" data-label="资产漏洞" role="menuitem"><b>资产漏洞</b><span>资产台账与漏洞关联</span></button>
+        <button data-tab="reports" data-label="报表合规" role="menuitem"><b>报表合规</b><span>周报月报与等保 2.0 合规检查</span></button>
+      </div>
+    </div>
+    <div class="nav-group" data-group="admin" data-label="系统配置">
+      <button type="button" class="nav-g" aria-haspopup="true">系统配置<span class="caret" aria-hidden="true">▾</span></button>
+      <div class="nav-menu nav-menu-end" role="menu">
+        <button data-tab="sources" data-label="数据源" role="menuitem"><b>数据源</b><span>日志接入、Syslog 发送端与断流</span></button>
+        <button data-tab="notify" data-label="告警推送" role="menuitem"><b>告警推送</b><span>钉钉 / 企业微信 / 飞书机器人</span></button>
+        <button data-tab="system" data-label="系统管理" role="menuitem" id="tabSystem" hidden><b>系统管理</b><span>账号、API 令牌与操作审计</span></button>
+      </div>
+    </div>
   </nav>
+  <nav class="subnav" id="subnav" aria-label="二级菜单" hidden></nav>
   <div class="status">
     <span class="threat" id="threatBadge">威胁等级 --</span>
     <span class="live" id="liveDot" title="实时推送连接状态">● 实时</span>
