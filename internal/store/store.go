@@ -165,6 +165,9 @@ type Totals struct {
 	Web      int64 `json:"web"`
 	Firewall int64 `json:"firewall"`
 	Outbound int64 `json:"outbound"`
+	DNS      int64 `json:"dns,omitempty"`    // DNS 查询日志
+	Auth     int64 `json:"auth,omitempty"`   // 主机 / VPN 认证日志
+	Egress   int64 `json:"egress,omitempty"` // 防火墙日志中内网主机访问公网的流量
 	Attacks  int64 `json:"attacks"`
 	Alerts   int64 `json:"alerts"`
 	Blocked  int64 `json:"blocked"`
@@ -195,8 +198,16 @@ type Store struct {
 	minTime    time.Time
 	maxTime    time.Time
 	surf       *surface
-	ruleBits   map[string]int // 规则 ID → 指纹位下标（同源关联分析用）
-	scores     []ScorePoint   // 安全评分历史（每小时一次）
+	ruleBits   map[string]int       // 规则 ID → 指纹位下标（同源关联分析用）
+	scores     []ScorePoint         // 安全评分历史（每小时一次）
+	incidents  map[uint64]*Incident // 安全事件（同一来源的告警合并处置）
+	incByKey   map[string]uint64    // 来源 IP → 最近的事件
+	nextInc    uint64
+	days       map[string]*DayStat // 按自然日的汇总（周报 / 月报）
+	curDay     *DayStat
+	dayStart   int64
+	dayEnd     int64
+	loc        *time.Location
 
 	// GeoLookup / IntelMatch 在创建新画像时调用。
 	GeoLookup  func(ip string) *geo.Info
@@ -209,6 +220,8 @@ func New(maxIPs, maxAlerts, alertsPerRule int, retention time.Duration) *Store {
 		ips: map[string]*IPProfile{}, buckets: map[int64]*Bucket{},
 		categories: map[string]int64{}, rules: map[string]int64{}, ruleNames: map[string]string{},
 		phases: map[string]int64{}, results: map[string]int64{}, surf: newSurface(), ruleBits: map[string]int{},
+		incidents: map[uint64]*Incident{}, incByKey: map[string]uint64{},
+		days: map[string]*DayStat{},
 	}
 }
 
@@ -290,12 +303,35 @@ func (s *Store) recordLocked(ev *model.Event, hits []model.Hit) RecordResult {
 		b = &Bucket{T: minute * 60}
 		s.buckets[minute] = b
 	}
-	if ev.Kind == model.KindWeb {
+	day := s.dayLocked(t)
+	day.Events++
+	switch ev.Kind {
+	case model.KindWeb:
 		s.totals.Web++
 		b.Web++
-	} else {
+		day.Web++
+	case model.KindDNS, model.KindAuth:
+		// DNS 查询与认证日志量大，只记录总量；命中异常时才以主体（内网主机 / 登录来源）建立画像
+		if ev.Kind == model.KindDNS {
+			day.DNS++
+		} else {
+			day.Auth++
+		}
+		if ev.Kind == model.KindDNS {
+			s.totals.DNS++
+		} else {
+			s.totals.Auth++
+		}
+		if !hasAttack(hits) {
+			return res
+		}
+	default:
 		s.totals.Firewall++
 		b.Fw++
+		day.Firewall++
+		if ev.DstIP != "" && geo.IsPrivate(ev.SrcIP) && !geo.IsPrivate(ev.DstIP) {
+			s.totals.Egress++ // 内网主机访问公网的出站流量（外连检测的数据基础）
+		}
 	}
 
 	p := s.ips[ev.SrcIP]
@@ -359,6 +395,7 @@ func (s *Store) recordLocked(ev *model.Event, hits []model.Hit) RecordResult {
 	if ev.Kind == model.KindWeb && ev.Status >= 200 && ev.Status < 300 {
 		hits = s.verifySuccess(ev, hits)
 	}
+	wasAttacker := p.Attacks > 0
 	attacked := false
 	for _, h := range hits {
 		if h.TagOnly {
@@ -374,6 +411,7 @@ func (s *Store) recordLocked(ev *model.Event, hits []model.Hit) RecordResult {
 		}
 		attacked = true
 		s.totals.Attacks++
+		day.recordHit(&h)
 		b.Attacks++
 		b.Sev[h.Severity]++
 		s.sevCount[h.Severity]++
@@ -420,11 +458,23 @@ func (s *Store) recordLocked(ev *model.Event, hits []model.Hit) RecordResult {
 			res.Alerts = append(res.Alerts, a)
 		}
 	}
+	if attacked {
+		bump(&day.Attackers, ev.SrcIP, 1, maxDayAttackers)
+		if p.Geo != nil && p.Geo.Country != "" {
+			bump(&day.Countries, p.Geo.Country, 1, maxDayCountries)
+		}
+		if !wasAttacker {
+			day.NewAttackers++
+		}
+		day.Alerts += int64(len(res.Alerts))
+	}
 	if attacked || len(p.Intel) > 0 {
 		p.recompute()
 	}
 	if ev.Kind == model.KindWeb {
 		s.surf.observeWeb(ev, hits, attacked)
+	} else if ev.Kind == model.KindDNS || ev.Kind == model.KindAuth {
+		s.hostFinding(ev, hits)
 	} else if c2 == nil && (geo.IsPrivate(ev.SrcIP) || ev.Outbound) && hasCategory(hits, CatBeacon) {
 		// 按固定间隔回连同一外部地址：疑似 C2 心跳，置信度低于命中情报的外连
 		h := hitOf(hits, CatBeacon)
@@ -490,12 +540,17 @@ func (s *Store) newAlert(ev *model.Event, h *model.Hit, p *IPProfile) *model.Ale
 		Category: h.Category, Severity: h.Severity, Phase: h.Phase, Result: h.Result, Target: truncate(ev.Target(), 300),
 		Method: ev.Method, Status: ev.Status, Evidence: h.Evidence, UA: truncate(ev.UA, 200), Source: ev.Source,
 	}
+	if r := ev.Asset; r != nil {
+		a.Asset, a.AssetLevel, a.Owner = r.Name, r.Level, r.Owner
+	}
+	a.Vuln = h.Vuln
 	if p.Geo != nil {
 		a.Location = p.Geo.Location()
 		if p.Geo.HasCoord {
 			a.Lat, a.Lon = p.Geo.Lat, p.Geo.Lon
 		}
 	}
+	a.IncidentID = s.attachIncidentLocked(a, p)
 	if len(s.alerts) < s.maxAlerts {
 		s.alerts = append(s.alerts, a)
 	} else {

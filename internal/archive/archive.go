@@ -761,3 +761,14 @@ func (a *Archive) Counts() (written, dropped int64) {
 	}
 	return a.written.Load(), a.dropped.Load()
 }
+
+// Health 返回累计失败批次、丢弃数与最近的错误（只读内存计数，不访问数据库），供后台任务判断归档是否异常。
+func (a *Archive) Health() (failed, dropped int64, lastErr string) {
+	if a == nil {
+		return 0, 0, ""
+	}
+	a.mu.Lock()
+	lastErr = a.lastErr
+	a.mu.Unlock()
+	return a.failed.Load(), a.dropped.Load(), lastErr
+}

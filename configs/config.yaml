@@ -10,7 +10,7 @@ time_correction: auto
 server:
   listen: ":8080"
   # 登录认证默认开启。未配置下方账号时，首次启动自动创建管理员 admin，初始密码输出在启动日志中，
-  # 首次登录后须修改密码；更多账号（管理员 / 只读）在大屏“系统管理”中添加。
+  # 首次登录后须修改密码；更多账号（管理员 / 运营分析员 / 只读）在大屏“系统管理”中添加。
   # 仅在可信内网、或由前置统一认证网关负责认证时才设为 false。
   auth: true
   # 可选：配置文件中的管理员账号（只读，不能在界面修改密码）。password 建议使用 `netsa hash-password` 生成的哈希
@@ -27,6 +27,8 @@ server:
   allow_networks: []
   #  - 10.0.0.0/8
   #  - 192.168.10.0/24
+  # 强制双因素认证：所有界面账号（配置文件账号除外）须绑定身份验证器（TOTP）后才能使用。等保三级要求身份鉴别采用两种以上组合的技术。
+  require_2fa: false
 
 # 被保护资产所在位置（用于在攻击地图上绘制攻击连线）
 home:
@@ -37,22 +39,56 @@ home:
 # 日志数据源：type 为 auto 时自动识别格式；paths 支持通配符，新出现的文件会被自动发现
 sources:
   - name: nginx
-    type: auto            # auto | nginx | firewall | nginx_json | netfilter | pfsense | windows_firewall | cisco_asa | kv_firewall | json_firewall
+    type: auto            # auto | nginx | firewall | dns | auth | nginx_json | netfilter | pfsense | windows_firewall | cisco_asa | kv_firewall | json_firewall
     paths: ["/var/log/nginx/*access*.log"]
     from_beginning: false # true 表示每次启动都先分析已有内容（适合演示或一次性补录；长期运行建议 false，避免重启后重复统计）
     host: ""              # 日志中没有 $host 时用于区分站点
+    silence: ""           # 断流告警阈值（如 10m、2h；off 关闭），为空使用 alert.source_silence
     # 使用自定义 log_format 时，把 nginx.conf 中的格式原样粘贴到这里：
     # log_format: '$remote_addr - $remote_user [$time_local] "$request" $status $body_bytes_sent "$http_referer" "$http_user_agent" "$http_x_forwarded_for" $request_time $host'
   - name: firewall
     type: firewall
     paths: ["/var/log/ufw.log", "/var/log/kern.log", "/var/log/firewalld"]
     from_beginning: false
+  # 主机认证日志：SSH 暴力破解 / 密码喷洒 / 破解成功、新建账号、加入特权组（也支持经 syslog 接收 Windows 安全事件与 VPN 登录日志）
+  - name: ssh
+    type: auth
+    paths: ["/var/log/auth.log", "/var/log/secure"]
+    from_beginning: false
+  # 内网 DNS 查询日志（BIND querylog / dnsmasq log-queries / CoreDNS / Windows DNS 调试日志 / Zeek dns.log / Suricata eve.json）：
+  # 发现 DNS 隧道、DGA 随机域名、DNSLog 带外回连、矿池与动态域名解析等失陷迹象
+  # - name: dns
+  #   type: dns
+  #   paths: ["/var/log/named/query.log"]
 
-# 接收防火墙 / 安全设备通过 syslog 推送的日志（格式自动识别）
+# 接收防火墙 / 安全设备 / 服务器通过 syslog 推送的日志（每个发送端独立识别格式与时区）。
+# 发送端在大屏“数据源 → Syslog 发送端”中查看与管理：登记名称与分组、设置断流阈值、阻止异常来源、开启白名单。
 syslog:
   enabled: true
   udp: ":5514"
   tcp: ":5514"
+  # syslog over TLS（RFC 5425）：配置 tls_client_ca 时要求发送端出示该 CA 签发的客户端证书（双向认证），可杜绝伪造发送端。
+  # 注意 UDP 的源地址可被伪造，对完整性要求高的设备建议改用 TCP / TLS。
+  tls: ""              # 例如 ":6514"
+  tls_cert: ""
+  tls_key: ""
+  tls_client_ca: ""
+  # 发送端白名单：开启后只接收已登记（允许）的发送端的日志，其余来源的 UDP 数据报被丢弃、TCP / TLS 连接被立即断开。
+  # 也可在界面中开启（可一键把当前活跃的发送端登记为允许）；此处设为 true 时界面中不能关闭。
+  allowlist: false
+  rate_limit: 0        # 单个发送端每秒最多接收的日志条数，超出部分丢弃并计数；0 不限制
+  senders_file: ""     # 界面登记的发送端与发送端统计，默认与 storage.snapshot 同目录的 syslog-senders.json
+  # 配置文件中登记的发送端（界面中只读）：按 IP 或网段登记名称、分组、动作（allow / block）与断流阈值
+  senders: []
+  #  - cidr: 10.0.0.1
+  #    name: 核心防火墙
+  #    group: 防火墙
+  #    silence: 10m          # 超过 10 分钟没有日志即推送“数据源断流”告警
+  #  - cidr: 10.1.0.0/24
+  #    name: 服务器区
+  #    group: 服务器
+  #  - cidr: 203.0.113.66
+  #    action: block         # 阻止：任何模式下都拒绝该来源
 
 # 真实 IP 还原：仅当直连地址属于可信代理时才信任 X-Forwarded-For / X-Real-IP
 real_ip:
@@ -146,6 +182,10 @@ detect:
     enum_window: 10m             # 接口遍历 / 批量爬取：窗口内同一来源对同一接口
     enum_ids: 300                #   请求的不同 ID 数达到该值
     beacon_conns: 8              # 周期性外连（疑似 C2 心跳）：内网主机按固定间隔连接同一外部地址的次数
+    auth_failures: 10            # 主机认证日志：fw_window 内同一来源登录失败次数达到该值判定暴力破解
+    auth_users: 5                #   尝试的不同账号数达到该值判定密码喷洒 / 账号枚举（多次失败后登录成功判定为破解成功）
+    dns_nxdomain: 60             # DNS：fw_window 内同一主机查询不存在的域名次数（疑似 DGA 僵尸程序）
+    dns_subdomains: 150          #   向同一主域名查询的不同子域名数（疑似 DNS 隧道）
 
 # 告警推送（威胁等级提升至高危及以上、疑似攻击成功时推送）
 # 告警推送：钉钉 / 企业微信 / 飞书群机器人，推荐直接在大屏“告警推送”页面添加（可测试、可分别选择推送等级）。
@@ -155,6 +195,9 @@ alert:
   dedup_window: 10m     # 同一 IP、同一规则、同一研判结果在该时间内只推送一次
   report_time: "09:00"  # 每日安全日报推送时间（按 timezone），推送给勾选了“接收每日安全日报”的机器人；off 关闭
   robots_file: ""       # 界面中添加的机器人保存位置，默认与 storage.snapshot 同目录的 alert-robots.json
+  # 数据源断流告警的默认阈值：跟踪中的日志文件、syslog 监听、登记的发送端超过该时间没有新日志即推送告警（恢复后再推送一次）；off 关闭。
+  # 同时推送：安全事件超过处置时限未关闭、未授权的 syslog 发送端、日志解析失败率突增、告警归档写入失败。
+  source_silence: 30m
   webhooks: []
   #  - name: 钉钉安全群
   #    type: dingtalk            # dingtalk | wecom | feishu | generic（通用 JSON）
@@ -182,3 +225,31 @@ archive:
   # batch_size: 1000            # 每批写入条数
   # flush_interval: 2s          # 未凑满一批时的最长等待时间
   # queue_size: 100000          # 内存队列容量，数据库长时间不可用时超出部分丢弃并计数
+
+# 原始日志留存：解析后的日志按小时压缩存放在本地，可按时间、IP、关键字检索，查看告警前后的原始日志并导出取证。
+# 已关闭的分段以 SHA-256 登记到哈希链清单，可在“日志检索”页校验是否被篡改或删除。
+# 《网络安全法》第二十一条要求网络日志留存不少于六个月，默认留存 180 天。
+rawlog:
+  enabled: false
+  dir: ""               # 默认与 storage.snapshot 同目录下的 rawlog
+  retention_days: 180   # 0 表示不按时间清理
+  max_size_gb: 0        # 总容量上限，超过时从最早的日期开始清理；0 不限制
+  attacks_only: false   # 只留存命中攻击规则的事件（节省空间，但无法回溯正常访问）
+
+# 防篡改审计链：登录、配置变更、事件处置、数据检索与导出等操作按月写入哈希链文件，可校验完整性、导出 CSV / JSONL。
+audit:
+  dir: ""               # 默认与 storage.snapshot 同目录下的 audit
+  retention_days: 180   # 0 表示永久保留
+
+# 周报 / 月报：在“报表合规”页随时查看与打印（另存为 PDF）；配置发信服务器后按计划自动发送邮件（报告附 HTML 文件）。
+report:
+  recipients: []        # 例如 [soc@example.com, ciso@example.com]
+  weekly: "mon 09:00"   # 每周一 9 点发送上一自然周的周报；off 关闭
+  monthly: "1 09:00"    # 每月 1 日 9 点发送上月月报；off 关闭
+  smtp:
+    host: ""            # 例如 smtp.exmail.qq.com
+    port: 465
+    username: ""
+    password: ""        # 也可通过环境变量 NETSA_SMTP_PASSWORD 提供
+    from: ""            # 例如 "netsa <soc@example.com>"
+    tls: ""             # ssl / starttls / none；为空时 465 端口为 ssl，其余为 starttls

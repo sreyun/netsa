@@ -1,14 +1,14 @@
 # netsa —— 网络安全态势感知与攻击面分析系统
 
-基于 Go 实现，以 **nginx 访问日志** 和 **防火墙日志** 为数据源，自动识别日志格式，完成攻击检测、攻击源溯源定位、威胁评分、态势可视化与攻击面分析。单个二进制、无外部依赖（前端、地图数据与离线定位库均已内置；可选接入 PostgreSQL 长期归档告警），支持 Docker Compose 一键部署与内网离线运行。
+基于 Go 实现，以 **nginx 访问日志**、**防火墙 / IDS 日志**、**主机认证日志** 与 **DNS 日志** 为数据源，自动识别日志格式，完成攻击检测、攻击源溯源定位、威胁评分、态势可视化与攻击面分析，并提供事件处置、误报抑制、资产与漏洞关联、原始日志留存、周报月报与等保合规等安全运营能力。单个二进制、无外部依赖（前端、地图数据与离线定位库均已内置；可选接入 PostgreSQL 长期归档告警），支持 Docker Compose 一键部署与内网离线运行。
 
 ## 功能
 
 | 模块 | 能力 |
 | --- | --- |
-| 日志采集 | 实时跟踪文件（通配符、自动发现新文件、logrotate 重命名与 copytruncate 轮转、超长行截断）、批量分析（支持 `.gz`）、Syslog UDP/TCP 接收（RFC3164/5424/6587） |
-| 格式自动识别 | **Web**：nginx/Apache combined、main（带 XFF）、vhost_combined、JSON（nginx `escape=json`、Caddy、Traefik）、IIS W3C（按 `#Fields` 指令解析）、任意自定义 `log_format`（可直接粘贴 nginx.conf 中的多行写法）<br>**防火墙**：iptables/UFW/firewalld/nftables 内核日志、pfSense/OPNsense filterlog、Windows 防火墙、Cisco ASA/FTD、Palo Alto（TRAFFIC/THREAT CSV）、FortiGate/华为 USG/H3C/深信服/山石等 key=value、JSON 防火墙日志<br>**IDS/IPS**：Suricata EVE JSON、Snort fast alert，以及 FortiGate IPS/UTM 等设备威胁日志（攻击名称映射到攻击分类与等级） |
-| 攻击检测 | 69 条特征规则（SQL 注入、XSS、目录穿越/文件包含、命令/代码执行、Log4Shell/OGNL/SpEL/SSTI、SSRF、XXE、反序列化、WebShell、ThinkPHP/WebLogic/Confluence/Exchange/F5/GPON/海康等已知漏洞、国产 OA、敏感文件探测、扫描器/测绘引擎指纹……）+ 行为检测（CC、目录枚举、Web/SSH/RDP 暴力破解及**破解成功研判**、**分布式暴力破解 / 撞库**（大量来源各尝试少量几次）、**接口遍历 / 批量爬取**（按 ID 遍历用户、订单等对象）、端口扫描、主机横向探测、流量洪泛）<br>多轮 URL 解码、`%u` 编码、HTML 实体、SQL 注释混淆归一化，抵抗常见绕过；Aho-Corasick 多模式预筛 + 由正则语法树推导的必要关键词条件，正常请求无需执行正则 |
+| 日志采集 | 实时跟踪文件（通配符、自动发现新文件、logrotate 重命名与 copytruncate 轮转、超长行截断）、批量分析（支持 `.gz`）、Syslog UDP/TCP 接收（RFC3164/5424/6587）、**Syslog over TLS（RFC 5425，可双向认证）**；**syslog 发送端识别、登记、分组、白名单 / 阻止与限速**；数据源与发送端**断流告警** |
+| 格式自动识别 | **Web**：nginx/Apache combined、main（带 XFF）、vhost_combined、JSON（nginx `escape=json`、Caddy、Traefik）、IIS W3C（按 `#Fields` 指令解析）、任意自定义 `log_format`（可直接粘贴 nginx.conf 中的多行写法）<br>**防火墙**：iptables/UFW/firewalld/nftables 内核日志、pfSense/OPNsense filterlog、Windows 防火墙、Cisco ASA/FTD、Palo Alto（TRAFFIC/THREAT CSV）、FortiGate/华为 USG/H3C/深信服/山石等 key=value、JSON 防火墙日志<br>**IDS/IPS**：Suricata EVE JSON、Snort fast alert，以及 FortiGate IPS/UTM 等设备威胁日志（攻击名称映射到攻击分类与等级）<br>**主机 / VPN 认证**：Linux auth.log / secure、Windows 安全事件（NXLog / Winlogbeat / Snare）、FortiGate / Cisco / OpenVPN VPN 登录、SQL Server 登录<br>**DNS**：BIND、dnsmasq、CoreDNS、Windows DNS、Zeek、Suricata DNS |
+| 攻击检测 | 69 条特征规则（SQL 注入、XSS、目录穿越/文件包含、命令/代码执行、Log4Shell/OGNL/SpEL/SSTI、SSRF、XXE、反序列化、WebShell、ThinkPHP/WebLogic/Confluence/Exchange/F5/GPON/海康等已知漏洞、国产 OA、敏感文件探测、扫描器/测绘引擎指纹……）+ 行为检测（CC、目录枚举、Web/SSH/RDP 暴力破解及**破解成功研判**、**分布式暴力破解 / 撞库**（大量来源各尝试少量几次）、**接口遍历 / 批量爬取**（按 ID 遍历用户、订单等对象）、端口扫描、主机横向探测、流量洪泛）<br>**主机与 DNS**：SSH / RDP / VPN 暴力破解、密码喷洒、**破解成功（账号失陷）**、日志被清除、新建账号 / 提权、服务与计划任务持久化；DNSLog 带外回连、DNS 隧道、DGA 与 NXDOMAIN 风暴、矿池与动态域名<br>多轮 URL 解码、`%u` 编码、HTML 实体、SQL 注释混淆归一化，抵抗常见绕过；Aho-Corasick 多模式预筛 + 由正则语法树推导的必要关键词条件，正常请求无需执行正则 |
 | 结果研判 | 依据响应码/响应体大小判断 **已拦截 / 失败 / 服务异常 / 疑似成功 / 未拦截**；仅对 SQL 注入、命令执行、敏感文件等能由响应判断成功的攻击给出“疑似成功”并升级风险 |
 | 攻击源溯源 | **真实 IP 还原**：可信代理（含 Cloudflare 内置网段）+ 多种客户端地址头（CF-Connecting-IP、True-Client-IP、Ali-CDN-Real-IP、X-Real-IP、X-Forwarded-For、RFC 7239 Forwarded）右向左解析，识别 XFF 伪造与**绕过 CDN 直连源站**<br>**多源定位**：ip2region（国内到城市+运营商）、MaxMind GeoLite2（经纬度+精度半径+ASN）、ip-api 在线库（经纬度、代理/IDC/移动网络标记）、反向 DNS、**区划地名库**（离线换算城市/省/国家中心坐标）、**自定义网段**（内网办公区/分支机构/VPN 地址池定位到具体地点）；**交叉比对给出置信度**；定位库**热更新**；按需 **RDAP/WHOIS** 查询网段归属与滥用投诉邮箱；识别 IDC/云主机、代理/VPN、Tor、网络空间测绘机构 |
 | 威胁画像 | 每个 IP 的威胁评分（0-100）、等级、攻击链阶段（侦察→凭证→利用→后门→影响）、命中规则、攻击目标、端口、UA、最近告警、处置命令；**同源关联分析**：按网段、ASN、工具指纹、攻击手法、攻击目标、扫描端口、测绘机构与时间等线索找出疑似同一攻击者/团伙的其他 IP |
@@ -18,7 +18,11 @@
 | 失陷检测 | **内网主机外连威胁情报地址**（木马回连 C2、挖矿、数据外传）判定为疑似失陷，放行为严重、拦截为高危；安全设备报出的内网主机恶意软件 / 远控通信同样记为失陷迹象；**无需情报的 C2 心跳检测**：内网主机按固定间隔（1 分钟~1 小时，波动不超过 12%）反复连接同一外部地址，判定为疑似失陷（中置信）；攻击成功研判按资产合并并给出置信度（WebShell 交互、命令执行成功或多种成功迹象为高置信） |
 | 处置联动 | 导出封禁列表（txt / nginx deny / 幂等 iptables / ipset / firewalld / Windows / CSV）、JSON 分析报告 |
 | 告警推送 | **钉钉 / 企业微信 / 飞书群机器人**（及通用 JSON Webhook）：每个机器人可**多选推送等级（中危 / 高危 / 严重）**，在大屏中添加、测试、启停；支持加签；去重、合并、按平台限速，超出部分汇总推送不丢失；附“查看溯源详情”链接 |
-| 登录与权限 | 专业安全平台风格的登录页（动态点阵地球与攻击轨迹），账号密码登录（PBKDF2 哈希），**管理员 / 只读**两种角色，首次登录强制修改初始密码，登录失败锁定，登录与操作审计，会话自动续期，可选 HTTPS |
+| 登录与权限 | 专业安全平台风格的登录页（动态点阵地球与攻击轨迹），账号密码登录（PBKDF2 哈希），**管理员 / 运营分析员 / 只读**三种角色，**双因素认证（TOTP 动态口令 + 一次性恢复码，可强制开启）**，**API 令牌**（Bearer，可设权限与有效期，含仅监控指标权限），首次登录强制修改初始密码，登录失败锁定，会话自动续期，可选 HTTPS |
+| 事件处置 | 告警按来源自动聚合为**安全事件**：待处理 / 处置中 / 已处置 / 误报 / 忽略，指派负责人、处置记录、批量处置，按等级与资产重要性计算**处置时限并推送超时提醒**；**误报抑制**规则（规则 + 类型 + 来源 + 目标组合、有效期、命中计数） |
+| 资产与漏洞 | 导入 CMDB 资产（负责人、部门、业务重要性、等保级别）与漏洞扫描结果（Nessus / OpenVAS / 绿盟等 CSV）；告警标注目标资产，**攻击利用的 CVE 在目标上存在时升级为严重并研判为疑似成功** |
+| 原始日志留存 | 按小时压缩留存（默认 180 天），按时间 / IP / 关键字检索、查看告警前后的原始日志、取证导出，**SHA-256 哈希链防篡改**校验 |
+| 报表与合规 | **周报 / 月报**（可打印为 PDF，定时邮件发送）、**等保 2.0（第三级）合规检查报告**（逐项判定、证据与整改建议）、**防篡改审计链**（登录、配置变更、处置、检索与导出，可校验、导出 CSV / JSONL）、Prometheus **`/metrics`** 监控指标 |
 | 告警归档（可选） | 配置 PostgreSQL 后告警**异步批量写入、按月自动分区**，长期留存；按**时间 / IP / 网段 / 规则 / 等级 / 类型 / 关键字**检索历史告警，统计 TOP 来源与规则、每日趋势，导出 CSV；不配置时保持单二进制无依赖部署 |
 | 时间与时区 | 日志时间按 `timezone` 解析，**实时日志整时区偏差自动校正**（如设备按 UTC 记录导致慢 8 小时），页面与告警消息统一按配置时区展示 |
 
@@ -212,13 +216,14 @@ IP 详情页的“同源关联分析”在全部攻击源中查找与当前 IP �
 ## 登录与账号
 
 - 登录认证默认开启。未在配置文件中设置 `server.username/password` 时，首次启动自动创建管理员 `admin`，**初始密码输出在启动日志中**，首次登录后必须修改；也可用环境变量 `NETSA_ADMIN_PASSWORD` 指定初始密码。
-- 角色：**管理员**可管理账号、告警推送等配置；**只读**账号只能查看态势与告警，适合值班大屏。账号在大屏“系统管理”页面添加，新账号与重置密码后的账号首次登录须修改密码。
+- 角色：**管理员**可管理账号、告警推送、资产、syslog 发送端等配置；**运营分析员**可处置事件、标记误报、修改漏洞状态、检索与导出原始日志，不能修改系统配置；**只读**账号只能查看态势、告警与事件，适合值班大屏。账号在大屏“系统管理”页面添加，新账号与重置密码后的账号首次登录须修改密码。
 - 密码使用 PBKDF2-HMAC-SHA256（60 万次迭代、随机盐）存储在 `users.json`（权限 0600，默认与快照同目录）；密码至少 8 位且包含字母、数字、符号中的两类。
 - 会话：HttpOnly + SameSite Cookie，签名令牌重启后仍有效，有访问时自动续期（`server.session_ttl`，默认 12 小时），自登录起最长 30 天；修改密码、角色变化、删除账号或退出登录后立即失效。
+- **双因素认证**：用户在右上角菜单“双因素认证”中扫码绑定身份验证器（Microsoft / Google Authenticator、阿里云、腾讯身份验证器等，TOTP 6 位 30 秒），获得 8 个一次性恢复码；之后登录需在密码之后输入动态口令（同一口令不能重放，验证失败同样计入登录锁定），开启后不能再用 HTTP Basic 认证绕过。`server.require_2fa: true` 时所有界面账号须先绑定才能使用；管理员可为丢失手机的用户重置。
 - 防暴力破解：同一账号同一来源连续失败 5 次锁定 15 分钟（不影响管理员从其他地址登录）；同一来源尝试多个账号失败 20 次锁定该来源；同一账号来自所有来源失败 50 次锁定该账号。账号不存在与密码错误返回相同提示与耗时。所有登录尝试记录在“系统管理 → 登录记录”。
-- **审计日志**：登录（含失败与锁定）、退出、修改密码、账号增删改、告警机器人的添加 / 修改 / 删除 / 测试、封禁列表导出、分析报告下载与历史告警导出，均记录操作人、来源 IP、时间与结果，在“系统管理 → 审计日志”查看（保留最近 500 条，随账号文件持久化）。
+- **操作审计**：登录（含失败与锁定）、退出、修改密码、双因素认证、账号与令牌管理、告警推送与发送端配置、事件处置、误报抑制、资产导入、原始日志检索与导出、报告生成与发送等，均记录操作人、来源 IP、时间与结果。记录按月写入 `audit/` 目录的 **SHA-256 哈希链**文件（`audit.retention_days`，默认 180 天），在“系统管理 → 操作审计”中检索、校验完整性、导出 CSV / JSONL；任何修改、删除、插入都会使校验失败，按留存策略清理旧记录时保留锚点，不会误报为篡改。
 - 忘记密码：在服务器上执行 `netsa passwd -c configs/config.yaml -u admin`（容器：`docker compose exec netsa /app/netsa passwd -c /app/configs/docker.yaml -u admin -p '新密码'`），运行中的服务自动生效。
-- 脚本调用 API 可使用 HTTP Basic 认证：`curl -u admin:密码 http://服务器:8080/api/export/blocklist?format=txt`。
+- 脚本与第三方系统建议使用 **API 令牌**（见“监控指标与 API 令牌”）；也可使用 HTTP Basic 认证（开启双因素的账号除外）：`curl -u admin:密码 http://服务器:8080/api/export/blocklist?format=txt`。
 - HTTPS：设置 `server.tls_cert` / `server.tls_key` 直接提供 HTTPS（并启用 HSTS），或部署在 HTTPS 反向代理之后。
 - 仅在可信内网或由前置统一认证网关负责认证时，才设置 `server.auth: false` 关闭登录。
 
@@ -261,6 +266,63 @@ IP 详情页的“同源关联分析”在全部攻击源中查找与当前 IP �
 - **安全日报**：每天 `alert.report_time`（默认 09:00，`off` 关闭）向勾选了“接收每日安全日报”的机器人推送安全评分与结论、近 24 小时攻击量及环比、活动 / 新增 / 高危攻击源、疑似失陷资产、主要攻击类型与攻击源、P0 / P1 优先处置事项；在“告警推送”页可对任一机器人点击“发送日报”立即发送。
 - **新增行为检测**：分布式暴力破解（`dist_window` 内同一登录接口失败登录 ≥ `dist_brute_logins` 次且来自 ≥ `dist_brute_ips` 个来源，401 / 403 / 429 计为失败）、接口遍历 / 批量爬取（`enum_window` 内同一来源对同一接口请求 ≥ `enum_ids` 个不同 ID 并成功返回，涉及用户 / 订单 / 账户等接口为高危，搜索引擎爬虫除外，归入新增的“数据窃取”攻击阶段与 ATT&CK 收集战术）、周期性外连（`beacon_conns` 次连接）。
 - 总览顶部的 **态势研判** 条给出一句话结论与近 1 小时攻击量环比、新增攻击源、活跃高危攻击源、疑似成功攻击、疑似失陷资产与安全评分，均可点击下钻。
+
+## 安全运营：事件处置与误报抑制
+
+告警是检测的产物，**事件**是处置的单位。同一来源在一段时间内的告警自动合并为一个安全事件（超过 24 小时没有新告警，或上一个事件已处置后再出现，归入新事件），在大屏 **事件处置** 页统一处置：
+
+- **处置状态**：待处理 → 处置中 → 已处置 / 误报 / 忽略；可指派负责人（管理员或运营分析员）、填写处置说明，**关闭事件必须填写说明**，处置过程（状态变化、指派、备注）全程记录。支持批量处置、只看我负责的、只看超时。
+- **处置时限（SLA）**：严重 1 小时、高危 4 小时、中危 24 小时、低危 72 小时；**涉及核心资产时按高一级计算**；事件等级升高时时限相应缩短。超时未关闭的事件推送提醒到告警机器人（每个事件提醒一次，较多时合并为一条），导航栏显示待处置 / 超时数。
+- **自动重开**：标记为误报 / 忽略的事件之后出现更高等级的告警时自动重新打开，并在处置记录中注明原因。
+- **误报抑制**：在告警列表或事件详情中对误报的告警点击“标记误报”，按 **检测规则、攻击类型、来源 IP / 网段、目标路径** 的组合生成抑制规则（可设有效期，可选同时把所属事件标记为误报）。命中抑制规则的攻击不产生告警、不计入攻击统计与威胁评分，只累计抑制次数用于审计；只按攻击类型抑制等范围过大的规则会被拒绝。
+- 告警、事件接口支持 API 令牌调用，便于对接 SOAR、工单系统自动处置（`POST /api/incidents/bulk`）。
+
+## Syslog 发送端管理与数据源健康
+
+在 **数据源 → Syslog 发送端** 中查看每个发送 syslog 的设备（源 IP）：
+
+- **发送端画像**：设备自报的主机名（经中继转发时区分设备）、TLS 客户端证书、协议（UDP / TCP / TLS）、识别出的日志格式、日志量与近 5 分钟速率、解析失败数与失败样例、时区校正、最近接收时间；每个发送端独立识别格式与时区，互不干扰。
+- **登记与分组**：按 IP 或网段登记设备名称、分组（防火墙 / WAF / 服务器 / VPN …）与断流阈值；告警的“数据来源”显示为设备名称。分组汇总在线、断流、被拒绝的设备数与日志速率。
+- **白名单与阻止**：开启 **发送端白名单** 后只接收已登记（允许）的发送端，其余来源的 UDP 数据报直接丢弃、TCP / TLS 连接在读取前立即断开，被拒绝的来源按 IP 计数并推送“未授权的 syslog 发送端”通知（同一来源 6 小时一次，伪造源地址的洪泛不会刷屏）。开启时可一键把近 24 小时活跃的发送端登记为允许，避免误断；白名单为空时不允许开启。“阻止”规则在任何模式下都拒绝该来源。也可在配置文件 `syslog.senders` 中登记（只读）、`syslog.allowlist: true` 强制开启。
+- **防伪造与防洪泛**：UDP 源地址可被伪造，对完整性要求高的设备建议使用 **TLS（RFC 5425）**，配置 `syslog.tls_client_ca` 后要求客户端证书（双向认证）；`syslog.rate_limit` 限制单个发送端的日志速率，异常设备不会挤占处理能力；发送端画像数有上限，伪造的大量来源不会挤掉已登记的设备。
+- **断流告警**：跟踪中的日志文件、syslog 监听与登记的发送端超过阈值（`alert.source_silence`，默认 30 分钟；可按数据源 / 发送端单独设置）没有新日志时推送“数据源断流”告警，恢复后再推送一次；一分钟内解析失败率超过一半（日志格式被修改）、告警归档连续写入失败或队列溢出时同样推送。断流状态显示在数据源页面。
+
+## 主机认证日志与 DNS 日志
+
+| 类型 | 支持的格式 | 检测 |
+| --- | --- | --- |
+| 主机 / VPN 认证（`type: auth`） | Linux `auth.log` / `secure`（sshd、PAM、useradd、usermod）、Windows 安全事件（NXLog / Winlogbeat JSON、Snare 及中英文事件文本，4624 / 4625 / 4740 / 4720 / 4728 / 4732 / 4756 / 1102 / 4697 / 7045 / 4698 / 4771 / 4776）、FortiGate SSL VPN 与管理登录、Cisco ASA AAA / AnyConnect、OpenVPN、SQL Server 登录 | 暴力破解（`auth_failures`）、密码喷洒 / 账号枚举（`auth_users` 个不同账号）、**多次失败后登录成功（账号疑似失陷）**、公网 IP 直接登录特权账号、安全日志被清除、新建账号、加入管理员组、新安装服务 / 计划任务 |
+| DNS（`type: dns`） | BIND querylog、dnsmasq、CoreDNS、Windows DNS 调试日志、Zeek `dns.log`、Suricata eve.json（`event_type: dns`）及 JSON DNS 日志 | **DNSLog 带外回连**（内网主机解析 dnslog.cn、ceye.io、oast.* 等，说明盲打的 RCE / SSRF / Log4j 已被触发）、矿池域名（挖矿木马）、DNS 隧道（超长高熵子域名、同一主域名下大量不同子域名）、DGA 随机域名与 NXDOMAIN 风暴、动态域名 / 内网穿透服务 |
+
+DNS 与主机事件的主体是**内网主机本身**（判断其是否失陷），不受 `detect.whitelist` 影响；命中后计入“失陷研判”与 ATT&CK 矩阵（T1071.004、T1568.002、T1496、T1070.001、T1136、T1098 等）。认证日志也可经 syslog 接收，没有远程来源的主机事件（如日志被清除）以发送日志的设备为主体。
+
+## 原始日志留存与检索
+
+开启 `rawlog.enabled` 后，解析后的日志按事件时间分小时压缩存放（`<dir>/YYYYMMDD/HH.log.gz`），写入在独立协程中进行（约 0.2µs/条，零分配），不影响实时检测：
+
+- **检索**：在 **日志检索** 页按时间范围、IP（来源或目的）、关键字、数据源、只看攻击检索；每个分段附带 IP 布隆过滤器，按 IP 检索时跳过不包含该 IP 的分段。告警列表、事件详情、IP 溯源详情中可一键查看**告警前后 5 分钟的原始日志**。检索与导出需要运营分析员以上权限（原始日志可能包含 Cookie、令牌等敏感信息），并记入审计。
+- **取证导出**：按条件导出原始日志（按时间先后，最多 5000 条）。
+- **防篡改**：分段关闭时计算 SHA-256 并写入哈希链清单（`manifest.jsonl`），在页面中可校验分段是否被修改、留存期内的分段是否被删除，以及清单本身是否被改动。
+- **留存**：默认 180 天（满足《网络安全法》日志留存不少于六个月的要求），可设置总容量上限；只想留存攻击事件时开启 `attacks_only`。
+
+## 资产与漏洞
+
+在 **资产漏洞** 页导入资产台账与漏洞扫描结果（CSV，UTF-8，按列名自动识别中英文表头，可下载模板），也可逐个登记：
+
+- **资产**：IP / 网段、域名（支持 `*.example.com`）、名称、负责人、部门、**业务重要性（核心 / 重要 / 一般）**、等保级别、环境、标签。导入方式可选合并（按 IP 更新）或替换。
+- **漏洞**：兼容 Nessus、OpenVAS、绿盟等扫描器导出的 CSV（IP / Host、Port、CVE、Name / 漏洞名称、Risk / 风险等级 / CVSS…），信息类结果自动跳过；“替换”方式以本次扫描为准，上次存在而本次未出现的漏洞标记为已修复。漏洞状态可由运营分析员修改（未修复 / 已修复 / 风险接受）。
+- **关联**：攻击事件按目的 IP 或站点域名标注目标资产（告警、推送消息、事件中显示资产名称、重要性与负责人）；**攻击利用的 CVE 在目标资产上存在且未修复时升级为严重，未被拦截时判定为疑似成功**；攻击类型或组件（SQL 注入、反序列化、Struts、WebLogic、Log4j…）与目标上的高危漏洞一致时等级提升一级；涉及核心资产的事件处置时限按高一级计算。
+
+## 周报 / 月报与等保合规
+
+- **周报 / 月报**：在 **报表合规** 页查看近 7 天 / 上周 / 近 30 天 / 上月的报告：自动生成的结论、攻击趋势与环比、攻击类型 / 攻击源 / 国家 TOP、事件处置统计（新建、关闭、误报、平均处置时长、按时处置率）、疑似失陷资产、资产与漏洞概况、优先处置建议、防护能力评估、数据源运行情况。点击“打开打印版”在浏览器中打印或另存为 PDF。系统按天汇总统计（随快照保存 400 天），报告不受 `storage.retention` 限制。
+- **定时邮件**：配置 `report.smtp` 与 `report.recipients` 后，每周一（`report.weekly`）发送上周周报、每月 1 日（`report.monthly`）发送上月月报，报告同时作为 HTML 附件；支持 SSL / STARTTLS，口令可用环境变量 `NETSA_SMTP_PASSWORD` 提供。
+- **等保 2.0 合规检查**（管理员）：依据 GB/T 22239-2019 第三级，对安全区域边界（入侵防范、恶意代码防范、安全审计）、安全计算环境（身份鉴别、访问控制、安全审计、入侵防范）、安全管理中心（审计管理、集中管控）、安全运维管理（资产管理、漏洞和风险管理、安全事件处置）及《网络安全法》日志留存要求，逐项给出 **符合 / 部分符合 / 不符合** 的判定、平台证据与整改建议，可打印为 PDF。该报告基于平台可观测的技术证据，供日常自查与整改跟踪，不能替代测评机构的正式测评。
+
+## 监控指标与 API 令牌
+
+- **API 令牌**：管理员在“系统管理 → API 令牌”中为账号创建令牌（`nsa_` 开头，只显示一次，服务端只保存哈希），权限可选只读 / 运营分析员 / 管理员 / **仅监控指标**，不超过所属账号的权限，可设有效期、随时吊销，记录最近使用时间与来源。调用：`curl -H "Authorization: Bearer nsa_…" http://服务器:8080/api/incidents?status=active`。
+- **Prometheus 指标**：`GET /metrics`（会话、Basic 认证或令牌，推荐“仅监控指标”令牌），包含各数据源的日志量 / 解析失败 / 断流状态 / 最新日志时间、syslog 发送端（在线、断流、被拒绝、限速丢弃）、攻击与告警（按等级）、攻击源数、安全评分、事件（按状态、超时数）、误报抑制、告警推送（成功 / 失败 / 排队）、告警归档与原始日志留存、Go 运行时等。
 
 ## 告警归档（可选，PostgreSQL）
 
@@ -311,10 +373,17 @@ docker compose --profile archive up -d
 | `server.users_file` / `session_ttl` | 账号文件位置 / 登录有效期（默认 12h，自动续期） |
 | `server.tls_cert` / `tls_key` | 直接提供 HTTPS |
 | `server.allow_networks` | 只允许这些来源网段访问大屏与 API（本机与 `/healthz` 不受限）；反向代理之后需配合 `real_ip.trusted_proxies` |
+| `server.require_2fa` | 强制所有界面账号绑定身份验证器（双因素认证） |
+| `syslog.tls` / `tls_cert` / `tls_key` / `tls_client_ca` | syslog over TLS 监听与证书；配置客户端 CA 时要求双向认证 |
+| `syslog.allowlist` / `senders` / `rate_limit` | 发送端白名单（`true` 时界面不能关闭）/ 配置文件登记的发送端（名称、分组、`allow` / `block`、断流阈值）/ 单发送端每秒日志上限 |
+| `alert.source_silence` / `sources[].silence` | 数据源断流告警的默认阈值（默认 30m，`off` 关闭）/ 单个数据源的阈值 |
+| `rawlog.*` | 原始日志留存：`enabled`、`dir`、`retention_days`（默认 180）、`max_size_gb`、`attacks_only` |
+| `audit.dir` / `retention_days` | 防篡改审计链的目录与留存天数（默认 180） |
+| `report.recipients` / `weekly` / `monthly` / `smtp.*` | 周报 / 月报的收件人、发送时间（如 `mon 09:00`、`1 09:00`）与发信服务器 |
 | `intel.blocklists` / `tor_exit_url` | 威胁情报：命中的来源告警，内网主机外连其中地址判为疑似失陷 |
 | `alert.base_url` / `dedup_window` | 告警消息中的大屏链接 / 推送去重窗口 |
 | `alert.report_time` | 每日安全日报推送时间（HH:MM，按 `timezone`，默认 09:00，`off` 关闭）；机器人需勾选“接收每日安全日报” |
-| `detect.thresholds` | 行为检测阈值：CC、目录扫描、暴力破解、端口扫描、主机探测、洪泛，以及分布式暴力破解（`dist_*`）、接口遍历（`enum_*`）、周期性外连（`beacon_conns`） |
+| `detect.thresholds` | 行为检测阈值：CC、目录扫描、暴力破解、端口扫描、主机探测、洪泛，以及分布式暴力破解（`dist_*`）、接口遍历（`enum_*`）、周期性外连（`beacon_conns`）、主机认证（`auth_failures`、`auth_users`）、DNS（`dns_nxdomain`、`dns_subdomains`） |
 | `alert.webhooks` | 配置文件方式的告警机器人：`type`、`url`、`secret`（加签）、`levels`（多选 medium / high / critical） |
 | `server.web_dir` / `serve -web` | 从磁盘目录加载前端页面，用于定制界面 |
 | `detect.whitelist` | 自有监控、扫描器等白名单，只统计流量不检测 |
@@ -336,6 +405,20 @@ docker compose --profile archive up -d
 | 接口 | 说明 |
 | --- | --- |
 | `GET /healthz` | 健康检查（无需认证） |
+| `GET /metrics` | Prometheus 指标（会话、Basic 或 API 令牌；“仅监控指标”令牌只能访问此接口） |
+| `POST /api/auth/login/2fa` | 双因素认证的第二步：`{"challenge":"…","code":"123456"}`（`/api/auth/login` 返回 `need_2fa` 与一次性挑战时使用） |
+| `POST /api/auth/2fa/setup` / `enable` / `disable` | 绑定身份验证器（返回密钥、otpauth 链接与二维码）/ 验证启用（返回恢复码）/ 关闭 |
+| `GET/POST /api/auth/tokens`、`DELETE /api/auth/tokens/{id}` | API 令牌管理（管理员） |
+| `GET /api/audit?from=&to=&user=&action=&q=&failed=1`、`GET /api/audit/export?format=csv|jsonl`、`POST /api/audit/verify` | 操作审计检索 / 导出 / 哈希链校验（管理员） |
+| `GET /api/incidents?status=active|closed|open…&severity=&assignee=me&overdue=1&q=` | 安全事件列表与各状态数量 |
+| `GET /api/incidents/{id}`、`POST /api/incidents/{id}`、`POST /api/incidents/bulk` | 事件详情 / 处置（`status`、`assignee`、`note`；批量时附 `ids`，运营分析员以上）、`GET /api/incidents/assignees` 可指派的负责人 |
+| `GET/POST /api/suppressions`、`DELETE /api/suppressions/{id}` | 误报抑制规则（写操作需运营分析员以上） |
+| `GET /api/syslog/senders`、`POST /api/syslog/senders`、`PUT/DELETE /api/syslog/senders/{id}`、`PUT /api/syslog/policy` | syslog 发送端画像、登记与白名单开关（写操作需管理员） |
+| `GET /api/rawlog/search?from=&to=&ip=&q=&source=&attacks=1&limit=`、`GET /api/rawlog/export?…`、`GET /api/rawlog/status`、`POST /api/rawlog/verify` | 原始日志检索 / 导出（运营分析员以上）/ 留存状态 / 完整性校验（管理员） |
+| `GET/POST /api/assets`、`PUT/DELETE /api/assets/{id}`、`POST /api/assets/import?type=assets|vulns&mode=merge|replace`、`GET /api/assets/template?type=` | 资产台账与导入（请求体为 CSV） |
+| `GET /api/vulns?status=&severity=&q=&ip=`、`PUT /api/vulns/{id}`、`DELETE /api/vulns/{id}` | 漏洞列表与状态修改 |
+| `GET /api/reports/periodic?period=week|month&range=recent|last&format=html`、`POST /api/reports/email` | 周报 / 月报（JSON 或可打印 HTML）/ 立即发送邮件（管理员） |
+| `GET /api/compliance/mlps?format=html` | 等保 2.0 合规检查报告（管理员） |
 | `POST /api/auth/login` / `POST /api/auth/logout` / `GET /api/auth/session` | 登录 / 退出 / 当前会话（其余接口均需登录，或使用 HTTP Basic 认证） |
 | `POST /api/auth/password` | 修改自己的密码 |
 | `GET/POST /api/auth/users`、`PUT/DELETE /api/auth/users/{name}`、`GET /api/auth/audit` | 账号管理与登录记录（管理员） |
@@ -348,7 +431,7 @@ docker compose --profile archive up -d
 | `GET /api/map?level=` | 地图数据：城市级地点（含攻击源列表）、国家与省份着色统计 |
 | `GET /api/attackers?level=&q=&sort=&limit=&offset=` | 攻击源列表；下钻条件 `country`、`city`、`net_type`、`isp`、`world`、`province`、`city_map`、`place`、`category`、`phase`、`technique`（ATT&CK 技术编号） |
 | `GET /api/ip/{ip}` / `GET /api/ip/{ip}/rdap` | IP 溯源详情（含 `related` 同源关联分析）/ WHOIS 注册信息 |
-| `GET /api/alerts?severity=&category=&result=&kind=&ip=&q=` | 告警查询；下钻条件 `phase`、`target`、`from` / `to`（Unix 秒或 RFC3339）、`technique` |
+| `GET /api/alerts?severity=&category=&result=&kind=&ip=&q=` | 告警查询；下钻条件 `phase`、`target`、`from` / `to`（Unix 秒或 RFC3339）、`technique`、`asset`（目标资产）、`incident`（所属事件） |
 | `GET /api/surface` | 攻击面分析 |
 | `GET /api/assessment` | 安全评估：七个维度评分与总评、P0~P3 处置建议、疑似失陷资产、ATT&CK 矩阵（`GET /api/report` 中同样包含） |
 | `GET /api/sources` / `GET /api/rules` | 数据源与运行状态 / 规则列表 |

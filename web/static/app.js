@@ -42,6 +42,7 @@ const api = async (path, method = 'GET', body) => {
     } catch (_) { /* 非 JSON 错误 */ }
     if (r.status === 401) goLogin(); // 登录已过期或被管理员注销
     else if (code === 'must_change_password') openPasswordForm(true);
+    else if (code === 'must_enroll_2fa' && typeof openTwoFactor === 'function') openTwoFactor(true);
     const err = new Error(msg);
     err.status = r.status;
     err.code = code;
@@ -94,8 +95,10 @@ function goLogin() {
 }
 
 // 当前登录账号；未开启登录认证时为管理员
-let me = { user: '', role: 'admin', auth: false, must_change: false };
+let me = { user: '', role: 'admin', auth: false, must_change: false, two_factor: false, must_enroll: false };
 const isAdmin = () => me.role === 'admin';
+// 运营分析员：可处置事件、标记误报、检索原始日志，不能修改系统配置
+const canOperate = () => me.role === 'admin' || me.role === 'analyst';
 let meta = { china_maps: {}, geo_providers: [] };
 const num = (n) => (n ?? 0).toLocaleString('zh-CN');
 const zero = (t) => !t || t.startsWith('0001');
@@ -829,15 +832,38 @@ async function loadAlerts() {
   $('#alSummary').innerHTML = `当前保留告警 <b>${num(sum.retained_total)}</b> 条（严重 ${num(rt.critical || 0)} · 高危 ${num(rt.high || 0)} · 中危 ${num(rt.medium || 0)} · 低危 ${num(rt.low || 0)}），`
     + `攻击命中共 <b>${num(sum.hits_total)}</b> 次（严重 ${num(hits.critical || 0)} · 高危 ${num(hits.high || 0)} · 中危 ${num(hits.medium || 0)}）。`
     + `<span class="muted">同一 IP 同一规则 ${esc(fmtDur(sum.window))}内最多记录 ${sum.per_rule} 条告警，其余重复命中只累加计数；最多保留最近 ${num(sum.max_alerts)} 条。当前列表最多显示 300 条。</span>`;
-  const rows = list.map((a) => `<tr>
+  alertRows = list;
+  const ops = canOperate();
+  const rows = list.map((a, i) => `<tr>
     <td class="nowrap muted">${esc(fmtShort(a.time))}</td><td>${badge(a.severity)}</td>
     <td><b>${esc(a.name)}</b><div class="muted">${esc(a.category)} · ${esc(PHASE[a.phase] || a.phase)}</div></td>
     <td>${ipLink(a.src_ip)}<div class="muted">${esc(a.location || '')}</div></td>
-    <td class="mono">${a.method ? esc(a.method) + ' ' : ''}${esc(a.target)}${a.status ? ` <span class="muted">[${a.status}]</span>` : ''}</td>
-    <td>${resTag(a.result)}</td><td class="evidence">${esc(a.evidence)}</td></tr>`).join('');
+    <td class="mono">${a.method ? esc(a.method) + ' ' : ''}${esc(a.target)}${a.status ? ` <span class="muted">[${a.status}]</span>` : ''}${assetLine(a)}</td>
+    <td>${resTag(a.result)}</td><td class="evidence">${esc(a.evidence)}</td>
+    <td class="nowrap">${a.incident_id ? `<button type="button" class="btn link" data-al="inc" data-i="${i}" title="打开所属的安全事件">事件 #${a.incident_id}</button>` : ''}
+      ${ops ? `<button type="button" class="btn" data-al="fp" data-i="${i}" title="生成误报抑制规则，之后同类命中不再告警">标记误报</button>` : ''}
+      ${ops && meta.rawlog ? `<button type="button" class="btn" data-al="raw" data-i="${i}" title="检索该来源前后 5 分钟的原始日志">原始日志</button>` : ''}</td></tr>`).join('');
   const none = drillState.alerts && meta.archive ? '内存中没有符合条件的告警（只保留最近的告警），可点击上方“在归档库中查询”查看更早的告警' : '暂无符合条件的告警';
-  $('#alTable').innerHTML = `<thead><tr><th>时间</th><th>等级</th><th>攻击类型</th><th>来源</th><th>目标</th><th>结果研判</th><th>证据 / 载荷</th></tr></thead><tbody>${rows || empty(7, none)}</tbody>`;
+  $('#alTable').innerHTML = `<thead><tr><th>时间</th><th>等级</th><th>攻击类型</th><th>来源</th><th>目标</th><th>结果研判</th><th>证据 / 载荷</th><th>处置</th></tr></thead><tbody>${rows || empty(8, none)}</tbody>`;
 }
+let alertRows = [];
+// 目标资产与关联漏洞（登记了资产台账时显示）
+const IMP = { core: '核心', important: '重要', normal: '一般' };
+function assetLine(a) {
+  if (!a.asset && !a.vuln) return '';
+  const imp = a.asset_level ? `<span class="chip ${a.asset_level === 'core' ? 'warn' : ''}">${esc(IMP[a.asset_level] || a.asset_level)}</span>` : '';
+  return `<div class="asset-line">${a.asset ? `资产 ${esc(a.asset)} ${imp}${a.owner ? ` <span class="muted">负责人 ${esc(a.owner)}</span>` : ''}` : ''}`
+    + `${a.vuln ? `<div class="lv-high">关联漏洞：${esc(a.vuln)}</div>` : ''}</div>`;
+}
+$('#alTable').addEventListener('click', (e) => {
+  const b = e.target.closest('button[data-al]');
+  if (!b) return;
+  const a = alertRows[+b.dataset.i];
+  if (!a) return;
+  if (b.dataset.al === 'inc') openIncident(a.incident_id);
+  else if (b.dataset.al === 'fp') openSuppress(a);
+  else if (b.dataset.al === 'raw') openRawlogAround(a.src_ip, a.time);
+});
 let alDebounce;
 $('#alSearch').addEventListener('input', () => { clearTimeout(alDebounce); alDebounce = setTimeout(loadAlerts, 300); });
 ['#alSev', '#alCat', '#alResult', '#alKind'].forEach((s) => $(s).addEventListener('change', loadAlerts));
@@ -1086,7 +1112,7 @@ async function loadSources() {
   $('#procCount').textContent = `已处理 ${num(r.processed)} 条事件 · 运行 ${rt.uptime || '-'} · 内存 ${rt.heap_mb ?? '-'} MB · 待溯源 ${r.geo_pending ?? 0}`;
   $('#srcTable').innerHTML = `<thead><tr><th>名称</th><th>路径/地址</th><th>配置类型</th><th>自动识别格式</th><th>状态</th><th class="num">行数</th><th class="num">解析成功</th><th class="num">失败</th><th>最近事件时间</th><th>最近失败样例</th></tr></thead><tbody>${
     (r.sources || []).map((s) => `<tr><td>${esc(s.name)}</td><td class="mono">${esc(s.path)}</td><td>${esc(s.type)}</td><td><span class="chip">${esc(s.detected || '-')}</span></td>
-      <td>${esc(SRC_STATUS[s.status] || s.status)}${s.last_error ? `<div class="lv-high" style="font-size:11px">${esc(s.last_error)}</div>` : ''}${s.time_offset
+      <td>${s.silent ? `<b class="lv-critical" title="超过 ${esc(s.silence)} 没有新日志，已推送断流告警">● 断流</b> <span class="muted">最后活动 ${esc(fmtShort(s.last_active))}</span><br>` : ''}${esc(SRC_STATUS[s.status] || s.status)}${s.last_error ? `<div class="lv-high" style="font-size:11px">${esc(s.last_error)}</div>` : ''}${s.time_offset
         ? `<div class="lv-medium" style="font-size:11px" title="日志时间与实际时间相差整时区，已自动校正。通常是日志产生方（服务器 / 设备）按 UTC 等其他时区记录，而 timezone 配置为 ${esc(meta.timezone || '本地时区')}。可将日志产生方的时区改为一致，或忽略（已自动校正）。">时区已自动校正 ${esc(s.time_offset)}</div>` : ''}</td>
       <td class="num">${num(s.lines)}</td><td class="num">${num(s.parsed)}</td><td class="num">${s.failed ? `<span class="lv-medium">${num(s.failed)}</span>` : 0}</td>
       <td class="nowrap muted">${esc(fmtShort(s.last_event))}</td><td class="evidence">${esc(s.sample_failed || '')}</td></tr>`).join('') || empty(10, '未配置数据源')}</tbody>`;
@@ -1096,12 +1122,14 @@ async function loadSources() {
     <div class="k">WHOIS / RDAP</div><div>${meta.rdap ? '已启用（IP 详情中按需查询）' : '未启用'}</div>
     <div class="k">特征规则</div><div>${meta.rules} 条 + 行为检测（CC / 目录扫描 / 暴力破解 / 端口扫描 / 主机探测 / 洪水）</div>
     <div class="k">时区</div><div>${esc(meta.timezone || '服务器本地时区')}${meta.time_correction ? ' · <span class="muted">实时日志与实际时间相差整时区时自动校正（time_correction: auto）</span>' : ' · <span class="muted">未开启时区自动校正</span>'}</div>
-    <div class="k">Syslog 接收</div><div>${sl.enabled ? `UDP ${esc(sl.udp || '-')} · TCP ${esc(sl.tcp || '-')}` : '未启用'}</div>
+    <div class="k">Syslog 接收</div><div>${sl.enabled ? `UDP ${esc(sl.udp || '-')} · TCP ${esc(sl.tcp || '-')}${sl.tls ? ` · TLS ${esc(sl.tls)}` : ''}${sl.allowlist ? ' · <span class="nt-on">发送端白名单</span>' : ''}${sl.rate_limit ? ` · 单发送端限速 ${num(sl.rate_limit)} 条/秒` : ''}` : '未启用'}</div>
+    <div class="k">断流告警</div><div>${esc(r.silence ? r.silence : '-')} <span class="muted">（实时数据源超过该时间没有新日志时推送告警，恢复后再推送一次）</span></div>
     <div class="k">告警归档</div><div>${meta.archive ? 'PostgreSQL（历史告警可在“告警事件 → 历史告警”中查询与导出）' : '未启用 <span class="muted">（配置 archive.dsn 后可长期留存与检索历史告警）</span>'}</div>
-    <div class="k">支持的日志格式</div><div>nginx/Apache combined、main(XFF)、vhost、JSON、自定义 log_format；iptables/UFW/firewalld、pfSense/OPNsense、Windows 防火墙、Cisco ASA、FortiGate/华为/H3C/深信服等 key=value、JSON 防火墙日志</div>
+    <div class="k">支持的日志格式</div><div>nginx/Apache combined、main(XFF)、vhost、JSON、自定义 log_format；iptables/UFW/firewalld、pfSense/OPNsense、Windows 防火墙、Cisco ASA、FortiGate/华为/H3C/深信服等 key=value、JSON 防火墙日志；DNS（BIND / dnsmasq / CoreDNS / Windows DNS / Zeek / Suricata）；认证（Linux auth.log、Windows 安全事件、FortiGate / Cisco / OpenVPN VPN 登录、SQL Server 登录）</div>
     <div class="k">日志时区</div><div>${esc(meta.timezone || '系统时区')}</div>
     <div class="k">版本</div><div>netsa ${esc(meta.version)} · ${esc(rt.go || '')} · 启动于 ${esc(fmtTime(meta.started))}</div></div>`;
   if (meta.archive) await loadArchiveStatus();
+  await loadSenders();
 }
 const fmtBytes = (b) => (b >= 1 << 30 ? (b / (1 << 30)).toFixed(2) + ' GB' : b >= 1 << 20 ? (b / (1 << 20)).toFixed(1) + ' MB' : Math.round(b / 1024) + ' KB');
 async function loadArchiveStatus() {
@@ -1156,7 +1184,7 @@ async function openIP(ip) {
   const tags = Object.keys(p.tags || {}).map((t) => `<span class="chip">${esc(t)}</span>`).join('');
   const intel = (p.intel || []).map((t) => `<span class="chip warn">情报: ${esc(t)}</span>`).join('');
   // 失陷迹象：外连恶意地址、安全设备报出的恶意软件、周期性外连（该地址是本方主机，不是外部攻击者）
-  const comp = ['恶意外连', '恶意软件/远控', '可疑外连'].filter((c) => (p.categories || {})[c]);
+  const comp = ['恶意外连', '恶意软件/远控', '可疑外连', 'DNS隧道', '带外探测回连', 'DGA域名', '挖矿'].filter((c) => (p.categories || {})[c]);
   const compBanner = comp.length ? `<div class="comp-banner">⚠ 该主机疑似已失陷（${comp.map(esc).join('、')}）：请立即隔离排查，详见“安全评估 → 失陷研判”</div>` : '';
   $('#drawerTitle').innerHTML = `<div class="ipbig">${esc(ip)} ${badge(s.level)} <span style="font-size:14px">威胁评分 <b style="color:${LV_COLOR[s.level]}">${Math.round(s.score)}</b></span></div><div>${intel}${tags}</div>${compBanner}`;
 
@@ -1238,7 +1266,7 @@ async function openIP(ip) {
     ${ports ? `<h4>探测端口</h4><div class="chips">${ports}</div>` : ''}
     ${status ? `<h4>响应状态码</h4><div class="chips">${status}</div>` : ''}
     ${uas ? `<h4>User-Agent</h4>${uas}` : ''}
-    <h4>最近告警${meta.archive ? ' <button type="button" class="btn" id="hsFromIP" style="margin-left:8px;font-weight:400">查看全部历史告警（归档库）</button>' : ''}</h4><div class="scroll"><table class="table"><thead><tr><th>时间</th><th>规则</th><th>结果</th><th>目标</th><th>证据</th></tr></thead><tbody>${recent || empty(5)}</tbody></table></div>
+    <h4>最近告警${meta.archive ? ' <button type="button" class="btn" id="hsFromIP" style="margin-left:8px;font-weight:400">查看全部历史告警（归档库）</button>' : ''}${canOperate() && meta.rawlog ? ' <button type="button" class="btn" id="rawFromIP" style="margin-left:8px;font-weight:400">检索原始日志</button>' : ''}</h4><div class="scroll"><table class="table"><thead><tr><th>时间</th><th>规则</th><th>结果</th><th>目标</th><th>证据</th></tr></thead><tbody>${recent || empty(5)}</tbody></table></div>
     ${relHTML}
     <h4>处置建议</h4>
     ${advice.map((a) => `<div class="note" style="color:#b7eb8f">• ${esc(a)}</div>`).join('')}
@@ -1272,6 +1300,7 @@ netsh advfirewall firewall add rule name="netsa-block-${esc(ip)}" dir=in action=
     } catch (e) { console.error(e); }
   }
   if ($('#hsFromIP')) $('#hsFromIP').onclick = () => openHistory(ip);
+  if ($('#rawFromIP')) $('#rawFromIP').onclick = () => { closeDrawer(); openRawlogAround(ip, p.last_seen, 24 * 60); };
   $('#rdapBtn').onclick = async () => {
     const box = $('#rdapBox');
     box.innerHTML = '<div class="muted">查询中...</div>';
@@ -1648,7 +1677,7 @@ $('#ntTable').addEventListener('click', async (e) => {
 });
 
 // ---------------- 账号与登录 ----------------
-const ROLE = { admin: '管理员', viewer: '只读' };
+const ROLE = { admin: '管理员', analyst: '运营分析员', viewer: '只读', metrics: '监控指标' };
 
 function renderUserMenu() {
   if (!me.auth) return; // 未开启登录认证
@@ -1657,6 +1686,13 @@ function renderUserMenu() {
   $('#userRole').textContent = ROLE[me.role] || me.role;
   $('#tabSystem').hidden = !isAdmin();
   $('#ntAdd').hidden = !isAdmin();
+  applyRoles();
+}
+// 按角色显示操作入口（服务端同样按角色校验，这里只是避免显示无权使用的按钮）
+function applyRoles() {
+  $$('.need-admin').forEach((el) => { el.hidden = !isAdmin(); });
+  $$('.need-analyst').forEach((el) => { if (!canOperate()) el.hidden = true; });
+  $$('.need-admin-enable input').forEach((el) => { el.disabled = !isAdmin(); });
 }
 
 function toggleUserDrop(open) {
@@ -1715,28 +1751,29 @@ $('#pwForm').addEventListener('submit', (e) => {
 let users = [];
 async function loadSystem() {
   if (!isAdmin()) return;
-  const [u, audit] = await Promise.all([api('/api/auth/users'), api('/api/auth/audit?limit=100')]);
+  const u = await api('/api/auth/users');
   users = u.users || [];
-  const admins = users.filter((x) => x.role === 'admin').length;
-  $('#userCount').textContent = `共 ${users.length} 个 · 管理员 ${admins} 个`;
-  $('#userTable').innerHTML = `<thead><tr><th>用户名</th><th>角色</th><th>状态</th><th>最近登录</th><th>密码修改</th><th>创建时间</th><th class="num">操作</th></tr></thead><tbody>${users.map((x) => {
+  const by = (r) => users.filter((x) => x.role === r).length;
+  const tf = users.filter((x) => x.two_factor).length;
+  $('#userCount').textContent = `共 ${users.length} 个 · 管理员 ${by('admin')} · 运营分析员 ${by('analyst')} · 只读 ${by('viewer')} · 已启用双因素 ${tf} 个${meta.require_2fa ? '（已强制双因素认证）' : ''}`;
+  const roleChip = (r) => `<span class="chip ${r === 'admin' ? 'warn' : ''}">${esc(ROLE[r] || r)}</span>`;
+  $('#userTable').innerHTML = `<thead><tr><th>用户名</th><th>角色</th><th>状态</th><th>双因素认证</th><th>最近登录</th><th>密码修改</th><th>创建时间</th><th class="num">操作</th></tr></thead><tbody>${users.map((x) => {
     const cfg = x.source === 'config';
     const self = x.name === u.me;
+    const roleSel = `<select data-uact="role" data-name="${esc(x.name)}" title="修改角色（该账号需重新登录后生效）">${['admin', 'analyst', 'viewer'].map((r) => `<option value="${r}" ${r === x.role ? 'selected' : ''}>${ROLE[r]}</option>`).join('')}</select>`;
     const acts = cfg ? '<span class="chip" title="来自配置文件 server.username，请在配置文件中修改">配置文件</span>'
-      : `<button class="btn" data-uact="reset" data-name="${esc(x.name)}">重置密码</button>`
-        + ` <button class="btn" data-uact="role" data-name="${esc(x.name)}">${x.role === 'admin' ? '设为只读' : '设为管理员'}</button>`
+      : `${roleSel} <button class="btn" data-uact="reset" data-name="${esc(x.name)}">重置密码</button>`
+        + (x.two_factor ? ` <button class="btn" data-uact="reset2fa" data-name="${esc(x.name)}" title="用户丢失身份验证器时使用：清除绑定，下次登录只需密码（强制双因素时会要求重新绑定）">重置双因素</button>` : '')
         + ` <button class="btn danger" data-uact="del" data-name="${esc(x.name)}">删除</button>`;
+    const tfCell = x.two_factor ? `<span class="nt-on">已启用</span> <span class="muted">恢复码剩余 ${x.recovery_left || 0}</span>`
+      : cfg ? '<span class="muted">配置文件账号不支持</span>' : `<span class="${meta.require_2fa ? 'nt-warn' : 'muted'}">未启用</span>`;
     return `<tr><td><b>${esc(x.name)}</b>${self ? ' <span class="muted">（当前账号）</span>' : ''}</td>
-      <td>${x.role === 'admin' ? '<span class="chip warn">管理员</span>' : '<span class="chip">只读</span>'}</td>
-      <td>${x.must_change ? '<span class="nt-warn">待修改初始密码</span>' : '<span class="nt-on">正常</span>'}</td>
+      <td>${roleChip(x.role)}</td>
+      <td>${x.must_change ? '<span class="nt-warn">待修改初始密码</span>' : '<span class="nt-on">正常</span>'}</td><td class="nowrap">${tfCell}</td>
       <td class="nowrap muted">${esc(fmtShort(x.last_login))}</td><td class="nowrap muted">${esc(fmtShort(x.changed))}</td>
       <td class="nowrap muted">${esc(fmtShort(x.created))}</td><td class="nowrap num">${acts}</td></tr>`;
   }).join('')}</tbody>`;
-  $('#auditTable').innerHTML = `<thead><tr><th>时间</th><th>账号</th><th>来源 IP</th><th>操作</th><th>结果</th><th>详情 / 客户端</th></tr></thead><tbody>${audit.map((a) => `<tr>
-    <td class="nowrap muted">${esc(fmtShort(a.time))}</td><td>${esc(a.user)}</td><td class="mono">${esc(a.ip)}</td>
-    <td class="nowrap">${esc(a.action || '登录')}</td>
-    <td>${a.ok ? '<span class="nt-on">成功</span>' : `<span class="nt-err-inline">失败</span> <span class="muted">${esc(a.reason || '')}</span>`}</td>
-    <td class="muted evidence">${esc(a.detail || a.agent || '')}</td></tr>`).join('') || empty(6, '暂无记录')}</tbody>`;
+  await Promise.all([loadTokens(), loadAudit()]);
 }
 
 // 账号表单：mode 为 create（新增）或 reset（重置密码）
@@ -1785,6 +1822,17 @@ $('#userForm').addEventListener('submit', (e) => {
     } catch (err) { msg(err.message); }
   });
 });
+// 修改角色（下拉框）
+$('#userTable').addEventListener('change', async (e) => {
+  const sel = e.target.closest('select[data-uact="role"]');
+  if (!sel) return;
+  const name = sel.dataset.name;
+  const u = users.find((x) => x.name === name);
+  if (!u || sel.value === u.role) return;
+  if (!confirm(`确定将「${name}」设为${ROLE[sel.value]}？该账号需重新登录后生效。`)) { sel.value = u.role; return; }
+  try { await api('/api/auth/users/' + encodeURIComponent(name), 'PUT', { role: sel.value }); } catch (err) { alert(err.message); }
+  loadSystem().catch(console.error);
+});
 $('#userTable').addEventListener('click', async (e) => {
   const b = e.target.closest('button[data-uact]');
   if (!b) return;
@@ -1794,10 +1842,9 @@ $('#userTable').addEventListener('click', async (e) => {
   const path = '/api/auth/users/' + encodeURIComponent(name);
   try {
     if (b.dataset.uact === 'reset') { openUserForm('reset', name); return; }
-    if (b.dataset.uact === 'role') {
-      const role = u.role === 'admin' ? 'viewer' : 'admin';
-      if (!confirm(`确定将「${name}」设为${ROLE[role]}？该账号需重新登录后生效。`)) return;
-      await api(path, 'PUT', { role });
+    if (b.dataset.uact === 'reset2fa') {
+      if (!confirm(`确定重置「${name}」的双因素认证？其身份验证器绑定与恢复码将被清除，已登录的会话立即失效。`)) return;
+      await api(path, 'PUT', { reset_2fa: true });
     }
     if (b.dataset.uact === 'del') {
       if (!confirm(`确定删除账号「${name}」？其已登录的会话将立即失效。`)) return;
@@ -1831,10 +1878,12 @@ document.addEventListener('fullscreenchange', () => setTimeout(resizeCharts, 200
   try {
     const s = await api('/api/auth/session');
     if (!s.authenticated) { goLogin(); return; }
-    me = { user: s.user, role: s.role, auth: s.auth_enabled, must_change: s.must_change };
+    me = { user: s.user, role: s.role, auth: s.auth_enabled, must_change: s.must_change, two_factor: s.two_factor, must_enroll: s.must_enroll };
   } catch (_) { return; }
   renderUserMenu();
+  if (!me.auth) applyRoles();
   if (me.must_change) { openPasswordForm(true); return; }
+  if (me.must_enroll) { openTwoFactor(true); return; } // 安全策略要求先绑定身份验证器
   try { meta = await api('/api/meta'); } catch (e) { console.error(e); }
   setDisplayTimezone(meta.timezone);
   $('#alModeBar').hidden = !meta.archive;
@@ -1846,11 +1895,18 @@ document.addEventListener('fullscreenchange', () => setTimeout(resizeCharts, 200
   openFromHash();
 })();
 
+// 页面内定位链接中的附加参数（如 incident=12、overdue=1），由各页面读取后清空
+let hashParams = new URLSearchParams();
 // 告警消息中的“查看溯源详情”链接形如 /#ip=1.2.3.4，打开后直接显示该 IP 的溯源详情
 function openFromHash() {
   // #tab=assess：日报消息中的“查看安全评估”链接
-  const t = /^#tab=(\w+)$/.exec(location.hash);
-  if (t && loaders[t[1]] && !$('#tabs [data-tab="' + t[1] + '"]').hidden) { switchTab(t[1]); return; }
+  // #tab=incidents&incident=12：事件超时提醒中的链接；#tab=sources：数据源断流通知
+  const t = /^#tab=(\w+)((?:&[\w=%.-]*)*)$/.exec(location.hash);
+  if (t && loaders[t[1]] && !$('#tabs [data-tab="' + t[1] + '"]').hidden) {
+    hashParams = new URLSearchParams(t[2].slice(1));
+    switchTab(t[1]);
+    return;
+  }
   const m = /^#ip=(.+)$/.exec(location.hash);
   if (!m) return;
   let ip = '';

@@ -10,7 +10,9 @@ import (
 	"strings"
 	"time"
 
+	"netsa/internal/audit"
 	"netsa/internal/auth"
+	"netsa/internal/qr"
 )
 
 const sessionCookie = "netsa_session"
@@ -25,27 +27,48 @@ func sessionOf(r *http.Request) *auth.Session {
 
 // publicPaths 不需要登录即可访问（登录页及其资源、登录接口）。
 var publicPaths = map[string]bool{
-	"/login.html": true, "/login.js": true, "/login.css": true, "/api/auth/login": true, "/api/auth/session": true,
+	"/login.html": true, "/login.js": true, "/login.css": true, "/api/auth/login": true, "/api/auth/login/2fa": true, "/api/auth/session": true,
 }
 
 // mustChangeAllowed 是使用初始密码登录、尚未修改密码时仍可访问的接口。
 var mustChangeAllowed = map[string]bool{"/api/auth/session": true, "/api/auth/password": true, "/api/auth/logout": true}
 
-// needsAdmin 判断请求是否需要管理员权限：除登录相关接口外的所有写操作，以及账号与审计查询。
-func needsAdmin(r *http.Request) bool {
+// mustEnrollAllowed 是策略要求启用双因素认证、尚未绑定时仍可访问的接口。
+var mustEnrollAllowed = map[string]bool{"/api/auth/session": true, "/api/auth/logout": true, "/api/auth/2fa/setup": true, "/api/auth/2fa/enable": true}
+
+// selfService 是任何已登录账号都可以执行的写操作（只作用于自己的账号）。
+var selfService = map[string]bool{
+	"/api/auth/login": true, "/api/auth/login/2fa": true, "/api/auth/logout": true, "/api/auth/password": true,
+	"/api/auth/2fa/setup": true, "/api/auth/2fa/enable": true, "/api/auth/2fa/disable": true,
+}
+
+// requiredRole 返回请求所需的最低角色：查看为只读；事件处置与误报抑制为运营分析员；
+// 账号、令牌、审计与其余配置变更为管理员；空字符串表示任何已登录账号均可（自助操作）。
+func requiredRole(r *http.Request) string {
 	p := r.URL.Path
 	if !strings.HasPrefix(p, "/api/") {
-		return false
+		return auth.RoleViewer
 	}
-	if strings.HasPrefix(p, "/api/auth/users") || p == "/api/auth/audit" {
-		return true
+	if strings.HasPrefix(p, "/api/auth/users") || p == "/api/auth/audit" || strings.HasPrefix(p, "/api/audit") || strings.HasPrefix(p, "/api/auth/tokens") || strings.HasPrefix(p, "/api/compliance") {
+		return auth.RoleAdmin
 	}
-	switch r.Method {
-	case http.MethodGet, http.MethodHead:
-		return false
+	// 原始日志可能包含 Cookie、令牌、个人信息等敏感内容：检索与导出需要运营分析员权限
+	if strings.HasPrefix(p, "/api/rawlog/search") || strings.HasPrefix(p, "/api/rawlog/export") {
+		return auth.RoleAnalyst
 	}
-	return !mustChangeAllowed[p] && p != "/api/auth/login"
+	if r.Method == http.MethodGet || r.Method == http.MethodHead {
+		return auth.RoleViewer
+	}
+	if selfService[p] {
+		return ""
+	}
+	if strings.HasPrefix(p, "/api/incidents") || strings.HasPrefix(p, "/api/suppressions") || r.Method == http.MethodPut && strings.HasPrefix(p, "/api/vulns/") {
+		return auth.RoleAnalyst
+	}
+	return auth.RoleAdmin
 }
+
+var roleLabel = map[string]string{auth.RoleAdmin: "管理员", auth.RoleAnalyst: "运营分析员", auth.RoleViewer: "只读"}
 
 // authenticate 校验登录状态，并按角色控制访问。未开启登录时所有请求视为管理员。
 func (s *Server) authenticate(next http.Handler) http.Handler {
@@ -81,16 +104,32 @@ func (s *Server) authenticate(next http.Handler) http.Handler {
 			writeErrorCode(w, http.StatusForbidden, "请先修改初始密码", "must_change_password")
 			return
 		}
-		if needsAdmin(r) && sess.Role != auth.RoleAdmin {
-			writeErrorCode(w, http.StatusForbidden, "当前账号为只读权限，无法执行该操作", "forbidden")
+		if sess.MustEnroll && strings.HasPrefix(path, "/api/") && !mustEnrollAllowed[path] {
+			writeErrorCode(w, http.StatusForbidden, "安全策略要求启用双因素认证，请先绑定身份验证器", "must_enroll_2fa")
+			return
+		}
+		// 监控令牌只能读取 /metrics
+		if sess.Role == auth.RoleMetrics {
+			if path != "/metrics" {
+				writeErrorCode(w, http.StatusForbidden, "该令牌只能用于读取 /metrics 监控指标", "forbidden")
+				return
+			}
+		} else if need := requiredRole(r); need != "" && !auth.RoleAtLeast(sess.Role, need) {
+			writeErrorCode(w, http.StatusForbidden, "当前账号（"+roleLabel[sess.Role]+"）无权执行该操作，需要"+roleLabel[need]+"权限", "forbidden")
 			return
 		}
 		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), sessionKey{}, sess)))
 	})
 }
 
-// currentSession 依次检查会话 Cookie 与 HTTP Basic 认证（供脚本调用 API）。
+// currentSession 依次检查 API 令牌（Authorization: Bearer）、会话 Cookie 与 HTTP Basic 认证。
 func (s *Server) currentSession(w http.ResponseWriter, r *http.Request) (*auth.Session, error) {
+	if h := r.Header.Get("Authorization"); len(h) > 7 && strings.EqualFold(h[:7], "Bearer ") {
+		if sess, ok := s.Auth.VerifyToken(strings.TrimSpace(h[7:]), s.clientIP(r)); ok {
+			return sess, nil
+		}
+		return nil, errors.New("API 令牌无效、已过期或已吊销")
+	}
 	if c, err := r.Cookie(sessionCookie); err == nil && c.Value != "" {
 		if sess, refresh, ok := s.Auth.Verify(c.Value); ok {
 			if refresh != "" {
@@ -117,6 +156,10 @@ func (s *Server) currentSession(w http.ResponseWriter, r *http.Request) (*auth.S
 func (s *Server) sessionAlive(r *http.Request) func() bool {
 	if s.Auth == nil {
 		return nil
+	}
+	if h := r.Header.Get("Authorization"); len(h) > 7 && strings.EqualFold(h[:7], "Bearer ") {
+		tok, ip := strings.TrimSpace(h[7:]), s.clientIP(r)
+		return func() bool { _, ok := s.Auth.VerifyToken(tok, ip); return ok }
 	}
 	if c, err := r.Cookie(sessionCookie); err == nil && c.Value != "" {
 		token := c.Value
@@ -166,7 +209,7 @@ func (s *Server) clearCookie(w http.ResponseWriter, r *http.Request) {
 
 // audit 记录一次操作审计（未开启登录时不记录）。err 不为空表示操作失败。
 func (s *Server) audit(r *http.Request, action, detail string, err error) {
-	if s.Auth == nil {
+	if s.Auth == nil && s.Trail == nil {
 		return
 	}
 	user := ""
@@ -176,6 +219,10 @@ func (s *Server) audit(r *http.Request, action, detail string, err error) {
 	reason := ""
 	if err != nil {
 		reason = err.Error()
+	}
+	if s.Auth == nil { // 未开启登录：直接写入审计链
+		s.Trail.AppendAudit(auth.Record{User: "anonymous", IP: s.clientIP(r), Action: action, Detail: detail, OK: err == nil, Reason: reason})
+		return
 	}
 	s.Auth.LogAction(user, s.clientIP(r), action, detail, err == nil, reason)
 }
@@ -188,7 +235,8 @@ func writeErrorCode(w http.ResponseWriter, code int, msg, reason string) {
 }
 
 func sessionView(sess *auth.Session, enabled bool) map[string]any {
-	return map[string]any{"authenticated": true, "user": sess.User, "role": sess.Role, "must_change": sess.MustChange, "auth_enabled": enabled, "expires": sess.Expires}
+	return map[string]any{"authenticated": true, "user": sess.User, "role": sess.Role, "must_change": sess.MustChange, "auth_enabled": enabled,
+		"expires": sess.Expires, "two_factor": sess.TwoFactor, "must_enroll": sess.MustEnroll, "via": sess.Via}
 }
 
 func (s *Server) authLogin(w http.ResponseWriter, r *http.Request) {
@@ -215,7 +263,12 @@ func (s *Server) authLogin(w http.ResponseWriter, r *http.Request) {
 	sess, token, err := s.Auth.Login(f.Username, f.Password, s.clientIP(r), r.UserAgent())
 	s.releaseHash()
 	var le *auth.LockedError
+	var tfr *auth.TwoFactorRequired
 	switch {
+	case errors.As(err, &tfr):
+		// 口令正确，第二步输入身份验证器中的验证码（或恢复码）
+		writeJSON(w, map[string]any{"authenticated": false, "need_2fa": true, "challenge": tfr.Challenge})
+		return
 	case errors.As(err, &le):
 		w.Header().Set("Retry-After", strconv.Itoa(int(le.Wait.Seconds())+1))
 		writeErrorCode(w, http.StatusTooManyRequests, err.Error(), "locked")
@@ -226,6 +279,145 @@ func (s *Server) authLogin(w http.ResponseWriter, r *http.Request) {
 	}
 	s.setCookie(w, r, token, sess.Expires)
 	writeJSON(w, sessionView(sess, true))
+}
+
+// authLogin2FA 是两步登录的第二步：挑战凭据 + 验证码 / 恢复码。
+func (s *Server) authLogin2FA(w http.ResponseWriter, r *http.Request) {
+	if s.Auth == nil {
+		writeErrorCode(w, http.StatusBadRequest, "未开启登录认证", "auth_disabled")
+		return
+	}
+	var f struct {
+		Challenge string `json:"challenge"`
+		Code      string `json:"code"`
+	}
+	if !decodeForm(w, r, &f) {
+		return
+	}
+	sess, token, err := s.Auth.Login2FA(f.Challenge, f.Code, s.clientIP(r), r.UserAgent())
+	var le *auth.LockedError
+	switch {
+	case errors.As(err, &le):
+		w.Header().Set("Retry-After", strconv.Itoa(int(le.Wait.Seconds())+1))
+		writeErrorCode(w, http.StatusTooManyRequests, err.Error(), "locked")
+		return
+	case err != nil:
+		writeErrorCode(w, http.StatusUnauthorized, err.Error(), "bad_code")
+		return
+	}
+	s.setCookie(w, r, token, sess.Expires)
+	writeJSON(w, sessionView(sess, true))
+}
+
+// auth2FASetup 生成绑定密钥（验证码确认前不生效）。
+func (s *Server) auth2FASetup(w http.ResponseWriter, r *http.Request) {
+	if s.Auth == nil {
+		writeErrorCode(w, http.StatusBadRequest, "未开启登录认证", "auth_disabled")
+		return
+	}
+	secret, uri, err := s.Auth.BeginTOTP(sessionOf(r).User)
+	if err != nil {
+		writeErrorCode(w, http.StatusBadRequest, err.Error(), "bad_request")
+		return
+	}
+	resp := map[string]any{"secret": secret, "uri": uri}
+	if code, err := qr.Encode([]byte(uri)); err == nil {
+		resp["qr_svg"] = code.SVG(5)
+	}
+	writeJSON(w, resp)
+}
+
+// auth2FAEnable 用验证码确认绑定，返回一次性恢复码（只显示这一次）。
+func (s *Server) auth2FAEnable(w http.ResponseWriter, r *http.Request) {
+	var f struct {
+		Code string `json:"code"`
+	}
+	if s.Auth == nil || !decodeForm(w, r, &f) {
+		return
+	}
+	recovery, token, err := s.Auth.EnableTOTP(sessionOf(r).User, f.Code)
+	s.audit(r, "启用双因素认证", "", err)
+	if err != nil {
+		writeErrorCode(w, http.StatusBadRequest, err.Error(), "bad_request")
+		return
+	}
+	if ns, _, ok := s.Auth.Verify(token); ok {
+		s.setCookie(w, r, token, ns.Expires)
+	}
+	writeJSON(w, map[string]any{"ok": true, "recovery": recovery})
+}
+
+// auth2FADisable 关闭自己的双因素认证（需口令与验证码）。
+func (s *Server) auth2FADisable(w http.ResponseWriter, r *http.Request) {
+	var f struct {
+		Password string `json:"password"`
+		Code     string `json:"code"`
+	}
+	if s.Auth == nil || !decodeForm(w, r, &f) {
+		return
+	}
+	if !s.acquireHash() {
+		writeErrorCode(w, http.StatusTooManyRequests, "请求过多，请稍后重试", "busy")
+		return
+	}
+	token, err := s.Auth.DisableTOTP(sessionOf(r).User, f.Password, f.Code)
+	s.releaseHash()
+	s.audit(r, "关闭双因素认证", "", err)
+	if err != nil {
+		writeErrorCode(w, http.StatusBadRequest, err.Error(), "bad_request")
+		return
+	}
+	if ns, _, ok := s.Auth.Verify(token); ok {
+		s.setCookie(w, r, token, ns.Expires)
+	}
+	writeJSON(w, map[string]any{"ok": true})
+}
+
+// authTokens 列出 API 令牌（管理员）。
+func (s *Server) authTokens(w http.ResponseWriter, r *http.Request) {
+	if s.Auth == nil {
+		writeJSON(w, []auth.TokenView{})
+		return
+	}
+	writeJSON(w, s.Auth.Tokens())
+}
+
+// authTokenCreate 创建 API 令牌，明文只在响应中返回这一次。
+func (s *Server) authTokenCreate(w http.ResponseWriter, r *http.Request) {
+	var f struct {
+		Name string `json:"name"`
+		User string `json:"user"`
+		Role string `json:"role"`
+		Days int    `json:"days"`
+	}
+	if s.Auth == nil || !decodeForm(w, r, &f) {
+		if s.Auth == nil {
+			writeErrorCode(w, http.StatusBadRequest, "未开启登录认证", "auth_disabled")
+		}
+		return
+	}
+	raw, v, err := s.Auth.CreateToken(f.User, f.Name, f.Role, sessionOf(r).User, f.Days)
+	s.audit(r, "创建 API 令牌", f.Name+"（"+f.User+" · "+f.Role+"）", err)
+	if err != nil {
+		writeErrorCode(w, statusFor(err), err.Error(), "bad_request")
+		return
+	}
+	writeJSON(w, map[string]any{"token": raw, "info": v})
+}
+
+// authTokenDelete 吊销 API 令牌。
+func (s *Server) authTokenDelete(w http.ResponseWriter, r *http.Request) {
+	if s.Auth == nil {
+		writeErrorCode(w, http.StatusBadRequest, "未开启登录认证", "auth_disabled")
+		return
+	}
+	v, err := s.Auth.DeleteToken(r.PathValue("id"))
+	s.audit(r, "吊销 API 令牌", v.Name+" "+v.Prefix, err)
+	if err != nil {
+		writeErrorCode(w, http.StatusNotFound, err.Error(), "not_found")
+		return
+	}
+	writeJSON(w, map[string]any{"ok": true})
 }
 
 func (s *Server) authSession(w http.ResponseWriter, r *http.Request) {
@@ -310,11 +502,22 @@ func (s *Server) authUserUpdate(w http.ResponseWriter, r *http.Request) {
 	var f struct {
 		Role     string `json:"role"`
 		Password string `json:"password"`
+		Reset2FA bool   `json:"reset_2fa"`
 	}
 	if s.Auth == nil || !decodeForm(w, r, &f) {
 		if s.Auth == nil {
 			writeErrorCode(w, http.StatusBadRequest, "未开启登录认证", "auth_disabled")
 		}
+		return
+	}
+	if f.Reset2FA {
+		err := s.Auth.ResetTOTP(r.PathValue("name"))
+		s.audit(r, "重置双因素认证", r.PathValue("name"), err)
+		if err != nil {
+			writeErrorCode(w, statusFor(err), err.Error(), "bad_request")
+			return
+		}
+		writeJSON(w, map[string]any{"ok": true})
 		return
 	}
 	err := s.Auth.UpdateUser(r.PathValue("name"), f.Role, f.Password)
@@ -352,6 +555,10 @@ func (s *Server) authUserDelete(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) authAudit(w http.ResponseWriter, r *http.Request) {
+	if s.Trail != nil { // 优先使用审计链（记录更完整，可按条件检索）
+		writeJSON(w, s.Trail.Search(audit.Query{Limit: clamp(qint(r, "limit", 100), 1, 2000), Action: r.URL.Query().Get("action")}))
+		return
+	}
 	if s.Auth == nil {
 		writeJSON(w, []auth.Record{})
 		return
@@ -361,7 +568,7 @@ func (s *Server) authAudit(w http.ResponseWriter, r *http.Request) {
 
 func statusFor(err error) int {
 	switch {
-	case errors.Is(err, auth.ErrNoUser):
+	case errors.Is(err, auth.ErrNoUser), errors.Is(err, auth.ErrNoToken):
 		return http.StatusNotFound
 	case errors.Is(err, auth.ErrReadOnly), errors.Is(err, auth.ErrLastAdmin):
 		return http.StatusForbidden

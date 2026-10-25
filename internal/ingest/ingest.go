@@ -15,6 +15,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode/utf8"
 
 	"netsa/internal/config"
 	"netsa/internal/model"
@@ -41,10 +42,16 @@ type Stat struct {
 	Sample    string    `json:"sample_failed,omitempty"` // 最近一条无法解析的日志，便于排查格式
 	// TimeOffset 为自动校正的时区偏差（如 "+8 小时"），syslog 按发送端列出
 	TimeOffset string `json:"time_offset,omitempty"`
+	// 断流检测：Silence 为生效的阈值（off 为关闭），Silent 表示已超过阈值没有新日志，LastActive 为最近一次读到新日志的时间（分钟精度）
+	Silence    string    `json:"silence,omitempty"`
+	Silent     bool      `json:"silent,omitempty"`
+	LastActive time.Time `json:"last_active,omitempty"`
 }
 
 type source struct {
 	name, path, typ, host string
+	group                 string        // 断流检测的分组：配置的数据源名称（通配符匹配的多个文件合并判断）/ syslog 监听；离线分析为空
+	silence               time.Duration // 断流阈值；-1 使用默认值，0 关闭
 	parser                *parser.Auto
 
 	lines, parsed, failed, skipped atomic.Int64
@@ -94,9 +101,15 @@ type Manager struct {
 	Out chan []*model.Event
 	// AutoTime 开启实时日志的时区偏差自动校正（配置项 time_correction）
 	AutoTime bool
-	mu       sync.Mutex
-	sources  []*source
-	wg       sync.WaitGroup
+	// Senders 管理 syslog 发送端（登记、白名单、限速与画像）；为空时 StartSyslog 创建一个不限制的默认实例
+	Senders *Senders
+	// DefaultSilence 为数据源断流告警的默认阈值（alert.source_silence），0 表示关闭
+	DefaultSilence time.Duration
+	mu             sync.Mutex
+	sources        []*source
+	smu            sync.Mutex
+	silence        map[string]*silenceState
+	wg             sync.WaitGroup
 }
 
 // NewManager 创建管理器，buffer 为输出通道可缓存的批数。
@@ -124,7 +137,11 @@ func (m *Manager) Stats() []Stat {
 	m.mu.Unlock()
 	out := make([]Stat, 0, len(srcs))
 	for _, s := range srcs {
-		out = append(out, s.stat())
+		st := s.stat()
+		if s.group != "" {
+			st.Silence, st.Silent, st.LastActive = m.silenceView(s.group, s.silence)
+		}
+		out = append(out, st)
 	}
 	return out
 }
@@ -138,14 +155,39 @@ func (m *Manager) Close() { close(m.Out) }
 // parseLine 解析一行，成功时返回事件（不投递）。
 func (s *source) parseLine(line string) *model.Event { return s.parseLineWith(s.parser, line) }
 
+// 单行解析结果。
+const (
+	lineParsed = iota
+	lineSkipped
+	lineFailed
+)
+
 // parseLineWith 使用指定解析器解析（syslog 按发送端分别识别格式）。
-func (s *source) parseLineWith(p *parser.Auto, line string) (ev *model.Event) {
+func (s *source) parseLineWith(p *parser.Auto, line string) *model.Event {
+	ev, _ := s.parseLineStatus(p, line)
+	return ev
+}
+
+func truncateLine(line string) string {
+	if len(line) > 300 {
+		n := 300
+		for n > 0 && !utf8.RuneStart(line[n]) { // 不截断多字节字符
+			n--
+		}
+		line = line[:n]
+	}
+	return line
+}
+
+// parseLineStatus 解析一行并返回结果类别（解析成功 / 跳过 / 失败）。
+func (s *source) parseLineStatus(p *parser.Auto, line string) (ev *model.Event, status int) {
 	// 畸形日志触发解析异常时按解析失败处理，不影响后续日志
 	defer func() {
 		if r := recover(); r != nil {
 			safe.Report("解析 "+s.name, r)
 			s.failed.Add(1)
 			ev = nil
+			status = lineFailed
 		}
 	}()
 	s.lines.Add(1)
@@ -154,25 +196,23 @@ func (s *source) parseLineWith(p *parser.Auto, line string) (ev *model.Event) {
 	}
 	if parser.Skippable(line) {
 		s.skipped.Add(1)
-		return nil
+		return nil, lineSkipped
 	}
 	ev, ok := p.Parse(line)
 	if !ok {
 		s.failed.Add(1)
-		if len(line) > 300 {
-			line = line[:300]
-		}
+		line = truncateLine(line)
 		s.mu.Lock()
 		s.sample = line
 		s.mu.Unlock()
-		return nil
+		return nil, lineFailed
 	}
 	s.parsed.Add(1)
 	ev.Source = s.name
 	if ev.Host == "" && ev.Kind == model.KindWeb && s.host != "" {
 		ev.Host = s.host
 	}
-	return ev
+	return ev, lineParsed
 }
 
 // touch 记录最近事件时间（在时区校正之后调用，状态页展示的是校正后的时间）。
@@ -262,6 +302,10 @@ func (m *Manager) StartSource(ctx context.Context, sc config.SourceConfig) error
 	if _, err := parser.NewAuto(sc.Type, sc.LogFormat); err != nil {
 		return err
 	}
+	silence := time.Duration(-1)
+	if strings.TrimSpace(sc.Silence) != "" {
+		silence, _ = config.ParseSilence(sc.Silence, 0)
+	}
 	started := map[string]bool{}
 	seen := &fileSet{}
 	scan := func(first bool) {
@@ -289,6 +333,7 @@ func (m *Manager) StartSource(ctx context.Context, sc config.SourceConfig) error
 					log.Printf("[ingest] %s: %v", path, err)
 					continue
 				}
+				s.group, s.silence = sc.Name, silence
 				// 首轮发现的文件按配置决定是否从头读取；之后新出现的文件总是从头读取
 				go m.tail(ctx, s, path, sc.FromBeginning || !first, seen)
 			}

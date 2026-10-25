@@ -26,6 +26,8 @@ import (
 	"netsa/internal/alert"
 	"netsa/internal/api"
 	"netsa/internal/archive"
+	"netsa/internal/assets"
+	"netsa/internal/audit"
 	"netsa/internal/auth"
 	"netsa/internal/config"
 	"netsa/internal/demo"
@@ -36,11 +38,13 @@ import (
 	"netsa/internal/model"
 	"netsa/internal/parser"
 	"netsa/internal/pipeline"
+	"netsa/internal/rawlog"
 	"netsa/internal/store"
+	"netsa/internal/suppress"
 	"netsa/web"
 )
 
-const version = "1.5.0"
+const version = "1.6.0"
 
 func usage() {
 	fmt.Fprintf(os.Stderr, `netsa %s —— 网络安全态势感知与攻击面分析系统
@@ -101,7 +105,10 @@ type app struct {
 	pipe     *pipeline.Pipeline
 	ingest   *ingest.Manager
 	rdap     *geo.RDAPClient
-	archive  *archive.Archive // 可选的 PostgreSQL 告警归档
+	archive  *archive.Archive  // 可选的 PostgreSQL 告警归档
+	suppress *suppress.Manager // 误报抑制规则
+	raw      *rawlog.Store     // 原始日志留存
+	assets   *assets.Manager   // 资产与漏洞
 	api      *api.Server
 }
 
@@ -158,20 +165,32 @@ func build(cfg *config.Config) (*app, error) {
 		return nil, err
 	}
 	a.store = store.New(cfg.Storage.MaxIPs, cfg.Storage.MaxAlerts, cfg.Detect.AlertsPerRule, cfg.Storage.Retention)
+	a.store.SetLocation(loc)
 	a.store.GeoLookup = a.geo.Lookup
 	a.store.IntelMatch = a.intel.Match
 	if a.notifier, err = alert.New(cfg.Alert, robotsFile(cfg)); err != nil {
+		return nil, err
+	}
+	if a.suppress, err = suppress.Load(dataFile(cfg, "", "suppressions.json")); err != nil {
+		return nil, err
+	}
+	if a.assets, err = assets.Load(dataFile(cfg, "", "assets.json")); err != nil {
 		return nil, err
 	}
 	a.broker = api.NewBroker()
 	a.pipe = &pipeline.Pipeline{
 		Engine: a.engine, Behavior: detect.NewBehavior(cfg.Detect.Thresholds), Store: a.store, Geo: a.geo,
 		RealIP: pipeline.NewRealIP(cfg.RealIP), Notifier: a.notifier,
-		EnrichLevel: model.ParseSeverity(cfg.Geo.EnrichLevel), OnAlert: a.onAlert,
+		EnrichLevel: model.ParseSeverity(cfg.Geo.EnrichLevel), OnAlert: a.onAlert, Suppress: a.suppress, Assets: a.assets,
 	}
 	a.pipe.SetWhitelist(cfg.Detect.Whitelist)
 	a.geo.OnUpdate = a.pipe.OnGeoUpdate
 	a.ingest = ingest.NewManager(20000)
+	silence, _ := config.ParseSilence(cfg.Alert.SourceSilence, 0)
+	a.ingest.DefaultSilence = silence
+	if a.ingest.Senders, err = ingest.NewSenders(cfg.Syslog, dataFile(cfg, cfg.Syslog.SendersFile, "syslog-senders.json"), silence); err != nil {
+		return nil, err
+	}
 	a.ingest.AutoTime = cfg.TimeCorrection != "off"
 	if dsn := archiveDSN(cfg); dsn != "" {
 		host, _ := os.Hostname()
@@ -185,6 +204,19 @@ func build(cfg *config.Config) (*app, error) {
 		a.archive = ar
 		log.Printf("[archive] 告警归档已启用：%s（后台连接中）", ar.Server())
 	}
+	if rc := cfg.RawLog; rc.Enabled {
+		dir := dataFile(cfg, rc.Dir, "rawlog")
+		if dir == "" {
+			dir = filepath.Join("data", "rawlog")
+		}
+		rl, err := rawlog.Open(context.Background(), rawlog.Options{Dir: dir, RetentionDays: rc.RetentionDays, MaxBytes: int64(rc.MaxSizeGB * (1 << 30)),
+			AttacksOnly: rc.AttacksOnly, Location: loc})
+		if err != nil {
+			return nil, err
+		}
+		a.raw, a.pipe.Raw = rl, rl
+		log.Printf("[rawlog] 原始日志留存已启用：%s（留存 %d 天）", dir, rc.RetentionDays)
+	}
 	return a, nil
 }
 
@@ -192,13 +224,23 @@ func (a *app) server(listen string) (*http.Server, error) {
 	s := &api.Server{
 		Cfg: a.cfg, Store: a.store, Ingest: a.ingest, Pipeline: a.pipe, Geo: a.geo, Engine: a.engine,
 		RDAP: a.rdap, Static: staticFS(a.cfg), Version: version, Broker: a.broker, Notifier: a.notifier,
-		Archive: a.archive,
+		Archive: a.archive, Suppress: a.suppress, RawLog: a.raw, Assets: a.assets,
 	}
 	a.api = s
+	dir := dataFile(a.cfg, a.cfg.Audit.Dir, "audit")
+	if dir == "" {
+		dir = filepath.Join("data", "audit")
+	}
+	trail, err := audit.Open(dir, a.cfg.Audit.RetentionDays)
+	if err != nil {
+		return nil, err
+	}
+	s.Trail = trail
 	if a.cfg.Server.AuthEnabled() {
 		m, initial, err := auth.New(auth.Options{
+			Audit:      trail,
 			ConfigUser: a.cfg.Server.Username, ConfigPassword: a.cfg.Server.Password, File: usersFile(a.cfg),
-			TTL: a.cfg.Server.SessionTTL, InitialAdmin: os.Getenv("NETSA_ADMIN_PASSWORD"),
+			TTL: a.cfg.Server.SessionTTL, InitialAdmin: os.Getenv("NETSA_ADMIN_PASSWORD"), Require2FA: a.cfg.Server.Require2FA,
 		})
 		if err != nil {
 			return nil, fmt.Errorf("初始化登录账号失败: %w", err)
@@ -333,6 +375,12 @@ func cmdServe(args []string) error {
 			if err := a.store.Save(cfg.Storage.Snapshot); err != nil {
 				log.Printf("[store] 保存快照失败: %v", err)
 			}
+			if err := a.suppress.Flush(); err != nil {
+				log.Printf("[suppress] %v", err)
+			}
+			if err := a.ingest.Senders.Flush(); err != nil {
+				log.Printf("[syslog] %v", err)
+			}
 		case <-ctx.Done():
 			log.Printf("正在退出...")
 			shutdown, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -343,6 +391,9 @@ func cmdServe(args []string) error {
 			case <-time.After(3 * time.Second):
 			}
 			a.archive.Close(10 * time.Second) // 写完归档队列中剩余的告警
+			a.raw.Close(10 * time.Second)
+			a.suppress.Flush()
+			a.ingest.Senders.Flush()
 			if err := a.store.Save(cfg.Storage.Snapshot); err != nil {
 				log.Printf("[store] 保存快照失败: %v", err)
 			}
@@ -388,11 +439,16 @@ func (a *app) reloadGeo(ctx context.Context, cfgPath string) {
 
 // robotsFile 返回界面添加的告警机器人的保存位置：alert.robots_file，或 storage.snapshot 所在目录。
 func robotsFile(cfg *config.Config) string {
-	if cfg.Alert.RobotsFile != "" {
-		return cfg.Alert.RobotsFile
+	return dataFile(cfg, cfg.Alert.RobotsFile, "alert-robots.json")
+}
+
+// dataFile 返回运行数据文件路径：显式配置优先，否则与状态快照放在同一目录；两者都没有时只保存在内存中。
+func dataFile(cfg *config.Config, explicit, name string) string {
+	if explicit != "" {
+		return explicit
 	}
 	if cfg.Storage.Snapshot != "" {
-		return filepath.Join(filepath.Dir(cfg.Storage.Snapshot), "alert-robots.json")
+		return filepath.Join(filepath.Dir(cfg.Storage.Snapshot), name)
 	}
 	return ""
 }
@@ -621,7 +677,7 @@ func cmdSimulate(args []string) error {
 		if err := demo.Generate(*dir, *hours, *intensity, *seed); err != nil {
 			return err
 		}
-		fmt.Printf("已生成 %d 小时演示日志到 %s/ (access.log, ufw.log, fortigate.log)\n", *hours, *dir)
+		fmt.Printf("已生成 %d 小时演示日志到 %s/ (access.log, ufw.log, fortigate.log, auth.log, dns.log)\n", *hours, *dir)
 	}
 	if !*live {
 		return nil

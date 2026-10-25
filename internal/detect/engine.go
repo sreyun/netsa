@@ -82,8 +82,13 @@ func (e *Engine) Inspect(ev *model.Event) []model.Hit {
 	if ev.Outbound {
 		return nil
 	}
-	if ev.Kind == model.KindFirewall {
+	switch ev.Kind {
+	case model.KindFirewall:
 		return inspectFirewall(ev)
+	case model.KindDNS:
+		return inspectDNS(ev)
+	case model.KindAuth:
+		return inspectAuth(ev)
 	}
 	return e.inspectWeb(ev)
 }
@@ -282,6 +287,9 @@ func WebResult(ev *model.Event, minBytes int64) string {
 		return model.ResultError
 	case s >= 300:
 		return model.ResultFailed
+	case s == 201 || s == 204:
+		// 201 Created / 204 No Content 本身没有响应体（PUT 上传、POST 创建成功），不能按响应大小判为失败
+		return model.ResultSuccess
 	case s >= 200:
 		if minBytes > 0 && ev.Bytes < minBytes {
 			return model.ResultFailed

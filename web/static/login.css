@@ -163,3 +163,9 @@ body {
 @media (prefers-reduced-motion: reduce) {
   .fx-scan, .card-glow, .login-btn::after, .hud-status .dot { animation: none !important; }
 }
+
+/* 双因素认证（第二步） */
+.two-tip { margin: 0 0 4px; font-size: 13px; line-height: 1.7; color: #9fb3d9; }
+.two-back { margin-top: 10px; background: none; border: 0; color: #8fe9ff; cursor: pointer; font-size: 13px; padding: 4px 0; align-self: center; font-family: inherit; }
+.two-back:hover { text-decoration: underline; }
+#otp { letter-spacing: 3px; font-family: ui-monospace, Consolas, monospace; }

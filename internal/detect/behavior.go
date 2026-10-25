@@ -97,6 +97,8 @@ type Behavior struct {
 	logins    map[string]*loginWin // 登录接口 → 全局窗口
 	enum      map[string]*enumWin  // 来源 → 接口遍历窗口
 	beacons   map[string]*beacon   // 内网主机>外部地址:端口 → 连接时间
+	auth      map[string]*authWin  // 认证来源 → 登录失败窗口
+	dns       map[string]*dnsWin   // 内网主机 → DNS 查询窗口
 	latest    time.Time            // 已处理事件的最新时间（排除未来时间的异常日志），作为窗口过期的基准
 	lastPrune time.Time            // 上次清理的系统时间
 }
@@ -106,7 +108,7 @@ const maxWindows = 300000
 
 func NewBehavior(th config.Thresholds) *Behavior {
 	return &Behavior{th: th, web: map[string]*webWin{}, fw: map[string]*fwWin{}, logins: map[string]*loginWin{},
-		enum: map[string]*enumWin{}, beacons: map[string]*beacon{}}
+		enum: map[string]*enumWin{}, beacons: map[string]*beacon{}, auth: map[string]*authWin{}, dns: map[string]*dnsWin{}}
 }
 
 // Observe 处理一个事件并返回触发的行为告警。
@@ -114,6 +116,15 @@ func (b *Behavior) Observe(ev *model.Event) []model.Hit {
 	// 出站流量（内网主机访问公网）不做扫描 / 洪泛 / 暴力破解判定：正常上网会连接大量不同的公网地址与端口，
 	// 按入站攻击的阈值判断会产生大量误报；只检测按固定间隔回连同一地址的 C2 心跳。
 	// 内网主机之间的横向扫描（目的为内网地址）仍按入站规则检测。
+	if ev.Kind == model.KindAuth || ev.Kind == model.KindDNS {
+		b.mu.Lock()
+		defer b.mu.Unlock()
+		b.maybePrune(ev)
+		if ev.Kind == model.KindAuth {
+			return b.observeAuth(ev)
+		}
+		return b.observeDNS(ev)
+	}
 	egress := ev.Outbound || IsEgress(ev)
 	if egress && ev.Kind != model.KindFirewall {
 		return nil
@@ -591,6 +602,16 @@ func (b *Behavior) prune(now time.Time) {
 	for ip, w := range b.fw {
 		if now.Sub(w.start) > 2*b.th.FwWindow || w.start.Sub(now) > 2*b.th.FwWindow {
 			delete(b.fw, ip)
+		}
+	}
+	for ip, w := range b.auth {
+		if outside(now, w.start, 2*b.th.FwWindow) {
+			delete(b.auth, ip)
+		}
+	}
+	for ip, w := range b.dns {
+		if outside(now, w.start, 2*b.th.FwWindow) {
+			delete(b.dns, ip)
 		}
 	}
 }

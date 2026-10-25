@@ -24,6 +24,14 @@ sources:
     type: auto
     paths: ["demo-logs/fortigate.log"]
     from_beginning: true
+  - name: ssh
+    type: auth
+    paths: ["demo-logs/auth.log"]
+    from_beginning: true
+  - name: dns
+    type: dns
+    paths: ["demo-logs/dns.log"]
+    from_beginning: true
 
 syslog:
   enabled: true
@@ -48,3 +56,11 @@ intel:
 
 storage:
   snapshot: ""         # 演示环境不保存快照
+
+# 原始日志留存（日志检索 / 告警前后的原始日志 / 取证导出）与防篡改审计链
+rawlog:
+  enabled: true
+  dir: state/demo-rawlog   # 容器演示中 demo-logs 为只读挂载，留存目录放在可写的 state 下
+  retention_days: 180
+audit:
+  dir: state/demo-audit

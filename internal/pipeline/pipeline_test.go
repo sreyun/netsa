@@ -2,13 +2,17 @@ package pipeline
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
+	"netsa/internal/assets"
 	"netsa/internal/config"
 	"netsa/internal/detect"
 	"netsa/internal/model"
+	"netsa/internal/rawlog"
 	"netsa/internal/store"
+	"netsa/internal/suppress"
 )
 
 func TestRealIP(t *testing.T) {
@@ -98,5 +102,62 @@ func TestPipelineEndToEnd(t *testing.T) {
 	o := st.Overview()
 	if o.Totals.Blocked != 1 || o.Attackers != 2 {
 		t.Fatalf("overview: %+v", o.Totals)
+	}
+}
+
+// 资产与漏洞关联、误报抑制、原始日志留存在流水线中的效果。
+func TestPipelineAssetsSuppressRaw(t *testing.T) {
+	eng, err := detect.NewEngine("", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	am, _ := assets.Load("")
+	al, ln, _ := assets.ParseAssetsCSV([]byte("IP,名称,域名,负责人,重要性\n10.0.1.10,官网,www.example.com,张三,核心\n"))
+	am.ImportAssets(al, ln, false)
+	am.ImportVulns([]assets.Vuln{{IP: "10.0.1.10", Name: "Tomcat PUT 上传", CVE: []string{"CVE-2017-12615"}, Severity: model.SevCritical}}, []int{2}, false, "scan")
+	sup, _ := suppress.Load("")
+	if _, err := sup.Add(suppress.Rule{IP: "198.51.100.30", Category: "目录穿越/文件包含", Reason: "授权渗透测试"}, 0); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	raw, err := rawlog.Open(ctx, rawlog.Options{Dir: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	st := store.New(1000, 1000, 5, time.Hour)
+	var alerts []*model.Alert
+	p := &Pipeline{Engine: eng, Store: st, Assets: am, Suppress: sup, Raw: raw, OnAlert: func(a *model.Alert) { alerts = append(alerts, a) }}
+	in := make(chan []*model.Event, 10)
+	done := p.Run(context.Background(), in, 1)
+	now := time.Now()
+	in <- []*model.Event{
+		{Kind: model.KindWeb, SrcIP: "198.51.100.20", Host: "www.example.com", Method: "PUT", URI: "/shell.jsp/", Status: 201, Time: now, Raw: "PUT /shell.jsp/"},
+		{Kind: model.KindWeb, SrcIP: "198.51.100.30", Host: "www.example.com", Method: "GET", URI: "/../../etc/passwd", Status: 404, Time: now, Raw: "GET /../../etc/passwd"},
+	}
+	close(in)
+	<-done
+	if len(alerts) != 1 {
+		t.Fatalf("误报抑制后应只有 1 条告警: %+v", alerts)
+	}
+	a := alerts[0]
+	if a.Asset != "官网" || a.AssetLevel != "core" || a.Owner != "张三" || !strings.Contains(a.Vuln, "CVE-2017-12615") ||
+		a.Severity != model.SevCritical || a.Result != model.ResultSuccess || !strings.Contains(a.Evidence, "目标存在该漏洞") {
+		t.Fatalf("资产与漏洞关联: %+v", a)
+	}
+	inc := st.Incident(a.IncidentID)
+	if inc.AssetLevel != "core" || inc.Assets[0] != "官网" || inc.Due.Sub(inc.Created) != time.Hour {
+		t.Fatalf("事件应标注核心资产: %+v", inc.IncidentView)
+	}
+	if prof := st.Profile("198.51.100.30"); prof != nil && prof.Attacks != 0 {
+		t.Fatalf("被抑制的命中不计入攻击: %+v", prof)
+	}
+	if sup.Total() < 1 { // 同一事件可能命中同类的多条规则
+		t.Fatalf("抑制计数: %d", sup.Total())
+	}
+	raw.Close(5 * time.Second)
+	res, _ := raw.Search(context.Background(), rawlog.Query{From: now.Add(-time.Minute), To: now.Add(time.Minute)})
+	if len(res.Records) != 2 {
+		t.Fatalf("原始日志应留存全部事件（含被抑制的）: %+v", res)
 	}
 }

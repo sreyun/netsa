@@ -535,6 +535,8 @@ type AlertQuery struct {
 	Target    string    // 被攻击目标（总览“被攻击目标 TOP”的条目）
 	From, To  time.Time // 告警时间范围 [From, To)
 	Technique string    // ATT&CK 技术编号
+	Asset     string    // 目标资产名称
+	Incident  uint64    // 所属事件
 }
 
 // matchTarget 判断告警目标是否为总览排行中的目标条目（排行中的目标最长 200 字节，超长时按前缀匹配）。
@@ -594,6 +596,8 @@ func (s *Store) Alerts(q AlertQuery) []*model.Alert {
 			(q.Phase != "" && a.Phase != q.Phase) ||
 			(q.Technique != "" && !categoryInTechnique(a.Category, q.Technique)) ||
 			(q.Target != "" && !matchTarget(a.Target, q.Target)) ||
+			(q.Asset != "" && a.Asset != q.Asset) ||
+			(q.Incident != 0 && a.IncidentID != q.Incident) ||
 			(!q.From.IsZero() && a.Time.Before(q.From)) ||
 			(!q.To.IsZero() && !a.Time.Before(q.To)) {
 			continue

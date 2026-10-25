@@ -216,7 +216,7 @@ func localTime(t time.Time) time.Time {
 
 // Event 是一条待推送的安全事件。
 type Event struct {
-	Kind       string         `json:"kind"` // alert 告警事件 / escalation 攻击源威胁升级 / test 测试消息 / report 安全日报
+	Kind       string         `json:"kind"` // alert 告警事件 / escalation 攻击源威胁升级 / notice 运维通知（事件超时、数据源断流等）/ test 测试消息 / report 安全日报
 	Severity   model.Severity `json:"severity"`
 	Title      string         `json:"title"`
 	Category   string         `json:"category,omitempty"`
@@ -232,7 +232,10 @@ type Event struct {
 	Attacks    int64          `json:"attacks,omitempty"`
 	Categories []string       `json:"categories,omitempty"`
 	Source     string         `json:"source,omitempty"`
-	Lines      []string       `json:"lines,omitempty"` // 安全日报的各行内容
+	Asset      string         `json:"asset,omitempty"` // 目标资产，例如“官网（核心，负责人 张三）”
+	Vuln       string         `json:"vuln,omitempty"`  // 关联的目标资产未修复漏洞
+	Lines      []string       `json:"lines,omitempty"` // 安全日报的各行内容；运维通知的“字段：值”明细
+	Link       string         `json:"link,omitempty"`  // 详情页锚点（如 #tab=incidents），与 base_url 拼接
 	Time       time.Time      `json:"time"`
 }
 
@@ -305,6 +308,12 @@ func (e *Event) fields() []kv {
 	}
 	add("来源 IP", ip)
 	switch e.Kind {
+	case "notice":
+		for _, l := range e.Lines {
+			if k, v, ok := strings.Cut(l, "："); ok {
+				add(sanitize(k, 20), sanitize(v, 200))
+			}
+		}
 	case "escalation":
 		add("攻击类型", sanitize(strings.Join(e.Categories, "、"), 120))
 		add("累计攻击", strconv.FormatInt(e.Attacks, 10)+" 次")
@@ -318,6 +327,8 @@ func (e *Event) fields() []kv {
 			target += "（响应 " + strconv.Itoa(e.Status) + "）"
 		}
 		add("攻击目标", target)
+		add("目标资产", sanitize(e.Asset, 80))
+		add("关联漏洞", sanitize(e.Vuln, 120))
 		add("攻击证据", sanitize(e.Evidence, 200))
 		add("攻击阶段", phaseLabel[e.Phase])
 		add("数据来源", sanitize(e.Source, 40))
@@ -340,7 +351,10 @@ func (e *Event) headline() string {
 
 // summary 是事件的单行摘要，用于合并消息。
 func (e *Event) summary() string {
-	s := "【" + e.Severity.Label() + "】" + localTime(e.Time).Format("15:04:05") + " " + sanitize(e.IP, 64)
+	s := "【" + e.Severity.Label() + "】" + localTime(e.Time).Format("15:04:05")
+	if e.IP != "" {
+		s += " " + sanitize(e.IP, 64)
+	}
 	if e.Location != "" {
 		s += "（" + sanitize(e.Location, 30) + "）"
 	}
@@ -387,6 +401,9 @@ func (b *Batch) maxSeverity() model.Severity {
 func (b *Batch) detailURL() string {
 	if b.BaseURL != "" && len(b.Events) == 1 && b.Events[0].Kind == "report" {
 		return strings.TrimRight(b.BaseURL, "/") + "/#tab=assess"
+	}
+	if b.BaseURL != "" && len(b.Events) == 1 && strings.HasPrefix(b.Events[0].Link, "#") {
+		return strings.TrimRight(b.BaseURL, "/") + "/" + b.Events[0].Link
 	}
 	if b.BaseURL == "" || len(b.Events) != 1 || b.Events[0].IP == "" {
 		return strings.TrimRight(b.BaseURL, "/")

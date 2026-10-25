@@ -74,6 +74,8 @@ type Kind string
 const (
 	KindWeb      Kind = "web"
 	KindFirewall Kind = "firewall"
+	KindDNS      Kind = "dns"  // DNS 查询日志（主体为发起查询的内网主机）
+	KindAuth     Kind = "auth" // 主机 / VPN 认证日志（SSH、RDP、Windows 登录、VPN 登录等）
 )
 
 // 防火墙动作归一化取值。
@@ -140,13 +142,47 @@ type Event struct {
 	// 仅在日志格式记录了这些头时填充。
 	ClientHeaders map[string]string
 	PeerIP        string // 直连对端（代理）IP，仅在经由代理还原时设置
-	ReqTime       float64
+	// 认证日志：User 为登录账号，Service 为认证服务（SSH / RDP / VPN …），EventID 为 Windows 安全事件 ID；
+	// Action 为 allow（成功）/ deny（失败）。SubjectHost 表示 SrcIP 是上报日志的主机本身（没有远程来源的主机事件，如日志被清除）。
+	User        string
+	Service     string
+	EventID     int
+	SubjectHost bool
+	// DNS 日志：Host 为查询的域名，QType 为查询类型，RCode 为响应码（NOERROR / NXDOMAIN …）
+	QType string
+	RCode string
+
+	// Asset 为攻击目标对应的资产（登记了资产台账时由流水线填写，仅攻击事件）
+	Asset   *AssetRef
+	ReqTime float64
 
 	Raw string
 }
 
 // Target 返回事件的攻击目标描述。
 func (e *Event) Target() string {
+	switch e.Kind {
+	case KindDNS:
+		t := "DNS " + e.Host
+		if e.QType != "" {
+			t += " " + e.QType
+		}
+		return t
+	case KindAuth:
+		t := e.Service
+		if t == "" {
+			t = "登录"
+		}
+		if e.User != "" {
+			t += " 账号 " + e.User
+		}
+		if e.Host != "" {
+			t += " @" + e.Host
+		} else if e.DstIP != "" {
+			t += " @" + e.DstIP
+		}
+		return t
+	}
 	if e.Kind == KindWeb {
 		h := e.Host
 		if h == "" {
@@ -175,27 +211,41 @@ type Hit struct {
 	Result   string
 	// TagOnly 表示只给 IP 打标签，不生成告警（例如脚本类 UA）。
 	TagOnly bool
+	// Vuln 为关联到的目标资产上未修复的漏洞（CVE / 名称）
+	Vuln string
+}
+
+// AssetRef 是事件目标资产的摘要。
+type AssetRef struct {
+	Name  string
+	Level string // core / important / normal
+	Owner string
 }
 
 // Alert 是对外展示的告警记录。
 type Alert struct {
-	ID       uint64    `json:"id"`
-	Time     time.Time `json:"time"`
-	Kind     Kind      `json:"kind"`
-	SrcIP    string    `json:"src_ip"`
-	Location string    `json:"location"`
-	RuleID   string    `json:"rule_id"`
-	Name     string    `json:"name"`
-	Category string    `json:"category"`
-	Severity Severity  `json:"severity"`
-	Phase    string    `json:"phase"`
-	Result   string    `json:"result"`
-	Target   string    `json:"target"`
-	Method   string    `json:"method,omitempty"`
-	Status   int       `json:"status,omitempty"`
-	Evidence string    `json:"evidence"`
-	UA       string    `json:"ua,omitempty"`
-	Source   string    `json:"source"`
-	Lat      float64   `json:"lat,omitempty"`
-	Lon      float64   `json:"lon,omitempty"`
+	ID         uint64    `json:"id"`
+	Time       time.Time `json:"time"`
+	Kind       Kind      `json:"kind"`
+	SrcIP      string    `json:"src_ip"`
+	Location   string    `json:"location"`
+	RuleID     string    `json:"rule_id"`
+	Name       string    `json:"name"`
+	Category   string    `json:"category"`
+	Severity   Severity  `json:"severity"`
+	Phase      string    `json:"phase"`
+	Result     string    `json:"result"`
+	Target     string    `json:"target"`
+	Method     string    `json:"method,omitempty"`
+	Status     int       `json:"status,omitempty"`
+	Evidence   string    `json:"evidence"`
+	UA         string    `json:"ua,omitempty"`
+	Source     string    `json:"source"`
+	Lat        float64   `json:"lat,omitempty"`
+	Lon        float64   `json:"lon,omitempty"`
+	IncidentID uint64    `json:"incident_id,omitempty"` // 所属安全事件
+	Asset      string    `json:"asset,omitempty"`       // 目标资产名称
+	AssetLevel string    `json:"asset_level,omitempty"` // 目标资产重要性：core / important / normal
+	Owner      string    `json:"owner,omitempty"`       // 资产负责人
+	Vuln       string    `json:"vuln,omitempty"`        // 关联的未修复漏洞
 }
