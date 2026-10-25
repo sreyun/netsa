@@ -69,6 +69,19 @@
       <div class="msg" id="loginMsg" role="alert"></div>
       <button type="submit" id="loginBtn" class="login-btn"><span>登 录</span></button>
     </form>
+    <form id="twoForm" class="login-form" autocomplete="off" novalidate hidden>
+      <p class="two-tip">该账号已启用双因素认证，请输入身份验证器（如 Microsoft / Google Authenticator、阿里云 / 腾讯身份验证器）中显示的 6 位动态口令，或一个恢复码。</p>
+      <label class="field">
+        <span class="label">动态口令</span>
+        <span class="input">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="6" y="2" width="12" height="20" rx="2"/><path d="M10 18h4"/></svg>
+          <input id="otp" name="otp" autocomplete="one-time-code" inputmode="numeric" autocapitalize="off" spellcheck="false" maxlength="20" placeholder="6 位动态口令或恢复码" required>
+        </span>
+      </label>
+      <div class="msg" id="twoMsg" role="alert"></div>
+      <button type="submit" id="twoBtn" class="login-btn"><span>验 证</span></button>
+      <button type="button" id="twoBack" class="two-back">← 返回重新输入密码</button>
+    </form>
     <p class="card-foot">忘记密码请联系管理员，或在服务器上执行 <code>netsa passwd -u 用户名</code> 重置</p>
   </section>
 </main>

@@ -18,6 +18,16 @@ func (s *Server) visibility(r *http.Request) store.Visibility {
 		Intel:         len(s.Cfg.Intel.Blocklists),
 		HTTPS:         s.Cfg.Server.TLSCert != "" || r != nil && (r.TLS != nil || strings.EqualFold(r.Header.Get("X-Forwarded-Proto"), "https")),
 		AllowNetworks: len(s.Cfg.Server.AllowNetworks) > 0,
+		Require2FA:    s.Cfg.Server.Require2FA,
+	}
+	if s.RawLog != nil {
+		v.RawLogDays = s.Cfg.RawLog.RetentionDays
+		if v.RawLogDays == 0 {
+			v.RawLogDays = -1 // 不按时间清理（永久保留）
+		}
+	}
+	if s.Assets != nil {
+		v.Assets = s.Assets.Summary().Assets
 	}
 	if s.Cfg.Intel.TorExitURL != "" {
 		v.Intel++

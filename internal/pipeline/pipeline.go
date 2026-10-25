@@ -5,16 +5,21 @@ import (
 	"context"
 	"net/netip"
 	"runtime"
+	"strings"
 	"sync"
 	"sync/atomic"
+	"unicode/utf8"
 
 	"netsa/internal/alert"
+	"netsa/internal/assets"
 	"netsa/internal/detect"
 	"netsa/internal/geo"
 	"netsa/internal/intel"
 	"netsa/internal/model"
+	"netsa/internal/rawlog"
 	"netsa/internal/safe"
 	"netsa/internal/store"
+	"netsa/internal/suppress"
 )
 
 type item struct {
@@ -33,6 +38,9 @@ type Pipeline struct {
 	Notifier    *alert.Notifier
 	EnrichLevel model.Severity
 	OnAlert     func(*model.Alert)
+	Suppress    *suppress.Manager // 误报抑制规则（可为空）
+	Raw         *rawlog.Store     // 原始日志留存（可为空）
+	Assets      *assets.Manager   // 资产与漏洞（可为空）
 
 	whitelist []netip.Prefix
 	processed atomic.Int64
@@ -149,7 +157,8 @@ func (p *Pipeline) inspect(ev *model.Event) item {
 			it.hits = append(it.hits, *h)
 		}
 	}
-	if p.whitelisted(ev.SrcIP) {
+	// 白名单用于信任的访问来源（如内部扫描器）；DNS 查询与主机事件的主体是内网主机本身（检测的是其是否失陷），不受白名单影响
+	if ev.Kind != model.KindDNS && !ev.SubjectHost && p.whitelisted(ev.SrcIP) {
 		it.whitelisted, it.hits = true, nil
 		return it
 	}
@@ -165,7 +174,12 @@ func (p *Pipeline) aggregate(items []item) {
 		if !it.whitelisted && p.Behavior != nil {
 			hits[i] = append(hits[i], p.Behavior.Observe(it.ev)...)
 		}
+		hits[i] = p.Suppress.Filter(it.ev, hits[i])
+		if p.Assets != nil && len(hits[i]) > 0 {
+			hits[i] = p.enrichAssets(it.ev, hits[i])
+		}
 	}
+	p.Raw.Write(evs, hits)
 	results := p.Store.RecordBatch(evs, hits)
 	p.processed.Add(int64(len(items)))
 	for i, res := range results {
@@ -183,6 +197,7 @@ func (p *Pipeline) aggregate(items []item) {
 					Kind: "alert", Severity: a.Severity, Title: a.Name, Category: a.Category, Result: a.Result, Phase: a.Phase,
 					IP: a.SrcIP, Location: a.Location, Target: a.Target, Method: a.Method, Status: a.Status, Evidence: a.Evidence,
 					Score: res.Score, Source: a.Source, Time: a.Time,
+					Asset: assetText(a), Vuln: a.Vuln,
 				})
 			}
 		}
@@ -200,6 +215,79 @@ func (p *Pipeline) aggregate(items []item) {
 			}
 		}
 	}
+}
+
+// enrichAssets 为攻击事件标注目标资产，并关联目标上未修复的漏洞：
+// 攻击利用的 CVE 在目标上存在时提升为严重，未被拦截时判定为疑似成功；攻击类型 / 组件与目标上的高危漏洞一致时等级提升一级。
+// 需要修改命中时复制切片，不修改调用方的数据。
+func (p *Pipeline) enrichAssets(ev *model.Event, hits []model.Hit) []model.Hit {
+	attack := false
+	for i := range hits {
+		attack = attack || !hits[i].TagOnly
+	}
+	if !attack {
+		return hits
+	}
+	mt := p.Assets.Lookup(ev)
+	if mt == nil {
+		return hits
+	}
+	if a := mt.Asset; a != nil {
+		ev.Asset = &model.AssetRef{Name: a.Name, Level: a.Importance, Owner: a.Owner}
+	}
+	var out []model.Hit
+	for i := range hits {
+		v, exact := mt.Correlate(&hits[i])
+		if v == nil {
+			continue
+		}
+		if out == nil {
+			out = append([]model.Hit(nil), hits...)
+		}
+		h := &out[i]
+		h.Vuln = v.Name
+		if len(v.CVE) > 0 && !strings.Contains(v.Name, v.CVE[0]) {
+			h.Vuln = v.CVE[0] + " " + v.Name
+		}
+		switch {
+		case exact:
+			h.Severity = model.SevCritical
+			if h.Result == model.ResultPassed || h.Result == model.ResultUnknown || h.Result == model.ResultError || h.Result == model.ResultAllowed || h.Result == "" {
+				h.Result = model.ResultSuccess
+			}
+			h.Evidence = truncEvidence(h.Evidence + "；目标存在该漏洞且未修复")
+		case v.Severity >= model.SevHigh && h.Severity < model.SevCritical:
+			h.Severity++
+			h.Evidence = truncEvidence(h.Evidence + "；目标存在同类未修复漏洞")
+		}
+	}
+	if out == nil {
+		return hits
+	}
+	return out
+}
+
+// assetText 是告警推送中的目标资产描述。
+func assetText(a *model.Alert) string {
+	if a.Asset == "" {
+		return ""
+	}
+	s := a.Asset + "（" + assets.LevelLabel[a.AssetLevel]
+	if a.Owner != "" {
+		s += "，负责人 " + a.Owner
+	}
+	return s + "）"
+}
+
+func truncEvidence(s string) string {
+	if len(s) <= 400 {
+		return s
+	}
+	n := 400
+	for n > 0 && !utf8.RuneStart(s[n]) { // 不截断多字节字符
+		n--
+	}
+	return s[:n]
 }
 
 // maxHitSev 返回命中中的最高攻击等级（不含仅打标签的命中）。

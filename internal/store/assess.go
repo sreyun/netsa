@@ -20,6 +20,9 @@ type Visibility struct {
 	AuthEnabled   bool    // 已开启登录认证
 	HTTPS         bool    // 以 HTTPS 提供服务
 	AllowNetworks bool    // 已限制管理访问来源
+	RawLogDays    int     // 原始日志留存天数（0 为未启用）
+	Assets        int     // 资产台账中的资产数
+	Require2FA    bool    // 强制双因素认证
 }
 
 // Metric 是评估维度中的一项指标。
@@ -511,14 +514,17 @@ func (d *assessData) threat() *Dimension {
 
 func (d *assessData) visibility(v Visibility) *Dimension {
 	checks := []Check{
-		{"已接入 Web 访问日志", d.totals.Web > 0, 20, "接入 nginx / Apache / IIS 访问日志，覆盖 Web 攻击检测"},
-		{"已接入防火墙 / 网络设备日志", d.totals.Firewall > 0, 20, "通过 syslog 接入防火墙日志，覆盖端口扫描、暴力破解与服务暴露面"},
+		{"已接入 Web 访问日志", d.totals.Web > 0, 15, "接入 nginx / Apache / IIS 访问日志，覆盖 Web 攻击检测"},
+		{"已接入防火墙 / 网络设备日志", d.totals.Firewall > 0, 15, "通过 syslog 接入防火墙日志，覆盖端口扫描、暴力破解与服务暴露面"},
+		{"已接入 DNS 日志", d.totals.DNS > 0, 10, "接入内网 DNS 服务器的查询日志（BIND / dnsmasq / Windows DNS / CoreDNS），发现 DNS 隧道、DGA 与带外回连等失陷迹象"},
+		{"已接入主机认证日志", d.totals.Auth > 0, 10, "接入 Linux auth.log、Windows 安全事件或 VPN 登录日志，发现 SSH / RDP / VPN 暴力破解与账号失陷"},
 		{"日志解析成功率 ≥ 98%", v.ParseRate >= 0.98, 10, fmt.Sprintf("当前解析成功率 %.1f%%，在“数据源”页查看失败样例并配置对应的日志格式", v.ParseRate*100)},
-		{"已配置威胁情报", v.Intel > 0, 10, "配置 intel.blocklists 或 Tor 出口节点列表，启用情报命中与内网主机外连恶意地址检测"},
-		{"已配置精确定位（MaxMind / 在线溯源）", v.PreciseGeo, 10, "放入 MaxMind GeoLite2 数据库或开启 geo.online，获得精确坐标与 ASN"},
-		{"已启用告警推送", v.Robots > 0, 10, "在“告警推送”页添加钉钉 / 企业微信 / 飞书机器人，高危事件第一时间通知值班人员"},
-		{"已启用告警长期归档", v.Archive, 10, "配置 archive.dsn 接入 PostgreSQL，长期留存告警以满足合规与追溯需要"},
-		{"平台访问已加固（登录 + HTTPS 或来源限制）", v.AuthEnabled && (v.HTTPS || v.AllowNetworks), 10, "开启 HTTPS（server.tls_cert）或用 server.allow_networks 限制管理访问来源"},
+		{"已配置威胁情报", v.Intel > 0, 5, "配置 intel.blocklists 或 Tor 出口节点列表，启用情报命中与内网主机外连恶意地址检测"},
+		{"已配置精确定位（MaxMind / 在线溯源）", v.PreciseGeo, 5, "放入 MaxMind GeoLite2 数据库或开启 geo.online，获得精确坐标与 ASN"},
+		{"已启用告警推送", v.Robots > 0, 5, "在“告警推送”页添加钉钉 / 企业微信 / 飞书机器人，高危事件第一时间通知值班人员"},
+		{"日志留存不少于 6 个月（原始日志或告警归档）", v.RawLogDays >= 180 || v.RawLogDays == -1 || v.Archive, 10, "开启 rawlog（retention_days ≥ 180）或配置 archive.dsn 长期归档告警，满足《网络安全法》日志留存不少于六个月的要求"},
+		{"已登记资产台账", v.Assets > 0, 5, "在“资产与漏洞”页导入 CMDB 资产（负责人、重要性）与漏洞扫描结果，告警按资产重要性定级并关联漏洞"},
+		{"平台访问已加固（登录 + HTTPS 或来源限制）", v.AuthEnabled && (v.HTTPS || v.AllowNetworks), 10, "开启 HTTPS（server.tls_cert）或用 server.allow_networks 限制管理访问来源，并开启 server.require_2fa"},
 	}
 	dim := &Dimension{Key: "visibility", Name: "日志与检测覆盖", Weight: 10, Checks: checks}
 	ok := 0

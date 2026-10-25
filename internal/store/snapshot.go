@@ -16,22 +16,25 @@ import (
 
 // snapshotHead 是快照中除画像以外的部分。
 type snapshotHead struct {
-	Version    int               `json:"version"`
-	SavedAt    time.Time         `json:"saved_at"`
-	Alerts     []*model.Alert    `json:"alerts"`
-	NextID     uint64            `json:"next_id"`
-	Buckets    map[int64]*Bucket `json:"buckets"`
-	Totals     Totals            `json:"totals"`
-	Categories map[string]int64  `json:"categories"`
-	Rules      map[string]int64  `json:"rules"`
-	RuleNames  map[string]string `json:"rule_names"`
-	SevCount   [5]int64          `json:"sev_count"`
-	Phases     map[string]int64  `json:"phases"`
-	Results    map[string]int64  `json:"results"`
-	MinTime    time.Time         `json:"min_time"`
-	MaxTime    time.Time         `json:"max_time"`
-	Surface    *surface          `json:"surface"`
-	Scores     []ScorePoint      `json:"score_history,omitempty"`
+	Version    int                  `json:"version"`
+	SavedAt    time.Time            `json:"saved_at"`
+	Alerts     []*model.Alert       `json:"alerts"`
+	NextID     uint64               `json:"next_id"`
+	Buckets    map[int64]*Bucket    `json:"buckets"`
+	Totals     Totals               `json:"totals"`
+	Categories map[string]int64     `json:"categories"`
+	Rules      map[string]int64     `json:"rules"`
+	RuleNames  map[string]string    `json:"rule_names"`
+	SevCount   [5]int64             `json:"sev_count"`
+	Phases     map[string]int64     `json:"phases"`
+	Results    map[string]int64     `json:"results"`
+	MinTime    time.Time            `json:"min_time"`
+	MaxTime    time.Time            `json:"max_time"`
+	Surface    *surface             `json:"surface"`
+	Scores     []ScorePoint         `json:"score_history,omitempty"`
+	Incidents  map[uint64]*Incident `json:"incidents,omitempty"`
+	NextInc    uint64               `json:"next_incident,omitempty"`
+	Days       map[string]*DayStat  `json:"days,omitempty"`
 }
 
 type snapshot struct {
@@ -81,7 +84,7 @@ func (s *Store) writeSnapshot(f io.Writer, compress bool) error {
 	head := snapshotHead{
 		Version: 1, SavedAt: time.Now(), NextID: s.nextID, Buckets: s.buckets, Totals: s.totals,
 		Categories: s.categories, Rules: s.rules, RuleNames: s.ruleNames, SevCount: s.sevCount, Phases: s.phases,
-		Results: s.results, MinTime: s.minTime, MaxTime: s.maxTime, Surface: s.surf, Scores: s.scores,
+		Results: s.results, MinTime: s.minTime, MaxTime: s.maxTime, Surface: s.surf, Scores: s.scores, Incidents: s.incidents, NextInc: s.nextInc, Days: s.days,
 	}
 	n := len(s.alerts)
 	head.Alerts = make([]*model.Alert, 0, n)
@@ -248,5 +251,28 @@ func (s *Store) Load(path string) error {
 		snap.Scores = snap.Scores[len(snap.Scores)-maxScorePoints:]
 	}
 	s.scores = snap.Scores
+	if snap.Incidents != nil {
+		s.incidents = snap.Incidents
+	}
+	s.nextInc = snap.NextInc
+	if snap.Days != nil {
+		s.days = snap.Days
+		s.curDay, s.dayEnd = nil, 0
+	}
+	s.incByKey = map[string]uint64{}
+	for id, inc := range s.incidents {
+		if inc == nil {
+			delete(s.incidents, id)
+			continue
+		}
+		inc.ID = id
+		inc.ensureMaps()
+		if id > s.nextInc {
+			s.nextInc = id
+		}
+		if cur := s.incidents[s.incByKey[inc.Key]]; cur == nil || cur.ID < id {
+			s.incByKey[inc.Key] = id
+		}
+	}
 	return nil
 }

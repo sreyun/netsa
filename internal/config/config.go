@@ -31,6 +31,9 @@ type Config struct {
 	Detect         DetectConfig   `yaml:"detect"`
 	Alert          AlertConfig    `yaml:"alert"`
 	Archive        ArchiveConfig  `yaml:"archive"`
+	RawLog         RawLogConfig   `yaml:"rawlog"`
+	Audit          AuditConfig    `yaml:"audit"`
+	Report         ReportConfig   `yaml:"report"`
 	Storage        StorageConfig  `yaml:"storage"`
 }
 
@@ -54,6 +57,8 @@ type ServerConfig struct {
 	// AllowNetworks 允许访问大屏与 API 的来源网段（IP 或 CIDR）；为空表示不限制。本机回环地址始终允许，
 	// /healthz 不受限制。部署在反向代理之后时需同时配置 real_ip.trusted_proxies，按真实客户端地址判断。
 	AllowNetworks []string `yaml:"allow_networks"`
+	// Require2FA 要求所有本地账号启用双因素认证（TOTP）：未启用的账号登录后须先绑定身份验证器
+	Require2FA bool `yaml:"require_2fa"`
 }
 
 // AuthEnabled 返回是否需要登录（默认开启）。
@@ -73,12 +78,38 @@ type SourceConfig struct {
 	FromBeginning bool     `yaml:"from_beginning"`
 	LogFormat     string   `yaml:"log_format"` // 自定义 nginx log_format
 	Host          string   `yaml:"host"`       // 日志中没有 $host 时使用的站点名
+	// Silence 为断流告警阈值：实时日志超过该时间没有新内容时推送告警，例如 10m；off 关闭；为空使用 alert.source_silence
+	Silence string `yaml:"silence"`
 }
 
 type SyslogConfig struct {
 	Enabled bool   `yaml:"enabled" json:"enabled"`
 	UDP     string `yaml:"udp" json:"udp"`
 	TCP     string `yaml:"tcp" json:"tcp"`
+	// TLS 为 syslog over TLS（RFC 5425，通常 :6514）监听地址；需同时配置 tls_cert / tls_key。
+	// 配置 tls_client_ca 时要求发送端出示该 CA 签发的客户端证书（双向认证），防止伪造发送端。
+	TLS         string `yaml:"tls" json:"tls"`
+	TLSCert     string `yaml:"tls_cert" json:"-"`
+	TLSKey      string `yaml:"tls_key" json:"-"`
+	TLSClientCA string `yaml:"tls_client_ca" json:"-"`
+	// Allowlist 开启发送端白名单：只接收已登记（允许）的发送端的日志。也可在界面中开启；配置为 true 时界面中不能关闭。
+	Allowlist bool `yaml:"allowlist" json:"allowlist"`
+	// Senders 是配置文件中登记的发送端（界面中只读展示），可按 IP 或网段登记名称、分组与断流告警阈值。
+	Senders []SyslogSender `yaml:"senders" json:"-"`
+	// RateLimit 为单个发送端每秒最多接收的日志条数（0 不限制），防止异常设备或伪造流量挤占处理能力。
+	RateLimit int `yaml:"rate_limit" json:"rate_limit"`
+	// SendersFile 保存界面登记的发送端与发送端统计，默认与状态快照放在同一目录（syslog-senders.json）。
+	SendersFile string `yaml:"senders_file" json:"-"`
+}
+
+// SyslogSender 是一个登记的 syslog 发送端（设备）。
+type SyslogSender struct {
+	CIDR    string `yaml:"cidr"`    // IP 或网段
+	Name    string `yaml:"name"`    // 设备名称，例如“核心防火墙”
+	Group   string `yaml:"group"`   // 分组，例如“防火墙”“WAF”“服务器”
+	Action  string `yaml:"action"`  // allow（默认）/ block
+	Silence string `yaml:"silence"` // 断流告警阈值，例如 10m；off 关闭；为空使用 alert.source_silence
+	Note    string `yaml:"note"`
 }
 
 type RealIPConfig struct {
@@ -168,6 +199,12 @@ type Thresholds struct {
 	EnumIDs    int           `yaml:"enum_ids"`
 	// 周期性外连（疑似 C2 心跳）：内网主机按固定间隔连接同一外部地址的次数达到阈值
 	BeaconConns int `yaml:"beacon_conns"`
+	// 主机认证日志（SSH / RDP / VPN …）：窗口（fw_window）内同一来源登录失败次数、尝试的不同账号数达到阈值
+	AuthFailures int `yaml:"auth_failures"`
+	AuthUsers    int `yaml:"auth_users"`
+	// DNS：窗口（fw_window）内同一主机的 NXDOMAIN 查询数、向同一主域名查询的不同子域名数达到阈值
+	DNSNXDomain   int `yaml:"dns_nxdomain"`
+	DNSSubdomains int `yaml:"dns_subdomains"`
 }
 
 type AlertConfig struct {
@@ -180,6 +217,9 @@ type AlertConfig struct {
 	Webhooks   []WebhookConfig `yaml:"webhooks"`
 	// ReportTime 每日安全日报的推送时间（HH:MM，按 timezone），推送给勾选了“接收日报”的机器人；off 表示关闭
 	ReportTime string `yaml:"report_time"`
+	// SourceSilence 为数据源断流告警的默认阈值（文件数据源、syslog 监听与登记的发送端）：超过该时间没有收到日志即推送告警，
+	// 恢复后再推送一次；off 关闭。单个数据源 / 发送端可单独设置 silence。
+	SourceSilence string `yaml:"source_silence"`
 }
 
 // WebhookConfig 是配置文件中的告警推送机器人。
@@ -195,6 +235,23 @@ type WebhookConfig struct {
 	Disabled    bool   `yaml:"disabled"`
 	// Report 接收每日安全日报（推送时间见 alert.report_time）
 	Report bool `yaml:"report"`
+}
+
+// AuditConfig 是防篡改审计链：登录与操作记录按月写入哈希链文件。
+type AuditConfig struct {
+	Dir           string `yaml:"dir"`            // 为空时放在 storage.snapshot 所在目录下的 audit（未配置快照时为 data/audit）
+	RetentionDays int    `yaml:"retention_days"` // 留存天数，默认 180；0 表示永久保留
+}
+
+// RawLogConfig 是原始日志留存：解析后的日志按小时压缩存放在本地，支持按时间、IP、关键字检索与取证导出，
+// 并以哈希链清单防篡改。《网络安全法》要求网络日志留存不少于六个月，默认留存 180 天。
+type RawLogConfig struct {
+	Enabled bool `yaml:"enabled"`
+	// Dir 为留存目录；为空时放在 storage.snapshot 所在目录下的 rawlog
+	Dir           string  `yaml:"dir"`
+	RetentionDays int     `yaml:"retention_days"` // 留存天数，默认 180；0 表示不按时间清理
+	MaxSizeGB     float64 `yaml:"max_size_gb"`    // 总容量上限（GB），超过时从最早的日期开始清理；0 表示不限制
+	AttacksOnly   bool    `yaml:"attacks_only"`   // 只留存命中攻击规则的事件（节省空间，但无法回溯正常访问）
 }
 
 // ArchiveConfig 是可选的告警归档：配置 PostgreSQL 后，告警异步批量写入按月分区的表，长期留存并可按时间 / IP / 规则查询。
@@ -267,9 +324,16 @@ func Default() *Config {
 				EnumWindow:      10 * time.Minute,
 				EnumIDs:         300,
 				BeaconConns:     8,
+				AuthFailures:    10,
+				AuthUsers:       5,
+				DNSNXDomain:     60,
+				DNSSubdomains:   150,
 			},
 		},
-		Alert: AlertConfig{DedupWindow: 10 * time.Minute, ReportTime: "09:00"},
+		RawLog: RawLogConfig{RetentionDays: 180},
+		Audit:  AuditConfig{RetentionDays: 180},
+		Report: ReportConfig{Weekly: "mon 09:00", Monthly: "1 09:00"},
+		Alert:  AlertConfig{DedupWindow: 10 * time.Minute, ReportTime: "09:00", SourceSilence: "30m"},
 		Storage: StorageConfig{
 			Interval:  time.Minute,
 			MaxIPs:    200000,
@@ -351,6 +415,21 @@ func (c *Config) Validate() error {
 	if d := c.Archive.DSN; d != "" && !strings.HasPrefix(d, "postgres://") && !strings.HasPrefix(d, "postgresql://") && !strings.Contains(d, "=") {
 		return fmt.Errorf("archive.dsn 格式无效，应形如 postgres://用户:密码@主机:5432/库名?sslmode=disable")
 	}
+	if err := c.validateReport(); err != nil {
+		return err
+	}
+	if c.Audit.RetentionDays < 0 || c.Audit.RetentionDays > 3650 {
+		return fmt.Errorf("audit.retention_days 应为 0（永久）至 3650")
+	}
+	if r := c.RawLog; r.RetentionDays < 0 || r.RetentionDays > 3650 || r.MaxSizeGB < 0 {
+		return fmt.Errorf("rawlog 配置超出范围：retention_days 为 0 至 3650，max_size_gb 不能为负数")
+	}
+	if err := c.validateSyslog(); err != nil {
+		return err
+	}
+	if _, err := ParseSilence(c.Alert.SourceSilence, 0); err != nil {
+		return fmt.Errorf("alert.source_silence: %w", err)
+	}
 	if (c.Server.TLSCert == "") != (c.Server.TLSKey == "") {
 		return fmt.Errorf("server.tls_cert 与 server.tls_key 需同时设置")
 	}
@@ -366,6 +445,9 @@ func (c *Config) Validate() error {
 			return fmt.Errorf("数据源名称重复: %s", s.Name)
 		}
 		names[s.Name] = true
+		if _, err := ParseSilence(s.Silence, 0); err != nil {
+			return fmt.Errorf("sources[%d].silence: %w", i, err)
+		}
 	}
 	switch c.RealIP.Header {
 	case "", "x_forwarded_for", "x_real_ip", "none":
@@ -444,6 +526,7 @@ func (c *Config) fill() {
 		{&t.BruteLogin, dt.BruteLogin}, {&t.Server5xx, dt.Server5xx}, {&t.PortScanPorts, dt.PortScanPorts},
 		{&t.HostSweep, dt.HostSweep}, {&t.BruteConns, dt.BruteConns}, {&t.FloodEvents, dt.FloodEvents},
 		{&t.DistBruteLogins, dt.DistBruteLogins}, {&t.DistBruteIPs, dt.DistBruteIPs}, {&t.EnumIDs, dt.EnumIDs}, {&t.BeaconConns, dt.BeaconConns},
+		{&t.AuthFailures, dt.AuthFailures}, {&t.AuthUsers, dt.AuthUsers}, {&t.DNSNXDomain, dt.DNSNXDomain}, {&t.DNSSubdomains, dt.DNSSubdomains},
 		{&c.Detect.AlertsPerRule, d.Detect.AlertsPerRule},
 		{&c.Storage.MaxIPs, d.Storage.MaxIPs}, {&c.Storage.MaxAlerts, d.Storage.MaxAlerts},
 		{&c.Geo.CacheSize, d.Geo.CacheSize},
@@ -500,4 +583,64 @@ func ParseNetwork(s string) (netip.Prefix, error) {
 		return netip.PrefixFrom(a, a.BitLen()), nil
 	}
 	return netip.Prefix{}, fmt.Errorf("无效的 IP 或网段 %q", s)
+}
+
+// ParseSilence 解析断流告警阈值：为空返回 def，off / 0 返回 0（关闭），其余为不小于 1 分钟、不超过 30 天的时长。
+func ParseSilence(s string, def time.Duration) (time.Duration, error) {
+	switch s = strings.TrimSpace(s); s {
+	case "":
+		return def, nil
+	case "off", "0":
+		return 0, nil
+	}
+	d, err := time.ParseDuration(s)
+	if err != nil || d < time.Minute || d > 30*24*time.Hour {
+		return 0, fmt.Errorf("断流告警阈值应为 1m ~ 720h 的时长（如 30m、2h）或 off: %q", s)
+	}
+	return d, nil
+}
+
+// ParseSenderCIDR 解析发送端 IP 或网段；IPv4 前缀至少 /8、IPv6 至少 /16，避免一条规则放行整个地址空间。
+func ParseSenderCIDR(s string) (netip.Prefix, error) {
+	s = strings.TrimSpace(s)
+	p, err := netip.ParsePrefix(s)
+	if err != nil {
+		a, err2 := netip.ParseAddr(s)
+		if err2 != nil {
+			return netip.Prefix{}, fmt.Errorf("IP 或网段无效: %q", s)
+		}
+		a = a.Unmap()
+		return netip.PrefixFrom(a, a.BitLen()), nil
+	}
+	if p.Addr().Is4In6() {
+		p = netip.PrefixFrom(p.Addr().Unmap(), max(p.Bits()-96, 0))
+	}
+	if p.Addr().Is4() && p.Bits() < 8 || !p.Addr().Is4() && p.Bits() < 16 {
+		return netip.Prefix{}, fmt.Errorf("网段范围过大（IPv4 至少 /8，IPv6 至少 /16）: %q", s)
+	}
+	return p.Masked(), nil
+}
+
+func (c *Config) validateSyslog() error {
+	sc := c.Syslog
+	if (sc.TLSCert == "") != (sc.TLSKey == "") || sc.TLS != "" && sc.TLSCert == "" {
+		return fmt.Errorf("syslog.tls 需同时配置 syslog.tls_cert 与 syslog.tls_key")
+	}
+	if sc.RateLimit < 0 || sc.RateLimit > 1000000 {
+		return fmt.Errorf("syslog.rate_limit 应为 0（不限制）~ 1000000")
+	}
+	for i, s := range sc.Senders {
+		if _, err := ParseSenderCIDR(s.CIDR); err != nil {
+			return fmt.Errorf("syslog.senders[%d]: %w", i, err)
+		}
+		switch s.Action {
+		case "", "allow", "block":
+		default:
+			return fmt.Errorf("syslog.senders[%d].action 只能为 allow 或 block", i)
+		}
+		if _, err := ParseSilence(s.Silence, 0); err != nil {
+			return fmt.Errorf("syslog.senders[%d].silence: %w", i, err)
+		}
+	}
+	return nil
 }

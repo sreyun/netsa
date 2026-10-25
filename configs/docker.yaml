@@ -13,7 +13,7 @@ time_correction: auto
 server:
   listen: ":8080"
   # 登录认证默认开启。未配置下方账号时，首次启动自动创建管理员 admin，初始密码输出在启动日志中，
-  # 首次登录后须修改密码；更多账号（管理员 / 只读）在大屏“系统管理”中添加。
+  # 首次登录后须修改密码；更多账号（管理员 / 运营分析员 / 只读）在大屏“系统管理”中添加。
   # 仅在可信内网、或由前置统一认证网关负责认证时才设为 false。
   auth: true
   # 可选：配置文件中的管理员账号（只读，不能在界面修改密码）。password 建议使用 `netsa hash-password` 生成的哈希
@@ -30,6 +30,7 @@ server:
   allow_networks: []
   #  - 10.0.0.0/8
   #  - 192.168.10.0/24
+  require_2fa: false   # 强制所有界面账号绑定身份验证器（双因素认证）
 
 home:
   name: "数据中心"
@@ -49,11 +50,18 @@ sources:
   # - name: kernel-firewall
   #   type: netfilter
   #   paths: ["/logs/host/kern.log"]
+  # 主机 SSH 认证日志：暴力破解 / 密码喷洒 / 破解成功、新建账号
+  - name: ssh
+    type: auth
+    paths: ["/logs/host/auth.log", "/logs/host/secure"]
+    from_beginning: false
 
 syslog:
   enabled: true
   udp: ":5514"
   tcp: ":5514"
+  allowlist: false     # 发送端白名单（也可在大屏“数据源 → Syslog 发送端”中开启）；说明见 configs/config.yaml
+  rate_limit: 0        # 单个发送端每秒最多接收的日志条数，0 不限制
 
 real_ip:
   header: x_forwarded_for
@@ -110,6 +118,7 @@ alert:
   dedup_window: 10m     # 同一 IP、同一规则、同一研判结果在该时间内只推送一次
   report_time: "09:00"  # 每日安全日报推送时间（按 timezone），推送给勾选了“接收每日安全日报”的机器人；off 关闭
   robots_file: ""       # 界面中添加的机器人保存位置，默认与 storage.snapshot 同目录的 alert-robots.json
+  source_silence: 30m   # 数据源断流告警阈值；off 关闭
   webhooks: []
   #  - name: 钉钉安全群
   #    type: dingtalk            # dingtalk | wecom | feishu | generic（通用 JSON）
@@ -133,3 +142,24 @@ storage:
 archive:
   dsn: ""
   retention_years: 0            # 保留周期（年）：0 表示永久保留（默认）；N 表示至少保留最近 N 年
+
+# 原始日志留存（日志检索、取证导出，带防篡改哈希链）。存放在数据卷 /app/state/rawlog 中，留意磁盘容量。
+rawlog:
+  enabled: true
+  retention_days: 180
+  max_size_gb: 50
+
+# 防篡改审计链（/app/state/audit）
+audit:
+  retention_days: 180
+
+# 周报 / 月报邮件（配置发信服务器后生效），说明见 configs/config.yaml
+report:
+  recipients: []
+  smtp:
+    host: ""
+    port: 465
+    username: ""
+    password: ""        # 也可在 docker-compose.yml 中通过环境变量 NETSA_SMTP_PASSWORD 提供
+    from: ""
+

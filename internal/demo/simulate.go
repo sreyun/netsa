@@ -1,4 +1,4 @@
-// Package demo 生成用于演示与测试的模拟日志（nginx + UFW + FortiGate）。
+// Package demo 生成用于演示与测试的模拟日志（nginx + UFW + FortiGate + Linux auth.log + Zeek DNS）。
 // 所有 IP 均为随机生成的公网地址，日志内容仅用于本地演示检测效果。
 package demo
 
@@ -13,8 +13,8 @@ import (
 )
 
 type writer struct {
-	nginx, ufw, forti *bufio.Writer
-	files             []*os.File
+	nginx, ufw, forti, auth, dns *bufio.Writer
+	files                        []*os.File
 }
 
 func open(dir string, appendMode bool) (*writer, error) {
@@ -26,7 +26,7 @@ func open(dir string, appendMode bool) (*writer, error) {
 		flag = os.O_CREATE | os.O_WRONLY | os.O_APPEND
 	}
 	w := &writer{}
-	for _, name := range []string{"access.log", "ufw.log", "fortigate.log"} {
+	for _, name := range []string{"access.log", "ufw.log", "fortigate.log", "auth.log", "dns.log"} {
 		f, err := os.OpenFile(filepath.Join(dir, name), flag, 0o644)
 		if err != nil {
 			w.close()
@@ -35,11 +35,12 @@ func open(dir string, appendMode bool) (*writer, error) {
 		w.files = append(w.files, f)
 	}
 	w.nginx, w.ufw, w.forti = bufio.NewWriter(w.files[0]), bufio.NewWriter(w.files[1]), bufio.NewWriter(w.files[2])
+	w.auth, w.dns = bufio.NewWriter(w.files[3]), bufio.NewWriter(w.files[4])
 	return w, nil
 }
 
 func (w *writer) flush() {
-	for _, b := range []*bufio.Writer{w.nginx, w.ufw, w.forti} {
+	for _, b := range []*bufio.Writer{w.nginx, w.ufw, w.forti, w.auth, w.dns} {
 		if b != nil {
 			b.Flush()
 		}
@@ -229,6 +230,7 @@ func (s *Sim) emit(w *writer, t time.Time, intensity int) {
 		fmt.Fprintln(w.forti, s.fortiLine(s.sec(t), pick(s.r, s.normal), s.server, pick(s.r, []int{80, 443}), false))
 	}
 	s.beacon(w, t)
+	s.hostLogs(w, t, intensity)
 	for i := 0; i < intensity; i++ {
 		if s.r.Intn(3) == 0 {
 			s.attack(w, t, s.attackers[s.r.Intn(len(s.attackers))])
@@ -294,6 +296,9 @@ func (s *Sim) attack(w *writer, t time.Time, a attacker) {
 		port := pick(s.r, []int{22, 22, 3389})
 		for i := 0; i < 40; i++ {
 			fmt.Fprintln(w.forti, s.fortiLine(s.sec(t), a.ip, s.server, port, i%4 != 0))
+		}
+		if port == 22 {
+			s.sshBrute(w, t, a.ip, s.r.Intn(12) == 0) // 偶尔破解成功
 		}
 	case "redis":
 		fmt.Fprintln(w.forti, s.fortiLine(s.sec(t), a.ip, "10.0.0.21", 6379, false))
@@ -384,6 +389,12 @@ func (s *Sim) emitLive(w *writer, now time.Time, intensity int) {
 	}
 	if s.r.Intn(30) == 0 {
 		s.beacon(w, now.Add(-59*time.Second).Truncate(time.Minute))
+	}
+	for i := 0; i < intensity; i++ {
+		fmt.Fprintln(w.dns, s.dnsLine(now, fmt.Sprintf("10.0.0.%d", 40+s.r.Intn(20)), pick(s.r, normalDomains), "A", "NOERROR"))
+	}
+	if s.r.Intn(20) == 0 {
+		s.hostLogs(w, now.Add(-59*time.Second).Truncate(time.Minute), 1)
 	}
 	if s.r.Intn(2) == 0 {
 		a := s.attackers[s.r.Intn(len(s.attackers))]

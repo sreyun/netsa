@@ -6,12 +6,14 @@ import (
 	"log"
 	"math"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
 	"netsa/internal/alert"
 	"netsa/internal/model"
 	"netsa/internal/safe"
+	"netsa/internal/store"
 )
 
 // BuildReport 生成每日安全日报：安全评分与结论、近 24 小时攻击态势、疑似失陷资产与优先处置事项。
@@ -133,6 +135,10 @@ func (s *Server) RunBackground(ctx context.Context) {
 				}
 			}()
 			now := s.now()
+			s.remindOverdue()
+			s.pushSenderNotices()
+			s.pushSourceNotices()
+			s.scheduleReports(now)
 			if time.Since(lastScore) >= time.Hour-time.Minute {
 				lastScore = time.Now()
 				s.Store.RecordScore(s.Store.Assess(s.visibility(nil)))
@@ -152,4 +158,33 @@ func (s *Server) RunBackground(ctx context.Context) {
 			}
 		}()
 	}
+}
+
+// remindOverdue 推送超过处置时限仍未关闭的安全事件（每个事件只提醒一次）。超时事件较多时合并为一条通知。
+func (s *Server) remindOverdue() {
+	list := s.Store.TakeOverdue()
+	if len(list) == 0 {
+		return
+	}
+	line := func(v store.IncidentView) string {
+		return "#" + strconv.FormatUint(v.ID, 10) + "：" + v.Title + "（" + v.Severity.Label() + "，" + store.IncidentStatusLabel[v.Status] + "，负责人 " + orDash(v.Assignee) + "）"
+	}
+	if len(list) == 1 {
+		v := list[0]
+		s.Notifier.Notify("", alert.Event{Kind: "notice", Severity: v.Severity, Title: "安全事件超时未处置 #" + strconv.FormatUint(v.ID, 10),
+			IP: v.Key, Location: v.Location, Link: "#tab=incidents&incident=" + strconv.FormatUint(v.ID, 10), Time: time.Now(),
+			Lines: []string{"事件：" + v.Title, "当前状态：" + store.IncidentStatusLabel[v.Status], "负责人：" + orDash(v.Assignee),
+				"处置时限：" + v.Due.In(s.now().Location()).Format("2006-01-02 15:04") + " 前", "告警数：" + strconv.Itoa(v.Alerts)}})
+		return
+	}
+	lines := []string{"超时事件：" + strconv.Itoa(len(list)) + " 个"}
+	for i, v := range list {
+		if i == 8 {
+			lines = append(lines, "其余：另有 "+strconv.Itoa(len(list)-8)+" 个，请在事件处置页查看")
+			break
+		}
+		lines = append(lines, "事件 "+line(v))
+	}
+	s.Notifier.Notify("", alert.Event{Kind: "notice", Severity: list[0].Severity, Title: strconv.Itoa(len(list)) + " 个安全事件超时未处置",
+		Link: "#tab=incidents&overdue=1", Time: time.Now(), Lines: lines})
 }

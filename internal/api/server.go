@@ -18,6 +18,8 @@ import (
 
 	"netsa/internal/alert"
 	"netsa/internal/archive"
+	"netsa/internal/assets"
+	"netsa/internal/audit"
 	"netsa/internal/auth"
 	"netsa/internal/config"
 	"netsa/internal/detect"
@@ -25,7 +27,9 @@ import (
 	"netsa/internal/ingest"
 	"netsa/internal/model"
 	"netsa/internal/pipeline"
+	"netsa/internal/rawlog"
 	"netsa/internal/store"
+	"netsa/internal/suppress"
 )
 
 // HTTP 服务的读写超时。处理时间可能超过该时长的接口（实时告警流、历史告警导出）需自行调整连接期限：
@@ -59,13 +63,19 @@ type Server struct {
 	Version  string
 	Broker   *Broker
 	Notifier *alert.Notifier
-	Auth     *auth.Manager    // 为 nil 表示未开启登录
-	Archive  *archive.Archive // 为 nil 表示未启用告警归档
+	Auth     *auth.Manager     // 为 nil 表示未开启登录
+	Archive  *archive.Archive  // 为 nil 表示未启用告警归档
+	Suppress *suppress.Manager // 误报抑制规则
+	RawLog   *rawlog.Store     // 原始日志留存，为 nil 表示未启用
+	Assets   *assets.Manager   // 资产与漏洞
+	Trail    *audit.Trail      // 防篡改审计链
 
-	started time.Time
-	rdapSem chan struct{}
-	cache   *respCache
-	hashSem chan struct{} // 限制同时进行的密码哈希计算
+	started    time.Time
+	rdapSem    chan struct{}
+	cache      *respCache
+	hashSem    chan struct{} // 限制同时进行的密码哈希计算
+	archHealth archiveHealth
+	sched      reportSchedule
 }
 
 func (s *Server) Handler() http.Handler {
@@ -73,6 +83,9 @@ func (s *Server) Handler() http.Handler {
 	s.rdapSem = make(chan struct{}, 4)
 	s.cache = newRespCache()
 	s.hashSem = make(chan struct{}, 4)
+	if s.Auth != nil && s.Trail != nil {
+		s.Auth.SetAuditSink(s.Trail)
+	}
 	if s.Notifier == nil {
 		s.Notifier, _ = alert.New(config.AlertConfig{}, "")
 	}
@@ -115,7 +128,49 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("PUT /api/auth/users/{name}", s.authUserUpdate)
 	mux.HandleFunc("DELETE /api/auth/users/{name}", s.authUserDelete)
 	mux.HandleFunc("GET /api/auth/audit", s.authAudit)
+	mux.HandleFunc("POST /api/auth/login/2fa", s.authLogin2FA)
+	mux.HandleFunc("POST /api/auth/2fa/setup", s.auth2FASetup)
+	mux.HandleFunc("POST /api/auth/2fa/enable", s.auth2FAEnable)
+	mux.HandleFunc("POST /api/auth/2fa/disable", s.auth2FADisable)
+	mux.HandleFunc("GET /api/auth/tokens", s.authTokens)
+	mux.HandleFunc("POST /api/auth/tokens", s.authTokenCreate)
+	mux.HandleFunc("DELETE /api/auth/tokens/{id}", s.authTokenDelete)
 	// 告警推送机器人管理
+	mux.HandleFunc("GET /api/incidents", s.incidents)
+	mux.HandleFunc("GET /api/incidents/assignees", s.incidentAssignees)
+	mux.HandleFunc("GET /api/incidents/{id}", s.incident)
+	mux.HandleFunc("POST /api/incidents/bulk", s.incidentUpdate)
+	mux.HandleFunc("POST /api/incidents/{id}", s.incidentUpdate)
+	mux.HandleFunc("GET /metrics", s.cache.wrap(5*time.Second, s.metrics))
+	mux.HandleFunc("GET /api/assets", s.assetList)
+	mux.HandleFunc("GET /api/assets/template", s.assetTemplate)
+	mux.HandleFunc("GET /api/assets/{id}", s.assetDetail)
+	mux.HandleFunc("POST /api/assets", s.assetCreate)
+	mux.HandleFunc("POST /api/assets/import", s.assetImport)
+	mux.HandleFunc("PUT /api/assets/{id}", s.assetUpdate)
+	mux.HandleFunc("DELETE /api/assets/{id}", s.assetDelete)
+	mux.HandleFunc("GET /api/vulns", s.vulnList)
+	mux.HandleFunc("PUT /api/vulns/{id}", s.vulnUpdate)
+	mux.HandleFunc("DELETE /api/vulns/{id}", s.vulnDelete)
+	mux.HandleFunc("GET /api/reports/periodic", s.periodicReport)
+	mux.HandleFunc("GET /api/compliance/mlps", s.compliance)
+	mux.HandleFunc("POST /api/reports/email", s.reportEmail)
+	mux.HandleFunc("GET /api/audit", s.auditSearch)
+	mux.HandleFunc("GET /api/audit/export", s.auditExport)
+	mux.HandleFunc("POST /api/audit/verify", s.auditVerify)
+	mux.HandleFunc("GET /api/rawlog/status", s.rawlogStatus)
+	mux.HandleFunc("GET /api/rawlog/search", s.rawlogSearch)
+	mux.HandleFunc("GET /api/rawlog/export", s.rawlogExport)
+	mux.HandleFunc("POST /api/rawlog/verify", s.rawlogVerify)
+	mux.HandleFunc("GET /api/syslog/senders", s.syslogSenders)
+	mux.HandleFunc("POST /api/syslog/senders", s.senderCreate)
+	mux.HandleFunc("PUT /api/syslog/senders/{id}", s.senderUpdate)
+	mux.HandleFunc("DELETE /api/syslog/senders/{id}", s.senderDelete)
+	mux.HandleFunc("PUT /api/syslog/policy", s.senderPolicy)
+	mux.HandleFunc("GET /api/suppressions", s.suppressions)
+	mux.HandleFunc("POST /api/suppressions", s.suppressionCreate)
+	mux.HandleFunc("DELETE /api/suppressions/{id}", s.suppressionDelete)
+
 	mux.HandleFunc("GET /api/alert/robots", s.alertInfo)
 	mux.HandleFunc("POST /api/alert/robots", s.robotCreate)
 	mux.HandleFunc("PUT /api/alert/robots/{id}", s.robotUpdate)
@@ -226,7 +281,9 @@ func (s *Server) meta(w http.ResponseWriter, r *http.Request) {
 		"version": s.Version, "home": s.Cfg.Home, "started": s.started, "timezone": s.displayTimezone(),
 		"time_correction": s.Cfg.TimeCorrection != "off", "archive": s.Archive != nil,
 		"geo_providers": s.Geo.ProviderNames(), "rdap": s.RDAP != nil, "rules": len(s.Engine.Rules()),
-		"china_maps": s.Geo.Gazetteer().ChinaMaps(),
+		"china_maps":  s.Geo.Gazetteer().ChinaMaps(),
+		"require_2fa": s.Cfg.Server.Require2FA, "rawlog": s.RawLog != nil, "assets": s.Assets != nil, "audit": s.Trail != nil,
+		"syslog": s.Cfg.Syslog.Enabled, "suppress": s.Suppress != nil, "auth": s.Auth != nil,
 	})
 }
 
@@ -289,6 +346,7 @@ func (s *Server) alerts(w http.ResponseWriter, r *http.Request) {
 		Result: q.Get("result"), Kind: q.Get("kind"), Search: q.Get("q"), SinceID: since,
 		Limit: clamp(qint(r, "limit", 200), 1, 2000),
 		Phase: q.Get("phase"), Target: q.Get("target"), From: qtime(q.Get("from")), To: qtime(q.Get("to")), Technique: q.Get("technique"),
+		Asset: q.Get("asset"), Incident: incidentParam(q.Get("incident")),
 	})
 	if list == nil {
 		list = []*model.Alert{}
@@ -301,7 +359,7 @@ func (s *Server) sources(w http.ResponseWriter, r *http.Request) {
 	runtime.ReadMemStats(&ms)
 	writeJSON(w, map[string]any{
 		"sources": s.Ingest.Stats(), "processed": s.Pipeline.Processed(), "geo_providers": s.Geo.ProviderNames(),
-		"geo_pending": s.Geo.QueueLen(), "rules": len(s.Engine.Rules()), "syslog": s.Cfg.Syslog,
+		"geo_pending": s.Geo.QueueLen(), "rules": len(s.Engine.Rules()), "syslog": s.Cfg.Syslog, "silence": silenceText(s.Ingest.DefaultSilence),
 		"runtime": map[string]any{
 			"uptime": time.Since(s.started).Round(time.Second).String(), "goroutines": runtime.NumGoroutine(),
 			"heap_mb": ms.HeapAlloc >> 20, "sys_mb": ms.Sys >> 20, "go": runtime.Version(),

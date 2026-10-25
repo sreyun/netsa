@@ -47,6 +47,8 @@ form.addEventListener('submit', async (e) => {
       body: JSON.stringify({ username, password }),
     });
     if (r.ok) {
+      const s = await r.json().catch(() => ({}));
+      if (s.need_2fa) { showTwoFactor(s.challenge); return; } // 口令正确，还需第二因素
       home();
       return;
     }
@@ -60,6 +62,57 @@ form.addEventListener('submit', async (e) => {
   } finally {
     btn.disabled = false;
     btn.firstElementChild.textContent = '登 录';
+  }
+});
+
+// ---------------- 双因素认证（第二步） ----------------
+// 挑战凭据只在内存中保存 5 分钟且只能使用一次，不写入存储
+const twoForm = $('#twoForm');
+const otp = $('#otp');
+const twoMsg = $('#twoMsg');
+let challenge = '';
+function showTwoFactor(c) {
+  challenge = c;
+  form.hidden = true;
+  twoForm.hidden = false;
+  twoMsg.textContent = '';
+  otp.value = '';
+  otp.focus();
+}
+function backToPassword(text) {
+  challenge = '';
+  twoForm.hidden = true;
+  form.hidden = false;
+  pw.value = '';
+  msg.textContent = text || '';
+  pw.focus();
+}
+$('#twoBack').addEventListener('click', () => backToPassword(''));
+twoForm.addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const code = otp.value.trim();
+  if (!code) { twoMsg.textContent = '请输入动态口令或恢复码'; otp.focus(); return; }
+  const b = $('#twoBtn');
+  b.disabled = true;
+  b.firstElementChild.textContent = '验证中…';
+  twoMsg.textContent = '';
+  try {
+    const r = await fetch('/api/auth/login/2fa', {
+      method: 'POST', headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+      body: JSON.stringify({ challenge, code }),
+    });
+    if (r.ok) { home(); return; }
+    let text = '验证失败，请重试';
+    try { text = (await r.json()).error || text; } catch (_) { /* 非 JSON 响应 */ }
+    if (/超时|重新输入/.test(text)) { backToPassword(text); return; }
+    twoMsg.textContent = text;
+    otp.value = '';
+    otp.focus();
+  } catch (_) {
+    twoMsg.textContent = '无法连接服务器，请检查网络';
+  } finally {
+    b.disabled = false;
+    b.firstElementChild.textContent = '验 证';
   }
 });
 

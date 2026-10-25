@@ -19,7 +19,9 @@ func FirewallParsers() []Parser {
 }
 
 // AllParsers 返回全部内置解析器。
-func AllParsers() []Parser { return append(WebParsers(), FirewallParsers()...) }
+func AllParsers() []Parser {
+	return append(append(WebParsers(), HostParsers()...), FirewallParsers()...)
+}
 
 // Skippable 判断是否为空行或注释行（例如 W3C / Windows 防火墙日志头）。
 func Skippable(line string) bool {
@@ -39,7 +41,7 @@ type Auto struct {
 	miss   int
 }
 
-// NewAuto 根据数据源类型构造解析器。typ 取值 auto / nginx / web / firewall 或具体解析器名；
+// NewAuto 根据数据源类型构造解析器。typ 取值 auto / nginx / web / firewall / dns / auth 或具体解析器名；
 // logFormat 非空时优先使用自定义 nginx log_format。
 func NewAuto(typ, logFormat string) (*Auto, error) {
 	var cands []Parser
@@ -57,6 +59,10 @@ func NewAuto(typ, logFormat string) (*Auto, error) {
 		cands = append(cands, WebParsers()...)
 	case "firewall", "fw", "ids", "ips":
 		cands = append(cands, FirewallParsers()...)
+	case "dns":
+		cands = append(cands, BindDNS{}, Dnsmasq{}, CoreDNS{}, WindowsDNS{}, ZeekDNS{}, JSONDNS{})
+	case "auth", "host", "secure", "vpn":
+		cands = append(cands, LinuxAuth{}, WindowsSecurity{}, VPNAuth{})
 	default:
 		found := false
 		for _, p := range AllParsers() {
@@ -156,6 +162,9 @@ func parseWith(p Parser, line, msg string, hdr SyslogHeader, sys bool) (*model.E
 			return nil, false
 		}
 	}
+	if ev.SrcIP == "" && ev.SubjectHost {
+		ev.SrcIP = "127.0.0.1" // 本机事件；经 syslog 接收时由采集层替换为发送端地址
+	}
 	// 统一规范化地址：IPv4 映射地址、方括号、区域标识，保证同一来源只对应一个画像
 	src, valid := NormIP(ev.SrcIP)
 	if !valid {
@@ -174,7 +183,7 @@ func parseWith(p Parser, line, msg string, hdr SyslogHeader, sys bool) (*model.E
 	if ev.Time.IsZero() {
 		ev.Time = time.Now()
 	}
-	if ev.Host == "" && ev.Kind == model.KindFirewall && hdr.Host != "" {
+	if ev.Host == "" && (ev.Kind == model.KindFirewall || ev.Kind == model.KindAuth) && hdr.Host != "" {
 		ev.Host = hdr.Host
 	}
 	ev.Raw = line

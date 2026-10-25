@@ -20,8 +20,12 @@
     <button data-tab="overview" class="active">态势总览</button>
     <button data-tab="attackers">攻击溯源</button>
     <button data-tab="alerts">告警事件</button>
+    <button data-tab="incidents">事件处置<span class="tab-badge" id="incBadge" hidden></span></button>
     <button data-tab="surface">攻击面分析</button>
+    <button data-tab="assets">资产漏洞</button>
     <button data-tab="assess">安全评估</button>
+    <button data-tab="reports">报表合规</button>
+    <button data-tab="rawlog" class="need-analyst">日志检索</button>
     <button data-tab="notify">告警推送</button>
     <button data-tab="sources">数据源</button>
     <button data-tab="system" id="tabSystem" hidden>系统管理</button>
@@ -35,6 +39,7 @@
       <button class="user-btn" id="userBtn" aria-haspopup="true" aria-expanded="false"><span class="user-ico">●</span><span id="userName"></span><span class="user-role" id="userRole"></span> ▾</button>
       <div class="user-drop" id="userDrop" hidden>
         <button id="menuPassword">修改密码</button>
+        <button id="menu2FA">双因素认证</button>
         <button id="menuLogout">退出登录</button>
       </div>
     </div>
@@ -117,7 +122,7 @@
       <select id="alSev"><option value="">全部等级</option><option value="critical">严重</option><option value="high">高危及以上</option><option value="medium">中危及以上</option><option value="low">低危及以上</option></select>
       <select id="alCat"><option value="">全部类型</option></select>
       <select id="alResult"><option value="">全部结果</option></select>
-      <select id="alKind"><option value="">全部来源</option><option value="web">Web 日志</option><option value="firewall">防火墙日志</option></select>
+      <select id="alKind"><option value="">全部来源</option><option value="web">Web 日志</option><option value="firewall">防火墙日志</option><option value="dns">DNS 日志</option><option value="auth">认证日志</option></select>
       <span class="spacer"></span>
       <label class="muted"><input type="checkbox" id="alAuto" checked> 自动刷新</label>
     </div>
@@ -196,6 +201,101 @@
     <div class="panel"><h3>ATT&amp;CK 战术与技术 <small id="asMatrixInfo"></small></h3><div id="asMatrix" class="attck"></div></div>
   </section>
 
+  <!-- 事件处置 -->
+  <section id="tab-incidents" class="tab">
+    <div class="toolbar">
+      <span class="seg inc-seg" id="incStatus" role="tablist">
+        <button data-s="active" class="active">待处置 <b id="incCntActive">0</b></button><button data-s="open">待处理 <b id="incCntOpen">0</b></button><button data-s="investigating">处置中 <b id="incCntInv">0</b></button><button data-s="closed">已关闭 <b id="incCntClosed">0</b></button><button data-s="">全部</button>
+      </span>
+      <select id="incSev"><option value="">全部等级</option><option value="critical">严重</option><option value="high">高危及以上</option><option value="medium">中危及以上</option><option value="low">低危及以上</option></select>
+      <label class="muted"><input type="checkbox" id="incMine"> 只看我负责的</label>
+      <label class="muted"><input type="checkbox" id="incOverdue"> 只看超时 <b class="lv-critical" id="incCntOverdue"></b></label>
+      <input id="incSearch" placeholder="搜索事件编号 / IP / 归属地 / 攻击类型 / 资产">
+      <span class="spacer"></span>
+      <span class="muted" id="incTotal"></span>
+    </div>
+    <div class="inc-bulk need-analyst" id="incBulk" hidden>
+      <span>已选择 <b id="incSel">0</b> 个事件</span>
+      <button type="button" class="btn" data-bulk="investigating">开始处置</button>
+      <button type="button" class="btn" data-bulk="assign">指派负责人</button>
+      <button type="button" class="btn" data-bulk="resolved">标记已处置</button>
+      <button type="button" class="btn" data-bulk="false_positive">标记误报</button>
+      <button type="button" class="btn" data-bulk="ignored">忽略</button>
+      <button type="button" class="btn" data-bulk="clear">取消选择</button>
+    </div>
+    <div class="panel"><div class="table-wrap"><table class="table" id="incTable"></table></div><div class="pager" id="incPager"></div></div>
+    <div class="panel"><h3>误报抑制规则 <small id="supCount"></small></h3>
+      <div class="nt-help">命中抑制规则的攻击不产生告警、不计入攻击统计与威胁评分，只累计抑制次数；可在告警列表或事件详情中对误报的告警点击“标记误报”生成规则。</div>
+      <div class="table-wrap"><table class="table" id="supTable"></table></div></div>
+  </section>
+
+  <!-- 资产与漏洞 -->
+  <section id="tab-assets" class="tab">
+    <div class="toolbar">
+      <span class="seg as-seg" id="avView"><button data-v="assets" class="active">资产台账</button><button data-v="vulns">漏洞</button></span>
+      <input id="avSearch" placeholder="搜索 IP / 名称 / 负责人 / 部门 / 域名 / CVE">
+      <select id="avImp"><option value="">全部重要性</option><option value="core">核心</option><option value="important">重要</option><option value="normal">一般</option></select>
+      <select id="avVStatus" hidden><option value="open">未修复</option><option value="fixed">已修复</option><option value="accepted">风险接受</option><option value="">全部状态</option></select>
+      <span class="spacer"></span>
+      <a class="btn" href="/api/assets/template?type=assets" download>资产模板</a>
+      <a class="btn" href="/api/assets/template?type=vulns" download>漏洞模板</a>
+      <button type="button" class="btn need-admin" id="avImport">导入 CSV</button>
+      <button type="button" class="btn primary need-admin" id="avAdd">＋ 登记资产</button>
+    </div>
+    <div class="kpis av-kpis" id="avKpis"></div>
+    <div class="panel"><div class="table-wrap"><table class="table" id="avTable"></table></div></div>
+  </section>
+
+  <!-- 报表与合规 -->
+  <section id="tab-reports" class="tab">
+    <div class="grid-2 rp-grid">
+      <div class="panel"><h3>安全周报 / 月报</h3>
+        <div class="toolbar">
+          <span class="seg rp-seg" id="rpRange"><button data-k="week:recent" class="active">近 7 天</button><button data-k="week:last">上周</button><button data-k="month:recent">近 30 天</button><button data-k="month:last">上月</button></span>
+          <span class="spacer"></span>
+          <button type="button" class="btn" id="rpOpen" title="在新窗口打开报告，可打印或另存为 PDF">打开打印版</button>
+          <button type="button" class="btn need-admin" id="rpMail" title="通过邮件发送给 report.recipients 中配置的收件人">发送邮件</button>
+        </div>
+        <div id="rpBody" class="rp-body"><div class="muted">加载中…</div></div>
+        <div class="nt-help" id="rpMailInfo"></div>
+      </div>
+      <div class="panel need-admin"><h3>等保 2.0 合规检查 <small>GB/T 22239-2019 第三级（技术证据自动判定）</small></h3>
+        <div class="toolbar">
+          <span class="muted" id="cpTime"></span><span class="spacer"></span>
+          <button type="button" class="btn" id="cpRefresh">重新检查</button>
+          <button type="button" class="btn" id="cpOpen">打开打印版</button>
+        </div>
+        <div id="cpSummary" class="cp-summary"></div>
+        <div class="scroll cp-scroll"><table class="table" id="cpTable"></table></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- 原始日志检索 -->
+  <section id="tab-rawlog" class="tab">
+    <form class="panel hs-form" id="rlForm" autocomplete="off" novalidate>
+      <div class="hs-row">
+        <label class="hs-f"><span>开始时间</span><input type="datetime-local" id="rlFrom" step="60"></label>
+        <label class="hs-f"><span>结束时间</span><input type="datetime-local" id="rlTo" step="60" title="留空表示到现在"></label>
+        <span class="seg hs-range" id="rlRange"><button type="button" data-m="15">15分钟</button><button type="button" data-m="60" class="active">1小时</button><button type="button" data-m="1440">24小时</button><button type="button" data-m="10080">7天</button></span>
+      </div>
+      <div class="hs-row">
+        <label class="hs-f"><span>IP（来源或目的）</span><input id="rlIP" spellcheck="false" maxlength="45" placeholder="如 203.0.113.7"></label>
+        <label class="hs-f"><span>关键字</span><input id="rlQ" spellcheck="false" maxlength="200" placeholder="原始日志中包含的文本，不区分大小写"></label>
+        <label class="hs-f"><span>数据源</span><input id="rlSource" spellcheck="false" maxlength="100" placeholder="数据源名称或设备名称"></label>
+      </div>
+      <div class="hs-row">
+        <label class="muted inline-chk"><input type="checkbox" id="rlAttack"> 只看命中攻击规则的日志</label>
+        <span class="spacer"></span>
+        <button type="button" class="btn" id="rlExport" title="按当前条件导出（最多 5000 条，按时间先后），导出操作记入审计">导出</button>
+        <button type="submit" class="btn primary" id="rlSubmit">检索</button>
+      </div>
+      <div class="form-msg err" id="rlMsg" role="status"></div>
+    </form>
+    <div class="panel"><h3>检索结果 <small id="rlInfo"></small></h3><div class="table-wrap"><table class="table" id="rlTable"></table></div></div>
+    <div class="panel"><h3>留存状态 <small id="rlStatus"></small></h3><div id="rlStatusBody"></div></div>
+  </section>
+
   <!-- 告警推送 -->
   <section id="tab-notify" class="tab">
     <div class="toolbar">
@@ -215,17 +315,45 @@
   <!-- 系统管理（管理员） -->
   <section id="tab-system" class="tab">
     <div class="toolbar">
-      <span class="muted">管理登录账号与权限：管理员可修改配置与账号，只读账号仅能查看态势与告警（适合值班大屏）。</span>
+      <span class="muted">管理登录账号与权限：管理员可修改配置与账号；运营分析员可处置事件、标记误报、检索原始日志；只读账号仅能查看态势与告警（适合值班大屏）。</span>
       <span class="spacer"></span>
       <button class="btn primary" id="userAdd">＋ 添加账号</button>
     </div>
     <div class="panel"><h3>登录账号 <small id="userCount"></small></h3><div class="table-wrap"><table class="table" id="userTable"></table></div></div>
-    <div class="panel"><h3>审计日志 <small>最近 100 条：登录（含失败与锁定）、账号与告警推送配置变更、数据导出</small></h3><div class="scroll"><table class="table" id="auditTable"></table></div></div>
+    <div class="panel"><h3>API 令牌 <small id="tokCount">供 SOAR、工单系统、Prometheus 等以 Authorization: Bearer 调用接口</small>
+      <button type="button" class="btn primary" id="tokAdd" style="margin-left:auto">＋ 创建令牌</button></h3>
+      <div class="table-wrap"><table class="table" id="tokTable"></table></div></div>
+    <div class="panel"><h3>操作审计 <small id="auditInfo">登录（含失败与锁定）、配置变更、事件处置、数据检索与导出；记录以哈希链防篡改</small></h3>
+      <div class="toolbar">
+        <input id="auSearch" placeholder="搜索账号 / IP / 操作 / 详情">
+        <select id="auAction"><option value="">全部操作</option><option value="login">只看登录</option><option value="处置">事件处置</option><option value="导出">数据导出</option><option value="检索">日志检索</option><option value="账号">账号管理</option><option value="令牌">API 令牌</option></select>
+        <label class="muted"><input type="checkbox" id="auFailed"> 只看失败</label>
+        <span class="spacer"></span>
+        <span id="auVerifyMsg" class="muted"></span>
+        <button type="button" class="btn" id="auVerify" title="重新计算全部审计记录的哈希链，检查是否被修改或删除">校验完整性</button>
+        <a class="btn" id="auExport" href="/api/audit/export?format=csv">导出 CSV</a>
+      </div>
+      <div class="scroll"><table class="table" id="auditTable"></table></div></div>
   </section>
 
   <!-- 数据源 -->
   <section id="tab-sources" class="tab">
     <div class="panel"><h3>日志数据源 <small id="procCount"></small></h3><div class="table-wrap"><table class="table" id="srcTable"></table></div></div>
+    <div class="panel" id="sndPanel" hidden><h3>Syslog 发送端 <small id="sndSummary"></small></h3>
+      <div class="toolbar">
+        <label class="snd-switch need-admin-enable" title="开启后只接收已登记（允许）的发送端的日志，其余发送端的数据报被丢弃、TCP / TLS 连接被立即断开">
+          <input type="checkbox" id="sndAllow"> <b>发送端白名单</b></label>
+        <span class="muted" id="sndMode"></span>
+        <select id="sndGroup"><option value="">全部分组</option></select>
+        <select id="sndStatusSel"><option value="">全部状态</option><option value="online">在线</option><option value="idle">静默</option><option value="silent">断流</option><option value="rejected">已拒绝</option><option value="blocked">已阻止</option><option value="offline">未上线</option><option value="unregistered">未登记</option></select>
+        <span class="spacer"></span>
+        <button type="button" class="btn primary need-admin" id="sndAdd">＋ 登记发送端</button>
+      </div>
+      <div class="snd-groups" id="sndGroups"></div>
+      <div class="table-wrap"><table class="table" id="sndTable"></table></div>
+      <h3 style="margin-top:14px">登记规则 <small>按 IP 或网段登记名称、分组与断流阈值；“阻止”规则在任何模式下都拒绝该来源</small></h3>
+      <div class="table-wrap"><table class="table" id="sndRules"></table></div>
+    </div>
     <div class="panel" id="arcPanel" hidden><h3>告警归档（PostgreSQL） <small id="arcSummary"></small></h3><div id="arcBody"></div></div>
     <div class="grid-2">
       <div class="panel"><h3>溯源与检测能力</h3><div id="caps"></div></div>
@@ -274,7 +402,7 @@
     <div class="modal-body">
       <label class="field"><span class="flabel">用户名</span><input id="ufName" maxlength="32" spellcheck="false" placeholder="字母、数字与 _ . @ -，2~32 位"></label>
       <div class="field"><span class="flabel">角色</span>
-        <span class="seg nt-type" id="ufRole"><button type="button" data-r="viewer" class="active">只读</button><button type="button" data-r="admin">管理员</button></span></div>
+        <span class="seg nt-type" id="ufRole"><button type="button" data-r="viewer" class="active">只读</button><button type="button" data-r="analyst">运营分析员</button><button type="button" data-r="admin">管理员</button></span></div>
       <label class="field"><span class="flabel" id="ufPwLabel">初始密码</span><input id="ufPw" type="password" autocomplete="new-password"></label>
       <div class="hint" id="ufHint">用户首次登录后须修改密码。至少 8 位，包含字母、数字、符号中的至少两类。</div>
       <div class="form-msg" id="ufMsg" role="status"></div>
@@ -315,7 +443,127 @@
   </form>
 </div>
 
+<!-- 事件详情与处置 -->
+<div class="modal-mask" id="incModal" hidden>
+  <div class="modal wide" role="dialog" aria-modal="true" aria-labelledby="incTitle">
+    <div class="modal-head"><b id="incTitle">安全事件</b><button type="button" class="close" data-close="incModal" aria-label="关闭">✕</button></div>
+    <div class="modal-body" id="incBody"></div>
+    <div class="modal-foot need-analyst" id="incFoot">
+      <select id="incSetStatus"><option value="">状态不变</option><option value="investigating">处置中</option><option value="resolved">已处置</option><option value="false_positive">误报</option><option value="ignored">忽略</option><option value="open">重新打开</option></select>
+      <select id="incSetAssignee"><option value="__keep">负责人不变</option></select>
+      <input id="incNote" maxlength="1000" placeholder="处置说明（关闭事件时必填，如：已封禁来源 IP、确认为业务误报）">
+      <button type="button" class="btn primary" id="incSave">提交</button>
+    </div>
+    <div class="form-msg err" id="incMsg" role="status" style="padding:0 16px 10px"></div>
+  </div>
+</div>
+
+<!-- 标记误报 / 抑制规则 -->
+<div class="modal-mask" id="supModal" hidden>
+  <form class="modal" role="dialog" aria-modal="true" aria-labelledby="supTitle" id="supForm" autocomplete="off" novalidate>
+    <div class="modal-head"><b id="supTitle">标记误报</b><button type="button" class="close" data-close="supModal" aria-label="关闭">✕</button></div>
+    <div class="modal-body">
+      <div class="nt-help" id="supHelp">生成抑制规则：之后同时满足以下已勾选条件的命中不再产生告警。条件越具体，越不会漏掉真实攻击。</div>
+      <label class="field"><span class="flabel"><input type="checkbox" id="supUseRule" checked> 检测规则</span><input id="supRule" spellcheck="false" maxlength="64"></label>
+      <label class="field"><span class="flabel"><input type="checkbox" id="supUseCat"> 攻击类型</span><input id="supCat" maxlength="40"></label>
+      <label class="field"><span class="flabel"><input type="checkbox" id="supUseIP"> 来源 IP / 网段</span><input id="supIP" spellcheck="false" maxlength="49" placeholder="如 10.8.0.0/16（内部扫描器）"></label>
+      <label class="field"><span class="flabel"><input type="checkbox" id="supUseTarget" checked> 目标包含</span><input id="supTarget" spellcheck="false" maxlength="200" placeholder="如 /api/search"></label>
+      <label class="field"><span class="flabel">原因</span><input id="supReason" maxlength="200" placeholder="必填，如：搜索接口参数包含 SQL 关键字，属业务误报"></label>
+      <div class="field"><span class="flabel">有效期</span>
+        <span class="seg nt-type" id="supDays"><button type="button" data-d="7">7 天</button><button type="button" data-d="30" class="active">30 天</button><button type="button" data-d="90">90 天</button><button type="button" data-d="0">永久</button></span></div>
+      <label class="inline" id="supIncRow" hidden><input type="checkbox" id="supInc" checked> 同时将所属事件 <b id="supIncId"></b> 标记为误报</label>
+      <div class="form-msg" id="supMsg" role="status"></div>
+    </div>
+    <div class="modal-foot"><span class="spacer"></span><button type="button" class="btn" data-close="supModal">取消</button><button type="submit" class="btn primary" id="supSave">保存</button></div>
+  </form>
+</div>
+
+<!-- 双因素认证 -->
+<div class="modal-mask" id="tfModal" hidden>
+  <form class="modal" role="dialog" aria-modal="true" aria-labelledby="tfTitle" id="tfForm" autocomplete="off" novalidate>
+    <div class="modal-head"><b id="tfTitle">双因素认证</b><button type="button" class="close" data-close="tfModal" id="tfClose" aria-label="关闭">✕</button></div>
+    <div class="modal-body" id="tfBody"></div>
+    <div class="modal-foot"><span class="spacer"></span><button type="button" class="btn" data-close="tfModal" id="tfCancel">关闭</button><button type="submit" class="btn primary" id="tfSave">确认</button></div>
+  </form>
+</div>
+
+<!-- 创建 API 令牌 -->
+<div class="modal-mask" id="tokModal" hidden>
+  <form class="modal" role="dialog" aria-modal="true" aria-labelledby="tokTitle" id="tokForm" autocomplete="off" novalidate>
+    <div class="modal-head"><b id="tokTitle">创建 API 令牌</b><button type="button" class="close" data-close="tokModal" aria-label="关闭">✕</button></div>
+    <div class="modal-body" id="tokBody">
+      <label class="field"><span class="flabel">名称</span><input id="tokName" maxlength="40" placeholder="如：SOAR 自动处置、Prometheus 采集"></label>
+      <label class="field"><span class="flabel">所属账号</span><select id="tokUser"></select></label>
+      <label class="field"><span class="flabel">权限</span><select id="tokRole"><option value="viewer">只读</option><option value="analyst">运营分析员（可处置事件）</option><option value="admin">管理员</option><option value="metrics">仅 /metrics 监控指标</option></select></label>
+      <label class="field"><span class="flabel">有效期</span><select id="tokDays"><option value="30">30 天</option><option value="90" selected>90 天</option><option value="365">1 年</option><option value="0">永不过期</option></select></label>
+      <div class="hint">令牌权限不超过所属账号的权限；删除或降级账号后令牌随之失效。令牌只在创建时显示一次。</div>
+      <div class="form-msg" id="tokMsg" role="status"></div>
+    </div>
+    <div class="modal-foot"><span class="spacer"></span><button type="button" class="btn" data-close="tokModal">取消</button><button type="submit" class="btn primary" id="tokSave">创建</button></div>
+  </form>
+</div>
+
+<!-- 登记 syslog 发送端 -->
+<div class="modal-mask" id="sndModal" hidden>
+  <form class="modal" role="dialog" aria-modal="true" aria-labelledby="sndTitle" id="sndForm" autocomplete="off" novalidate>
+    <div class="modal-head"><b id="sndTitle">登记发送端</b><button type="button" class="close" data-close="sndModal" aria-label="关闭">✕</button></div>
+    <div class="modal-body">
+      <label class="field"><span class="flabel">IP / 网段</span><input id="sndCIDR" spellcheck="false" maxlength="49" placeholder="如 10.0.0.1 或 10.1.0.0/24"></label>
+      <label class="field"><span class="flabel">设备名称</span><input id="sndName" maxlength="40" placeholder="如：核心防火墙、DMZ WAF"></label>
+      <label class="field"><span class="flabel">分组</span><input id="sndGroupIn" maxlength="20" list="sndGroupList" placeholder="如：防火墙、WAF、服务器、VPN"><datalist id="sndGroupList"></datalist></label>
+      <div class="field"><span class="flabel">动作</span>
+        <span class="seg nt-type" id="sndAction"><button type="button" data-a="allow" class="active">允许</button><button type="button" data-a="block">阻止</button></span></div>
+      <label class="field"><span class="flabel">断流告警</span><input id="sndSilence" spellcheck="false" maxlength="10" placeholder="如 10m、2h；off 关闭；留空使用默认值"></label>
+      <label class="field"><span class="flabel">备注</span><input id="sndNote" maxlength="200"></label>
+      <div class="form-msg" id="sndMsg" role="status"></div>
+    </div>
+    <div class="modal-foot"><button type="button" class="btn danger" id="sndDel" hidden>删除</button><span class="spacer"></span><button type="button" class="btn" data-close="sndModal">取消</button><button type="submit" class="btn primary" id="sndSave">保存</button></div>
+  </form>
+</div>
+
+<!-- 登记 / 编辑资产 -->
+<div class="modal-mask" id="assetModal" hidden>
+  <form class="modal" role="dialog" aria-modal="true" aria-labelledby="assetTitle" id="assetForm" autocomplete="off" novalidate>
+    <div class="modal-head"><b id="assetTitle">登记资产</b><button type="button" class="close" data-close="assetModal" aria-label="关闭">✕</button></div>
+    <div class="modal-body">
+      <label class="field"><span class="flabel">IP / 网段</span><input id="asIP" spellcheck="false" maxlength="49" placeholder="如 10.0.1.10 或 10.0.2.0/24"></label>
+      <label class="field"><span class="flabel">域名</span><input id="asHosts" spellcheck="false" maxlength="500" placeholder="多个用逗号分隔，支持 *.example.com"></label>
+      <label class="field"><span class="flabel">名称</span><input id="asName" maxlength="60"></label>
+      <div class="field"><span class="flabel">重要性</span>
+        <span class="seg nt-type" id="asImpSeg"><button type="button" data-i="core">核心</button><button type="button" data-i="important">重要</button><button type="button" data-i="normal" class="active">一般</button></span></div>
+      <label class="field"><span class="flabel">等保级别</span><select id="asMLPS"><option value="0">未定级</option><option value="1">第一级</option><option value="2">第二级</option><option value="3">第三级</option><option value="4">第四级</option></select></label>
+      <label class="field"><span class="flabel">负责人</span><input id="asOwner" maxlength="40"></label>
+      <label class="field"><span class="flabel">部门</span><input id="asDept" maxlength="60"></label>
+      <label class="field"><span class="flabel">环境</span><input id="asEnv" maxlength="20" placeholder="生产 / 测试"></label>
+      <label class="field"><span class="flabel">标签</span><input id="asTags" maxlength="200" placeholder="多个用逗号分隔"></label>
+      <label class="field"><span class="flabel">备注</span><input id="asNote" maxlength="300"></label>
+      <div class="form-msg" id="asMsg" role="status"></div>
+    </div>
+    <div class="modal-foot"><button type="button" class="btn danger" id="asDel" hidden>删除</button><span class="spacer"></span><button type="button" class="btn" data-close="assetModal">取消</button><button type="submit" class="btn primary" id="asSave">保存</button></div>
+  </form>
+</div>
+
+<!-- 导入资产 / 漏洞 -->
+<div class="modal-mask" id="impModal" hidden>
+  <form class="modal" role="dialog" aria-modal="true" aria-labelledby="impTitle" id="impForm" autocomplete="off" novalidate>
+    <div class="modal-head"><b id="impTitle">导入 CSV</b><button type="button" class="close" data-close="impModal" aria-label="关闭">✕</button></div>
+    <div class="modal-body">
+      <div class="field"><span class="flabel">内容</span>
+        <span class="seg nt-type" id="impType"><button type="button" data-t="assets" class="active">资产台账</button><button type="button" data-t="vulns">漏洞扫描结果</button></span></div>
+      <div class="field"><span class="flabel">方式</span>
+        <span class="seg nt-type" id="impMode"><button type="button" data-m="merge" class="active">合并</button><button type="button" data-m="replace">替换</button></span></div>
+      <div class="hint" id="impModeHint"></div>
+      <label class="field"><span class="flabel">扫描名称</span><input id="impName" maxlength="100" placeholder="可选，如：2026 Q4 Nessus 全网扫描"></label>
+      <label class="field"><span class="flabel">CSV 文件</span><input id="impFile" type="file" accept=".csv,.tsv,.txt,text/csv"></label>
+      <div class="nt-help">支持 CMDB 导出、Nessus、OpenVAS、绿盟等扫描器的 CSV，按列名自动识别（如 IP / IP地址 / Host、漏洞名称 / Name、风险等级 / Risk / CVSS、CVE）。文件须为 UTF-8 编码（Excel 中“另存为 CSV UTF-8”），最大 20MB。</div>
+      <div class="form-msg" id="impMsg" role="status"></div>
+    </div>
+    <div class="modal-foot"><span class="spacer"></span><button type="button" class="btn" data-close="impModal">关闭</button><button type="submit" class="btn primary" id="impSave">导入</button></div>
+  </form>
+</div>
+
 <script src="/vendor/echarts.min.js"></script>
 <script src="app.js"></script>
+<script src="ops.js"></script>
 </body>
 </html>
