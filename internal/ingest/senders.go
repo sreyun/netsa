@@ -102,10 +102,10 @@ func (p *policy) permits(r *SenderRule) bool {
 
 // senderStat 是一个发送端（源 IP）的运行画像：独立的格式识别、时区校正、限速与统计。
 type senderStat struct {
-	addr   netip.Addr
-	ip     string
-	parser *parser.Auto
-	fix    timeFix
+	addr netip.Addr
+	ip   string
+	pa   atomic.Pointer[parser.Auto] // 格式识别器，首次解析时创建（被拒绝的来源不分配）
+	fix  timeFix
 
 	first, last, lastEvent                          atomic.Int64 // UnixNano：首次 / 最近接收时间，最近日志时间
 	lines, parsed, failed, bytes, rejected, limited atomic.Int64
@@ -130,9 +130,28 @@ type senderStat struct {
 
 func newSenderStat(a netip.Addr) *senderStat {
 	st := &senderStat{addr: a, ip: a.String()}
-	st.parser, _ = parser.NewAuto("auto", "")
 	st.fix.name = "syslog 发送端 " + st.ip
 	return st
+}
+
+// parser 返回发送端的格式识别器（按需创建，并发安全）。
+func (st *senderStat) parser() *parser.Auto {
+	if p := st.pa.Load(); p != nil {
+		return p
+	}
+	p, _ := parser.NewAuto("auto", "")
+	if !st.pa.CompareAndSwap(nil, p) {
+		return st.pa.Load()
+	}
+	return p
+}
+
+// detected 返回识别出的格式（还没有解析过日志时为空）。
+func (st *senderStat) detected() string {
+	if p := st.pa.Load(); p != nil {
+		return p.Detected()
+	}
+	return ""
 }
 
 // take 按每秒上限限速，返回是否接收这一条。limit 为 0 不限速。
@@ -309,7 +328,7 @@ func (s *Senders) admit(a netip.Addr, proto int, listener string) (*senderStat, 
 		s.noteRejected(st, now)
 		return st, false
 	}
-	if fresh && st.rule.Load() == nil {
+	if fresh && st.rule.Load() == nil && s.noticeQuota(now) {
 		s.push(SenderNotice{Kind: "new", IP: st.ip, Detail: "通过 " + listener + " 首次发送日志，尚未登记"})
 	}
 	return st, true
@@ -352,14 +371,7 @@ func (s *Senders) noteRejected(st *senderStat, now time.Time) {
 	}
 	st.lastNotice = now
 	st.mu.Unlock()
-	s.nmu.Lock()
-	if h := now.Unix() / 3600; h != s.rejectHour {
-		s.rejectHour, s.rejectN = h, 0
-	}
-	s.rejectN++
-	over := s.rejectN > maxRejectPerHour
-	s.nmu.Unlock()
-	if over {
+	if !s.noticeQuota(now) {
 		return
 	}
 	detail := "未在白名单中，日志已被拒绝"
@@ -367,6 +379,17 @@ func (s *Senders) noteRejected(st *senderStat, now time.Time) {
 		detail = "已被登记为阻止（" + r.CIDR + "），日志已被拒绝"
 	}
 	s.push(SenderNotice{Kind: "rejected", IP: st.ip, Detail: detail, Last: now})
+}
+
+// noticeQuota 判断本小时内是否还能产生新发送端 / 拒绝通知：伪造大量源地址时最多每小时 maxRejectPerHour 条，不会刷屏。
+func (s *Senders) noticeQuota(now time.Time) bool {
+	s.nmu.Lock()
+	defer s.nmu.Unlock()
+	if h := now.Unix() / 3600; h != s.rejectHour {
+		s.rejectHour, s.rejectN = h, 0
+	}
+	s.rejectN++
+	return s.rejectN <= maxRejectPerHour
 }
 
 func (s *Senders) push(n SenderNotice) {
@@ -538,7 +561,7 @@ func silenceText(d time.Duration) string {
 func (st *senderStat) view(now time.Time) SenderView {
 	r := st.rule.Load()
 	v := SenderView{IP: st.ip, Lines: st.lines.Load(), Parsed: st.parsed.Load(), Failed: st.failed.Load(), Bytes: st.bytes.Load(),
-		Rejected: st.rejected.Load(), Limited: st.limited.Load(), Detected: st.parser.Detected(), TimeOffset: describeOffset(st.fix.current()),
+		Rejected: st.rejected.Load(), Limited: st.limited.Load(), Detected: st.detected(), TimeOffset: describeOffset(st.fix.current()),
 		Protocols: []string{}, Silence: "off"}
 	for i, n := range protoNames {
 		if st.protos.Load()&(1<<i) != 0 {

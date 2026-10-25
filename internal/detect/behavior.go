@@ -117,13 +117,17 @@ func (b *Behavior) Observe(ev *model.Event) []model.Hit {
 	// 按入站攻击的阈值判断会产生大量误报；只检测按固定间隔回连同一地址的 C2 心跳。
 	// 内网主机之间的横向扫描（目的为内网地址）仍按入站规则检测。
 	if ev.Kind == model.KindAuth || ev.Kind == model.KindDNS {
+		var f dnsFacts
+		if ev.Kind == model.KindDNS {
+			f = dnsFactsOf(ev) // 锁外计算
+		}
 		b.mu.Lock()
 		defer b.mu.Unlock()
 		b.maybePrune(ev)
 		if ev.Kind == model.KindAuth {
 			return b.observeAuth(ev)
 		}
-		return b.observeDNS(ev)
+		return b.observeDNS(ev, &f)
 	}
 	egress := ev.Outbound || IsEgress(ev)
 	if egress && ev.Kind != model.KindFirewall {

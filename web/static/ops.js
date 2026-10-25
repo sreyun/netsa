@@ -60,6 +60,7 @@ const INC_PAGE = 50;
 const inc = { offset: 0, list: [], sel: new Set(), cur: null, assignees: null };
 async function loadAssignees() {
   if (inc.assignees) return inc.assignees;
+  if (!canOperate()) return []; // 只读账号无权查看账号列表
   try { inc.assignees = await api('/api/incidents/assignees'); } catch (_) { inc.assignees = []; }
   return inc.assignees;
 }
@@ -497,7 +498,7 @@ async function loadRawlog() {
   $('#rlStatus').textContent = `留存 ${st.retention_days ? st.retention_days + ' 天' : '永久'}${st.max_bytes ? ` · 上限 ${fmtBytes(st.max_bytes)}` : ''} · 占用 ${fmtBytes(st.disk_bytes)}${st.attacks_only ? ' · 只留存攻击事件' : ''}`;
   $('#rlStatusBody').innerHTML = `<div class="kv">
     <div class="k">留存范围</div><div>${st.oldest ? `${esc(st.oldest)} ~ ${esc(st.newest)}（${st.days.length} 天）` : '暂无'}</div>
-    <div class="k">本次启动以来</div><div>写入 ${num(st.written)} 条（原始 ${fmtBytes(st.bytes_in)}）${st.dropped ? ` · <span class="lv-high">丢弃 ${num(st.dropped)} 条</span>` : ''}</div>
+    <div class="k">本次启动以来</div><div>写入 ${num(st.written)} 条（原始 ${fmtBytes(st.bytes_in)}）${st.dropped ? ` · <span class="lv-high">丢弃 ${num(st.dropped)} 条</span>` : ''}${st.expired ? ` · <span class="muted">早于留存期限未写入 ${num(st.expired)} 条</span>` : ''}</div>
     ${st.last_error ? `<div class="k">最近错误</div><div class="arc-err">${esc(st.last_error)}</div>` : ''}
     <div class="k">防篡改</div><div>已关闭的分段以 SHA-256 登记到哈希链清单 ${isAdmin() ? '<button type="button" class="btn" id="rlVerify">校验完整性</button> <span id="rlVerifyMsg"></span>' : ''}</div></div>`;
   if ($('#rlVerify')) $('#rlVerify').onclick = () => ntBusy($('#rlVerify'), async () => {

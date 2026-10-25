@@ -49,7 +49,7 @@ func (ss *syslogSource) offsets() string {
 func (ss *syslogSource) detected() string {
 	seen := map[string]bool{}
 	for _, st := range ss.senders.byProto(ss.proto) {
-		if d := st.parser.Detected(); d != "" {
+		if d := st.detected(); d != "" {
 			seen[d] = true
 		}
 	}
@@ -298,7 +298,7 @@ func (ss *syslogSource) handleLine(ctx context.Context, st *senderStat, line str
 			st.mu.Unlock()
 		}
 	}
-	ev, status := ss.parseLineStatus(st.parser, line)
+	ev, status := ss.parseLineStatus(st.parser(), line)
 	switch status {
 	case lineFailed:
 		if st.failed.Add(1)%64 == 1 {

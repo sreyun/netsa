@@ -13,6 +13,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"netsa/internal/parser"
 )
 
 // Query 是检索条件。
@@ -108,7 +110,8 @@ func (s *Store) Search(ctx context.Context, q Query) (Result, error) {
 	}
 	kw := []byte(strings.ToLower(strings.TrimSpace(q.Keyword)))
 	src := strings.ToLower(strings.TrimSpace(q.Source))
-	ip := strings.TrimSpace(q.IP)
+	// 与入库时一致地规范化地址（IPv4 映射地址、大小写、方括号），否则布隆过滤器与精确匹配都会漏掉
+	ip, _ := parser.NormIP(q.IP)
 	ipB := []byte(ip)
 	segs := s.segmentsIn(q.From, q.To)
 	res.Segments = len(segs)

@@ -128,11 +128,34 @@ func logonService(t string) string {
 	return "Windows 登录"
 }
 
+// hasWinIDKey 判断 JSON 中是否有事件 ID 键（EventID / event_id / EventCode 等，不区分大小写）。
+func hasWinIDKey(line string) bool {
+	for _, v := range [...]string{"vent", "VENT"} {
+		for i := 0; ; {
+			j := strings.Index(line[i:], v)
+			if j < 0 {
+				break
+			}
+			i += j + 4
+			rest := line[i:]
+			if len(rest) > 0 && rest[0] == '_' {
+				rest = rest[1:]
+			}
+			for _, k := range [...]string{`id"`, `code"`} {
+				if len(rest) >= len(k) && strings.EqualFold(rest[:len(k)], k) {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
 func (WindowsSecurity) Parse(line string) (*model.Event, bool) {
 	var id int
 	kv := map[string]string{}
 	if strings.HasPrefix(strings.TrimSpace(line), "{") {
-		if !strings.Contains(line, "vent") { // EventID / event_id / EventId
+		if !hasWinIDKey(line) { // 先确认有事件 ID 键再解码：其他 JSON 日志（如 Suricata eve 的 event_type）不做无谓的解码
 			return nil, false
 		}
 		var m map[string]any
@@ -449,7 +472,9 @@ func (JSONDNS) Name() string { return "json_dns" }
 
 func (JSONDNS) Parse(line string) (*model.Event, bool) {
 	line = strings.TrimSpace(line)
-	if !strings.HasPrefix(line, "{") || !strings.Contains(line, "dns") {
+	// 预筛：要求出现 DNS 特有的键名，含 dns 字样的其他 JSON 日志（如访问 dnslog 域名的 Web 日志）不做解码
+	if !strings.HasPrefix(line, "{") || !strings.Contains(line, `"dns"`) && !strings.Contains(line, `"qname"`) && !strings.Contains(line, `"rrname"`) &&
+		!strings.Contains(line, `"qtype"`) && !strings.Contains(line, `"query_type"`) && !(strings.Contains(line, "dns") && strings.Contains(line, `"domain"`)) {
 		return nil, false
 	}
 	var m map[string]any

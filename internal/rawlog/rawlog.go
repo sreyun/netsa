@@ -60,6 +60,9 @@ type Store struct {
 	last string // 清单最后一条的哈希
 
 	written, dropped, bytesIn atomic.Int64
+	expired                   atomic.Int64 // 时间早于留存期限、未写入的日志
+	opens                     int          // 本分钟新打开的历史分段数（受 mu 保护）
+	opensMin                  int64
 	lastErr                   atomic.Pointer[string]
 	closed                    atomic.Bool
 }
@@ -153,15 +156,24 @@ func (s *Store) safeWrite(b batch) {
 		}
 	}()
 	now := time.Now()
+	var cut time.Time
+	if s.opt.RetentionDays > 0 {
+		cut = now.AddDate(0, 0, -s.opt.RetentionDays)
+	}
 	for i, ev := range b.evs {
 		if s.opt.AttacksOnly && !b.attack[i] {
 			continue
 		}
 		t := ev.Time
-		if t.IsZero() {
+		// 未来的时间（发送端时钟错误或伪造）按接收时间归档：否则会生成不会被按天清理的未来目录
+		if t.IsZero() || t.After(now.Add(time.Hour)) {
 			t = now
 		}
-		seg, err := s.segmentFor(t)
+		if !cut.IsZero() && t.Before(cut) {
+			s.expired.Add(1) // 早于留存期限：写入后也会在下次清理时删除
+			continue
+		}
+		seg, err := s.segmentFor(&t, now)
 		if err != nil {
 			s.setErr(err)
 			s.dropped.Add(1)
@@ -185,18 +197,37 @@ func (s *Store) key(t time.Time) string {
 
 const maxOpenSegments = 6
 
-func (s *Store) segmentFor(t time.Time) (*segment, error) {
-	k := s.key(t)
+// maxHistoryOpens 是每分钟最多新打开的历史分段数。时间戳在多个小时之间来回跳动的日志（时钟混乱或伪造）
+// 会让分段反复关闭、计算哈希、再打开，超过后按接收时间归档。
+const maxHistoryOpens = 30
+
+// segmentFor 返回事件所属的分段；历史分段打开过于频繁时改按接收时间归档（*t 改为 now）。
+func (s *Store) segmentFor(t *time.Time, now time.Time) (*segment, error) {
+	k, cur := s.key(*t), s.key(now)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if seg := s.segs[k]; seg != nil {
-		seg.used = time.Now()
+		seg.used = now
 		return seg, nil
 	}
-	if len(s.segs) >= maxOpenSegments { // 关闭最久未写入的分段
+	if k != cur {
+		if m := now.Unix() / 60; m != s.opensMin {
+			s.opensMin, s.opens = m, 0
+		}
+		if s.opens >= maxHistoryOpens {
+			k, *t = cur, now
+			if seg := s.segs[k]; seg != nil {
+				seg.used = now
+				return seg, nil
+			}
+		} else {
+			s.opens++
+		}
+	}
+	if len(s.segs) >= maxOpenSegments { // 关闭最久未写入的分段，当前小时的分段（通常最大）不关闭
 		var old *segment
 		for _, sg := range s.segs {
-			if old == nil || sg.used.Before(old.used) {
+			if sg.key != cur && (old == nil || sg.used.Before(old.used)) {
 				old = sg
 			}
 		}
@@ -659,6 +690,7 @@ type Status struct {
 	AttacksOnly   bool      `json:"attacks_only"`
 	Written       int64     `json:"written"`
 	Dropped       int64     `json:"dropped"`
+	Expired       int64     `json:"expired"`  // 时间早于留存期限、未写入
 	BytesIn       int64     `json:"bytes_in"` // 写入的原始字节（压缩前）
 	DiskBytes     int64     `json:"disk_bytes"`
 	Oldest        string    `json:"oldest,omitempty"`
@@ -673,7 +705,7 @@ func (s *Store) Status() Status {
 		return Status{Days: []DayInfo{}}
 	}
 	st := Status{Enabled: true, Dir: s.opt.Dir, RetentionDays: s.opt.RetentionDays, MaxBytes: s.opt.MaxBytes, AttacksOnly: s.opt.AttacksOnly,
-		Written: s.written.Load(), Dropped: s.dropped.Load(), BytesIn: s.bytesIn.Load(), Days: []DayInfo{}}
+		Written: s.written.Load(), Dropped: s.dropped.Load(), Expired: s.expired.Load(), BytesIn: s.bytesIn.Load(), Days: []DayInfo{}}
 	if e := s.lastErr.Load(); e != nil {
 		st.LastError = *e
 	}
