@@ -30,7 +30,7 @@ func TestWriteSearchVerify(t *testing.T) {
 	dir := t.TempDir()
 	ctx, cancel := context.WithCancel(context.Background())
 	loc := time.FixedZone("CST", 8*3600)
-	s, err := Open(ctx, Options{Dir: dir, RetentionDays: 180, Location: loc})
+	s, err := Open(ctx, Options{Dir: dir, RetentionDays: 3650, Location: loc}) // 测试数据为固定日期，留存期取长一些
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -168,5 +168,51 @@ func BenchmarkWrite(b *testing.B) {
 	b.ReportAllocs()
 	for i := 0; i < b.N; i++ {
 		seg.append(e.Time, e, false)
+	}
+}
+
+func TestAbnormalTimestamps(t *testing.T) {
+	dir := t.TempDir()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	s, err := Open(ctx, Options{Dir: dir, RetentionDays: 7, Location: time.Local})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close(5 * time.Second) // 先关闭分段再删除临时目录
+	now := time.Now()
+	s.Write([]*model.Event{ev(now.Add(48*time.Hour), "198.51.100.7", "future"), ev(now.AddDate(0, 0, -30), "198.51.100.7", "too old"),
+		ev(now, "198.51.100.8", "normal")}, [][]model.Hit{nil, nil, nil})
+	waitWritten(t, s, 2)
+	if s.expired.Load() != 1 {
+		t.Fatalf("早于留存期限的日志应不写入: %d", s.expired.Load())
+	}
+	s.maintain(false)
+	days, _ := os.ReadDir(dir)
+	for _, d := range days {
+		if d.IsDir() && d.Name() > now.Add(2*time.Hour).Format("20060102") {
+			t.Fatalf("不应生成未来的日期目录: %s", d.Name())
+		}
+	}
+	// 未来时间按接收时间归档；检索时 IPv4 映射地址、方括号写法与入库地址一致
+	for _, ip := range []string{"198.51.100.7", "::ffff:198.51.100.7", "[198.51.100.7]"} {
+		if res, _ := s.Search(ctx, Query{From: now.Add(-time.Minute), To: now.Add(time.Minute), IP: ip}); len(res.Records) != 1 || res.Records[0].Raw != "future" {
+			t.Fatalf("按 %s 检索: %+v", ip, res)
+		}
+	}
+	// 时间戳在大量不同小时间跳动：每分钟最多新开 maxHistoryOpens 个历史分段，之后按接收时间归档，当前小时的分段不被关闭
+	cur, _ := s.segmentFor(&now, now)
+	for i := 1; i <= maxHistoryOpens+20; i++ {
+		ts := now.Add(-time.Duration(i) * time.Hour)
+		seg, err := s.segmentFor(&ts, now)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if i > maxHistoryOpens && (seg != cur || !ts.Equal(now)) {
+			t.Fatalf("第 %d 个历史分段应改按接收时间归档", i)
+		}
+		if len(s.segs) > maxOpenSegments || s.segs[cur.key] != cur {
+			t.Fatalf("打开的分段数 %d，当前分段被关闭: %v", len(s.segs), s.segs[cur.key] != cur)
+		}
 	}
 }

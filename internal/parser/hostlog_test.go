@@ -81,3 +81,16 @@ func TestDNSParsers(t *testing.T) {
 		t.Fatal("Web 日志")
 	}
 }
+
+func TestJSONPrefilter(t *testing.T) {
+	for line, want := range map[string]bool{`{"EventID":4625}`: true, `{"winlog":{"event_id":1}}`: true, `{"eventCode":"4624"}`: true,
+		`{"EVENT_ID":1}`: true, `{"event_type":"alert"}`: false, `{"prevent":"x"}`: false, `{"events":[1]}`: false} {
+		if hasWinIDKey(line) != want {
+			t.Errorf("hasWinIDKey(%s) 应为 %v", line, want)
+		}
+	}
+	// 访问 dnslog 域名的 Web JSON 日志不按 DNS 日志解析
+	if _, ok := (JSONDNS{}).Parse(`{"remote_addr":"10.0.0.5","request":"GET /?u=x.dnslog.cn HTTP/1.1","status":200}`); ok {
+		t.Fatal("Web 日志不应识别为 DNS")
+	}
+}

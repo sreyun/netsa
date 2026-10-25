@@ -53,7 +53,8 @@ func requiredRole(r *http.Request) string {
 		return auth.RoleAdmin
 	}
 	// 原始日志可能包含 Cookie、令牌、个人信息等敏感内容：检索与导出需要运营分析员权限
-	if strings.HasPrefix(p, "/api/rawlog/search") || strings.HasPrefix(p, "/api/rawlog/export") {
+	// 可指派账号列表（平台用户名与角色）只提供给能处置事件的角色
+	if strings.HasPrefix(p, "/api/rawlog/search") || strings.HasPrefix(p, "/api/rawlog/export") || p == "/api/incidents/assignees" {
 		return auth.RoleAnalyst
 	}
 	if r.Method == http.MethodGet || r.Method == http.MethodHead {

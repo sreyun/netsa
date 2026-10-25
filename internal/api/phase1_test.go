@@ -173,6 +173,9 @@ func TestTokensAndRoles(t *testing.T) {
 	if len(who) != 2 { // admin + ana
 		t.Fatalf("可指派的负责人: %+v", who)
 	}
+	if rec := do(h, http.MethodGet, "/api/incidents/assignees", "", viewer); rec.Code != 403 {
+		t.Fatalf("只读账号不能查看账号列表: %d", rec.Code)
+	}
 
 	// 令牌：只有管理员能创建；角色不能超过所属账号
 	if rec := do(h, http.MethodPost, "/api/auth/tokens", `{"name":"t","user":"ana","role":"analyst"}`, ana); rec.Code != 403 {

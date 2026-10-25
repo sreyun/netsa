@@ -19,51 +19,76 @@ const (
 )
 
 // 带外探测（DNSLog）平台：内网主机解析这些域名，通常意味着盲打的 RCE / SSRF / Log4j 等漏洞已被成功触发。
-var oobDomains = []string{"dnslog.cn", "dnslog.link", "ceye.io", "burpcollaborator.net", "oastify.com", "oast.pro", "oast.live", "oast.site",
-	"oast.online", "oast.fun", "oast.me", "interact.sh", "interactsh.com", "requestbin.net", "eyes.sh", "dig.pm", "dnslog.pw", "tu4.org", "xip.io"}
+var oobDomains = domainSet("dnslog.cn", "dnslog.link", "ceye.io", "burpcollaborator.net", "oastify.com", "oast.pro", "oast.live", "oast.site",
+	"oast.online", "oast.fun", "oast.me", "interact.sh", "interactsh.com", "requestbin.net", "eyes.sh", "dig.pm", "dnslog.pw", "tu4.org", "xip.io")
 
-// 矿池域名关键字与常见矿池。
-var miningDomains = []string{"minexmr.com", "supportxmr.com", "nanopool.org", "c3pool.com", "hashvault.pro", "moneroocean.stream", "f2pool.com",
-	"2miners.com", "herominers.com", "xmrpool.eu", "minergate.com", "ethermine.org", "crypto-pool.fr", "dwarfpool.com", "unmineable.com", "kryptex.network"}
+// 矿池域名。
+var miningDomains = domainSet("minexmr.com", "supportxmr.com", "nanopool.org", "c3pool.com", "hashvault.pro", "moneroocean.stream", "f2pool.com",
+	"2miners.com", "herominers.com", "xmrpool.eu", "minergate.com", "ethermine.org", "crypto-pool.fr", "dwarfpool.com", "unmineable.com", "kryptex.network")
 
 // 动态域名与内网穿透服务：恶意软件常用于 C2，也有正常使用，等级较低。
-var dynDomains = []string{"duckdns.org", "no-ip.com", "no-ip.org", "no-ip.biz", "ddns.net", "hopto.org", "zapto.org", "sytes.net", "serveftp.com",
+var dynDomains = domainSet("duckdns.org", "no-ip.com", "no-ip.org", "no-ip.biz", "ddns.net", "hopto.org", "zapto.org", "sytes.net", "serveftp.com",
 	"3322.org", "f3322.net", "f3322.org", "8800.org", "ngrok.io", "ngrok-free.app", "ngrok.app", "trycloudflare.com", "serveo.net", "localtunnel.me",
-	"oicp.net", "vicp.net", "frp.", "natapp", "dynu.net", "freedns.afraid.org", "changeip.com"}
+	"oicp.net", "vicp.net", "dynu.net", "freedns.afraid.org", "changeip.com", "natappfree.cc")
 
-func domainIn(name string, list []string) string {
+func domainSet(list ...string) map[string]bool {
+	m := make(map[string]bool, len(list))
 	for _, d := range list {
-		if strings.HasSuffix(d, ".") || !strings.Contains(d, ".") {
-			if strings.Contains(name, d) {
-				return d
-			}
-			continue
-		}
-		if name == d || strings.HasSuffix(name, "."+d) {
-			return d
-		}
+		m[d] = true
 	}
-	return ""
+	return m
+}
+
+// domainIn 判断域名或其任一上级域名是否在集合中，返回命中的域名。按标签逐级查表，不分配内存。
+func domainIn(name string, set map[string]bool) string {
+	for s := name; ; {
+		if set[s] {
+			return s
+		}
+		i := strings.IndexByte(s, '.')
+		if i < 0 {
+			return ""
+		}
+		s = s[i+1:]
+	}
 }
 
 // 常见的二级公共后缀：计算主域名时跳过（www.example.com.cn 的主域名是 example.com.cn）。
 var secondLevel = map[string]bool{"com": true, "net": true, "org": true, "gov": true, "edu": true, "co": true, "ac": true, "or": true, "ne": true, "go": true}
 
-// splitDomain 返回主域名（注册域）与其下的子域名部分。
+// splitDomain 返回主域名（注册域）与其下的子域名部分（子串切片，不分配内存）。
 func splitDomain(name string) (registered, sub string) {
-	labels := strings.Split(name, ".")
-	n := len(labels)
-	if n < 2 {
+	last := strings.LastIndexByte(name, '.')
+	if last <= 0 {
 		return name, ""
 	}
-	k := 2
-	if n >= 3 && len(labels[n-1]) == 2 && secondLevel[labels[n-2]] {
-		k = 3
-	}
-	if n <= k {
+	cut := strings.LastIndexByte(name[:last], '.')
+	if cut < 0 {
 		return name, ""
 	}
-	return strings.Join(labels[n-k:], "."), strings.Join(labels[:n-k], ".")
+	if len(name)-last-1 == 2 && secondLevel[name[cut+1:last]] {
+		if cut = strings.LastIndexByte(name[:cut], '.'); cut < 0 {
+			return name, ""
+		}
+	}
+	return name[cut+1:], name[:cut]
+}
+
+// longestLabel 返回子域名中最长的一段。
+func longestLabel(sub string) string {
+	best := ""
+	for sub != "" {
+		l := sub
+		if i := strings.IndexByte(sub, '.'); i >= 0 {
+			l, sub = sub[:i], sub[i+1:]
+		} else {
+			sub = ""
+		}
+		if len(l) > len(best) {
+			best = l
+		}
+	}
+	return best
 }
 
 func entropy(s string) float64 {
@@ -85,7 +110,7 @@ func entropy(s string) float64 {
 	return h
 }
 
-// dgaScore 评估主域名的第一段是否像算法生成的随机字符串（0 ~ 1）：长度、字符熵、辅音连续、数字混排。
+// dgaScore 评估主域名的第一段是否像算法生成的随机字符串（0 ~ 1.05）：长度、字符熵、辅音连续、数字混排。
 func dgaScore(label string) float64 {
 	if len(label) < 12 || strings.Contains(label, "-") {
 		return 0
@@ -97,7 +122,7 @@ func dgaScore(label string) float64 {
 		case c >= '0' && c <= '9':
 			digits++
 			run = 0
-		case strings.IndexByte("aeiou", c) >= 0:
+		case c == 'a' || c == 'e' || c == 'i' || c == 'o' || c == 'u':
 			vowels++
 			run = 0
 		case c >= 'a' && c <= 'z':
@@ -109,9 +134,6 @@ func dgaScore(label string) float64 {
 	}
 	n := float64(len(label))
 	score := 0.0
-	if e := entropy(label); e >= 3.5 {
-		score += 0.35
-	}
 	if float64(vowels)/n < 0.22 {
 		score += 0.25
 	}
@@ -123,6 +145,12 @@ func dgaScore(label string) float64 {
 	}
 	if len(label) >= 16 {
 		score += 0.1
+	}
+	if score < 0.3 { // 其余特征都不满足时不可能达到阈值，省去熵的计算
+		return score
+	}
+	if entropy(label) >= 3.5 {
+		score += 0.35
 	}
 	return score
 }
@@ -140,35 +168,33 @@ func inspectDNS(ev *model.Event) []model.Hit {
 	if d := domainIn(name, oobDomains); d != "" {
 		return hit("dns-oob", "解析带外探测平台域名（"+d+"，盲打漏洞可能已被触发）", CatOOB, model.SevCritical, "")
 	}
-	if d := domainIn(name, miningDomains); d != "" || strings.Contains(name, "xmr") && strings.Contains(name, "pool") {
+	if domainIn(name, miningDomains) != "" || strings.Contains(name, "xmr") && strings.Contains(name, "pool") {
 		return hit("dns-mining", "解析矿池域名（疑似挖矿木马）", CatMining, model.SevHigh, "")
 	}
 	reg, sub := splitDomain(name)
 	// DNS 隧道：子域名中编码数据，单段很长且随机
-	longest := ""
-	for _, l := range strings.Split(sub, ".") {
-		if len(l) > len(longest) {
-			longest = l
-		}
-	}
-	if len(longest) >= 40 && entropy(longest) >= 3.8 || len(sub) >= 100 {
+	if longest := longestLabel(sub); len(longest) >= 40 && entropy(longest) >= 3.8 || len(sub) >= 100 {
 		sev := model.SevHigh
 		if ev.QType == "TXT" || ev.QType == "NULL" || ev.QType == "CNAME" || ev.QType == "MX" {
 			sev = model.SevCritical
 		}
 		return hit("dns-tunnel", "疑似 DNS 隧道（子域名编码数据）", CatDNSTunnel, sev, "，子域名长度 "+itoa(len(sub)))
 	}
-	if d := domainIn(name, dynDomains); d != "" {
+	if d := domainIn(name, dynDomains); d != "" || strings.Contains(name, ".frp.") || strings.HasPrefix(name, "frp.") {
+		if d == "" {
+			d = "frp"
+		}
 		return hit("dns-dyn", "解析动态域名 / 内网穿透服务（"+d+"）", CatDynDNS, model.SevLow, "")
 	}
 	first := reg
 	if i := strings.IndexByte(reg, '.'); i > 0 {
 		first = reg[:i]
 	}
-	if s := dgaScore(first); s >= 0.7 {
+	// 随机域名：不存在（NXDOMAIN）时为高危；能解析的随机域名只在特征非常明显时告警（减少 CDN、短链等正常随机域名的误报）
+	if s := dgaScore(first); ev.RCode == "NXDOMAIN" && s >= 0.7 || s >= 0.9 {
 		sev := model.SevMedium
 		if ev.RCode == "NXDOMAIN" {
-			sev = model.SevHigh // 随机域名且不存在：典型的 DGA 探测
+			sev = model.SevHigh
 		}
 		return hit("dns-dga", "疑似 DGA 随机域名", CatDGA, sev, "")
 	}

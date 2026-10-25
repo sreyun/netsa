@@ -1,6 +1,7 @@
 package detect
 
 import (
+	"fmt"
 	"testing"
 	"time"
 
@@ -19,9 +20,8 @@ func TestInspectDNS(t *testing.T) {
 		"pool.minexmr.com":       "dns-mining",
 		"xmr-asia1.nanopool.org": "dns-mining",
 		"mzxw6ytboi2dqmjqgezdgnbvgy3tqojqgeztsmzsgq2tmnzyhe4dama.t.example.com": "dns-tunnel",
-		"evil.duckdns.org":     "dns-dyn",
-		"xjvkqzpwmtrhb.com":    "dns-dga",
-		"qx7kz9vbn2wpl4rt.net": "dns-dga",
+		"evil.duckdns.org": "dns-dyn",
+		"frp.example.cn":   "dns-dyn",
 	}
 	for name, want := range cases {
 		hits := inspectDNS(dnsEv(name, "A", ""))
@@ -38,8 +38,29 @@ func TestInspectDNS(t *testing.T) {
 			t.Errorf("误报 %s: %+v", name, hits)
 		}
 	}
-	if h := inspectDNS(dnsEv("xjvkqzpwmtrhb.com", "A", "NXDOMAIN")); h[0].Severity != model.SevHigh {
-		t.Fatal("不存在的随机域名应为高危")
+	// 随机域名：不存在时告警（高危）；能解析的只在特征非常明显时告警（中危），减少 CDN、短链等正常随机域名的误报
+	for name, want := range map[string]string{"xjvkqzpwmtrhb.com": "", "qx7kz9vbn2wpl4rt.net": "", "xjvkqzpwmtrhbnc7k.com": "dns-dga"} {
+		hits := inspectDNS(dnsEv(name, "A", "NOERROR"))
+		if got := ""; len(hits) > 0 {
+			got = hits[0].RuleID
+			if got != want || hits[0].Severity != model.SevMedium {
+				t.Errorf("%s（可解析）: %+v", name, hits)
+			}
+		} else if want != "" {
+			t.Errorf("%s（可解析）应告警", name)
+		}
+	}
+	for _, name := range []string{"xjvkqzpwmtrhb.com", "qx7kz9vbn2wpl4rt.net"} {
+		if h := inspectDNS(dnsEv(name, "A", "NXDOMAIN")); len(h) != 1 || h[0].RuleID != "dns-dga" || h[0].Severity != model.SevHigh {
+			t.Errorf("%s 不存在的随机域名应为高危: %+v", name, h)
+		}
+	}
+	// 主域名切分（含二级公共后缀）
+	for name, want := range map[string][2]string{"www.example.com": {"example.com", "www"}, "example.com": {"example.com", ""}, "com": {"com", ""},
+		"a.b.example.com.cn": {"example.com.cn", "a.b"}, "example.com.cn": {"example.com.cn", ""}, "x.co.uk": {"x.co.uk", ""}} {
+		if r, s := splitDomain(name); r != want[0] || s != want[1] {
+			t.Errorf("splitDomain(%s) = %s, %s", name, r, s)
+		}
 	}
 	if inspectDNS(&model.Event{Kind: model.KindDNS, Host: "a.dnslog.cn", Flags: "R"}) != nil {
 		t.Fatal("响应记录不重复检测")
@@ -116,12 +137,25 @@ func TestBehaviorAuthAndDNS(t *testing.T) {
 	// DNS：同一主域名下大量不同子域名（每个子域名都不长，单条检测发现不了）
 	var tun []model.Hit
 	for i := 0; i < 200; i++ {
-		ev := dnsEv("c"+itoa(i*7919)+".data.exfil.example", "A", "")
+		ev := dnsEv(fmt.Sprintf("%016x%04x.data.exfil.example", uint64(i)*0x9e3779b97f4a7c15, i), "A", "")
 		ev.SrcIP, ev.Time = "10.0.0.6", now.Add(time.Duration(i)*time.Second)
 		tun = append(tun, b.Observe(ev)...)
 	}
 	if len(tun) != 1 || tun[0].RuleID != "dns-tunnel-volume" {
 		t.Fatalf("DNS 隧道（数量）: %+v", tun)
+	}
+	// 云服务上正常的大量子域名（短、可读）与反向解析的 NXDOMAIN 不误报
+	var cdn []model.Hit
+	for i := 0; i < 300; i++ {
+		ev := dnsEv(fmt.Sprintf("img%d.static.example-cdn.com", i), "A", "")
+		ev.SrcIP, ev.Time = "10.0.0.26", now
+		cdn = append(cdn, b.Observe(ev)...)
+		ptr := dnsEv(fmt.Sprintf("%d.%d.51.198.in-addr.arpa", i%250, i/250), "PTR", "NXDOMAIN")
+		ptr.SrcIP, ptr.Time = "10.0.0.26", now
+		cdn = append(cdn, b.Observe(ptr)...)
+	}
+	if len(cdn) != 0 {
+		t.Fatalf("正常子域名 / 反向解析不应误报: %+v", cdn[0])
 	}
 	// 反向解析与 DNSBL 查询量大属正常
 	var fp []model.Hit
@@ -135,5 +169,32 @@ func TestBehaviorAuthAndDNS(t *testing.T) {
 	}
 	if len(fp) != 0 {
 		t.Fatalf("反向解析 / DNSBL 不应误报: %+v", fp[0])
+	}
+}
+
+func BenchmarkDNSNormal(b *testing.B) {
+	e, _ := NewEngine("", 1)
+	bh := NewBehavior(config.Default().Detect.Thresholds)
+	names := []string{"www.baidu.com", "api.weixin.qq.com", "mirrors.aliyun.com", "d1a2b3c4d5e6f7.cloudfront.net", "time.windows.com", "img-blog.csdnimg.cn"}
+	evs := make([]*model.Event, len(names))
+	for i, n := range names {
+		evs[i] = &model.Event{Kind: model.KindDNS, SrcIP: "10.0.0." + itoa(i+5), Host: n, QType: "A", RCode: "NOERROR", Time: time.Now()}
+	}
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		ev := evs[i%len(evs)]
+		e.Inspect(ev)
+		bh.Observe(ev)
+	}
+}
+
+func BenchmarkAuthFail(b *testing.B) {
+	e, _ := NewEngine("", 1)
+	bh := NewBehavior(config.Default().Detect.Thresholds)
+	ev := &model.Event{Kind: model.KindAuth, SrcIP: "198.51.100.7", User: "root", Service: "SSH", Action: model.ActionDeny, Time: time.Now()}
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		e.Inspect(ev)
+		bh.Observe(ev)
 	}
 }
