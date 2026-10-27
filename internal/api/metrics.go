@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"netsa/internal/model"
+	"netsa/internal/risk"
 )
 
 // promWriter 生成 Prometheus 文本格式（text/plain; version=0.0.4）。
@@ -101,6 +102,33 @@ func (s *Server) metrics(w http.ResponseWriter, r *http.Request) {
 	p.metric("netsa_attacks_blocked_total", "counter", "已拦截的攻击数", float64(m.Totals.Blocked))
 	p.metric("netsa_attacks_success_total", "counter", "疑似攻击成功数", float64(m.Totals.Success))
 	p.metric("netsa_alerts_total", "counter", "产生的告警数", float64(m.Totals.Alerts))
+	if s.Exposure != nil {
+		p.metric("netsa_exposure_enabled", "gauge", "是否启用对外发布服务清单（DNAT 映射）", b2f(s.Exposure.Enforcing()))
+		p.metric("netsa_exposure_mappings", "gauge", "对外发布服务映射条数", float64(s.Exposure.Count()))
+		p.metric("netsa_exposure_muted_total", "counter", "因端口未对外发布而降级为仅打标签的探测数", float64(s.Exposure.Muted()))
+	}
+
+	// 等级裁决：规则声明与最终判定不一致的次数（按 原等级→最终等级 统计）。
+	// 持续出现 critical→high 说明规则把未成功的利用写成了严重；high→critical 说明成功升级在生效。
+	for _, a := range risk.Adjustments() {
+		p.metric("netsa_severity_adjusted_total", "counter", "威胁等级被策略自动调整的次数",
+			float64(a.Count), "from", a.From.String(), "to", a.To.String())
+	}
+
+	// 响应缓存：条目数接近上限说明查询参数组合过多（LRU 会淘汰冷键，热键保留）
+	if s.cache != nil {
+		entries, hits, misses := s.cache.stats()
+		p.metric("netsa_response_cache_entries", "gauge", "聚合接口响应缓存条目数（LRU）", float64(entries))
+		p.metric("netsa_response_cache_hits_total", "counter", "响应缓存命中次数", float64(hits))
+		p.metric("netsa_response_cache_misses_total", "counter", "响应缓存未命中（重新计算）次数", float64(misses))
+	}
+	if s.Notifier != nil {
+		p.metric("netsa_notify_dedup_entries", "gauge", "告警去重表中未过期的键数量", float64(s.Notifier.DedupSize()))
+	}
+
+	// 流水线背压：队列长度持续接近容量说明聚合入库跟不上采集速度
+	p.metric("netsa_pipeline_queue_depth", "gauge", "事件投递队列中待处理的批次数", float64(s.Ingest.QueueLen()))
+	p.metric("netsa_pipeline_queue_capacity", "gauge", "事件投递队列容量", float64(s.Ingest.QueueCap()))
 	for i := model.SevLow; i <= model.SevCritical; i++ {
 		p.metric("netsa_attacks_by_severity_total", "counter", "各等级的攻击命中数", float64(m.SevCount[i]), "severity", i.String())
 		p.metric("netsa_attackers", "gauge", "各威胁等级的攻击源数", float64(m.Attackers[i]), "level", i.String())
@@ -127,9 +155,12 @@ func (s *Server) metrics(w http.ResponseWriter, r *http.Request) {
 		p.metric("netsa_notify_messages_total", "counter", "告警推送成功的消息数", float64(rb.Stats.Messages), l...)
 		p.metric("netsa_notify_failed_total", "counter", "告警推送失败的消息数", float64(rb.Stats.Failed), l...)
 		p.metric("netsa_notify_queued", "gauge", "等待推送的告警数", float64(rb.Stats.Queued), l...)
+		p.metric("netsa_notify_suppressed_total", "counter", "因频率限制被合并汇总的告警数", float64(rb.Stats.Suppressed), l...)
 	}
 	if s.Archive != nil {
 		failed, dropped, _ := s.Archive.Health()
+		written, _ := s.Archive.Counts()
+		p.metric("netsa_archive_written_total", "counter", "成功归档的告警条数", float64(written))
 		p.metric("netsa_archive_failed_batches_total", "counter", "告警归档写入失败的批次数", float64(failed))
 		p.metric("netsa_archive_dropped_total", "counter", "因队列已满未能归档的告警数", float64(dropped))
 	}

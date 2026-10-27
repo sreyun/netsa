@@ -175,9 +175,10 @@ func (s *Store) verifySuccess(ev *model.Event, hits []model.Hit) []model.Hit {
 		if out == nil {
 			out = append([]model.Hit(nil), hits...)
 		}
+		// 复核为「未成功」：撤销成功升级，等级回落到高危封顶（严重需要成功或失陷证据）。
 		out[i].Result = model.ResultPassed
-		if s := out[i].Severity; s > model.SevLow && s < model.SevCritical {
-			out[i].Severity = s - 1 // 撤销“疑似成功”时的升级（严重级别的规则本身即为严重，不降级）
+		if out[i].Severity > model.SevHigh {
+			out[i].Severity = model.SevHigh
 		}
 		out[i].Evidence += "（响应大小与该接口正常响应一致，判定为未成功）"
 	}

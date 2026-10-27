@@ -1,9 +1,15 @@
-# syntax=docker/dockerfile:1
+# 不使用外部 frontend 镜像：内网 / 镜像仓库受限环境下无需额外拉取 dockerfile 镜像
+
+# 基础镜像仓库可在构建时替换（国内可用镜像站加速），例如
+#   --build-arg BASE_REGISTRY=docker.m.daocloud.io
+ARG BASE_REGISTRY=docker.io
 
 # ---------- 构建阶段 ----------
-FROM golang:1.23-alpine AS build
-# 国内网络可通过 --build-arg GOPROXY=https://goproxy.cn,direct 加速
-ARG GOPROXY=https://proxy.golang.org,direct
+FROM ${BASE_REGISTRY}/library/golang:1.23-alpine AS build
+# 默认使用国内代理；海外环境可 --build-arg GOPROXY=https://proxy.golang.org,direct 覆盖
+ARG GOPROXY=https://goproxy.cn,direct
+# 版本号由 CI 传入（tag 名，去掉前缀 v）；不传时使用源码中的默认值
+ARG VERSION=""
 ENV GOPROXY=${GOPROXY} CGO_ENABLED=0 GOTOOLCHAIN=local
 WORKDIR /src
 COPY go.mod go.sum ./
@@ -11,10 +17,12 @@ RUN go mod download
 COPY cmd ./cmd
 COPY internal ./internal
 COPY web ./web
-RUN go build -trimpath -ldflags "-s -w" -o /out/netsa ./cmd/netsa
+# 只在传了 VERSION 时注入，保证本地 / compose 构建的行为与之前一致
+RUN ver="${VERSION#v}" && \
+    go build -trimpath -ldflags "-s -w ${ver:+-X main.version=${ver}}" -o /out/netsa ./cmd/netsa
 
 # ---------- 运行阶段 ----------
-FROM alpine:3.20
+FROM ${BASE_REGISTRY}/library/alpine:3.20
 RUN apk add --no-cache ca-certificates tzdata \
  && addgroup -S -g 10001 netsa \
  && adduser -S -D -H -u 10001 -G netsa netsa \

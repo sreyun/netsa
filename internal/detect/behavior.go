@@ -469,7 +469,7 @@ func (b *Behavior) observeBeacon(ev *model.Event) []model.Hit {
 	bc.fired = true
 	return []model.Hit{{RuleID: "bhv-beacon", Name: "周期性外连（疑似C2心跳）", Category: CatBeacon, Severity: model.SevMedium,
 		Phase: model.PhasePersistence, Result: fwResult(ev),
-		Evidence: fmt.Sprintf("%s 每隔约 %s 连接 %s:%d（连续 %d 次，间隔波动 %.0f%%）", ev.SrcIP, approxDur(mean), ev.DstIP, ev.DstPort, bc.n, 100*std/mean)}}
+		Evidence: fmt.Sprintf("%s 每隔约 %s 连接 %s:%d（截至本次共 %d 次连接，间隔波动 %.0f%%；同一对地址只告警一次）", ev.SrcIP, approxDur(mean), ev.DstIP, ev.DstPort, bc.n, 100*std/mean)}}
 }
 
 // looksLikeLoginSuccess 判断本次登录响应是否与此前的失败响应明显不同：

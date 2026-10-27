@@ -1173,10 +1173,14 @@ async function loadSources() {
   $('#caps').innerHTML = `<div class="kv">
     <div class="k">IP 溯源数据源</div><div>${(meta.geo_providers || []).map((p) => `<span class="chip">${esc(SRC[p] || p)}</span>`).join('') || '<span class="lv-high">未配置</span>'}</div>
     <div class="k">WHOIS / RDAP</div><div>${meta.rdap ? '已启用（IP 详情中按需查询）' : '未启用'}</div>
-    <div class="k">特征规则</div><div>${meta.rules} 条 + 行为检测（CC / 目录扫描 / 暴力破解 / 端口扫描 / 主机探测 / 洪水）</div>
+    <div class="k">特征规则</div><div>${meta.rules} 条，本次运行命中 ${num(meta.rules_hit || 0)} 条${meta.rules > (meta.rules_hit || 0) ? ` <span class="muted">（${num(meta.rules - (meta.rules_hit || 0))} 条尚未触发，可通过 /api/rules/stats 核对是否为误配或长期无对应攻击）</span>` : ''} + 行为检测（CC / 目录扫描 / 暴力破解 / 端口扫描 / 主机探测 / 洪水）</div>
     <div class="k">时区</div><div>${esc(meta.timezone || '服务器本地时区')}${meta.time_correction ? ' · <span class="muted">实时日志与实际时间相差整时区时自动校正（time_correction: auto）</span>' : ' · <span class="muted">未开启时区自动校正</span>'}</div>
     <div class="k">Syslog 接收</div><div>${sl.enabled ? `UDP ${esc(sl.udp || '-')} · TCP ${esc(sl.tcp || '-')}${sl.tls ? ` · TLS ${esc(sl.tls)}` : ''}${sl.allowlist ? ' · <span class="nt-on">发送端白名单</span>' : ''}${sl.rate_limit ? ` · 单发送端限速 ${num(sl.rate_limit)} 条/秒` : ''}` : '未启用'}</div>
     <div class="k">断流告警</div><div>${esc(r.silence ? r.silence : '-')} <span class="muted">（实时数据源超过该时间没有新日志时推送告警，恢复后再推送一次）</span></div>
+    <div class="k">内网网段</div><div>${(meta.intranet || []).length ? (meta.intranet || []).map((n) => `<span class="chip">${esc(n)}</span>`).join('') + ' <span class="muted">（按内网呈现，不查询定位库；RFC1918 内置生效）</span>' : '<span class="muted">仅内置 RFC1918 / 回环 / 链路本地 / CGNAT</span>'}</div>
+    <div class="k">对外发布服务</div><div>${meta.exposure
+      ? `已启用 · ${num(meta.exposure_rules || 0)} 条映射${meta.exposure_muted ? ` · 已过滤 ${num(meta.exposure_muted)} 次未发布端口探测` : ''}${meta.exposure_candidates ? ` · <span class="lv-medium">发现 ${num(meta.exposure_candidates)} 个疑似对外映射</span>（候选 YAML 见 /api/exposure）` : ''} <span class="muted">（目标端口未映射的探测只打标签，不产生告警）</span>`
+      : '未启用 <span class="muted">（配置 exposure.enabled 后，未做 DNAT 映射的端口探测不再告警）</span>'}</div>
     <div class="k">告警归档</div><div>${meta.archive ? 'PostgreSQL（历史告警可在“告警事件 → 历史告警”中查询与导出）' : '未启用 <span class="muted">（配置 archive.dsn 后可长期留存与检索历史告警）</span>'}</div>
     <div class="k">支持的日志格式</div><div>nginx/Apache combined、main(XFF)、vhost、JSON、自定义 log_format；iptables/UFW/firewalld、pfSense/OPNsense、Windows 防火墙、Cisco ASA、FortiGate/华为/H3C/深信服等 key=value、JSON 防火墙日志；DNS（BIND / dnsmasq / CoreDNS / Windows DNS / Zeek / Suricata）；认证（Linux auth.log、Windows 安全事件、FortiGate / Cisco / OpenVPN VPN 登录、SQL Server 登录）</div>
     <div class="k">日志时区</div><div>${esc(meta.timezone || '系统时区')}</div>
@@ -1252,7 +1256,7 @@ async function openIP(ip) {
     const c = (d.chain || []).find((x) => x.phase === ph);
     return `<div class="step ${c ? 'on' : ''}"><div>${PHASE[ph]}</div><div class="n">${c ? num(c.count) : 0}</div><div class="t">${c ? esc(fmtShort(c.first)) : '未出现'}</div></div>`;
   }).join('');
-  const rules = (d.rules || []).map((r) => `<tr><td>${esc(r.name)}<div class="muted mono">${esc(r.id)}</div></td><td>${badge(r.severity)}</td><td>${num(r.count)}</td></tr>`).join('');
+  const rules = (d.rules || []).map((r) => `<tr><td>${esc(r.name)}<div class="muted mono">${esc(r.id)}</div></td><td>${badge(r.severity)}</td><td class="num" title="命中次数，含按规则节流未生成告警的重复命中">${num(r.count)}</td><td class="num" title="同一 IP 同一规则在节流窗口内最多生成的告警条数">${num(r.alerts == null ? r.count : r.alerts)}</td></tr>`).join('');
   const targets = sortedEntries(p.targets, 15).map(([k, v]) => `<tr><td class="mono">${esc(k)}</td><td>${num(v)}</td></tr>`).join('');
   const ports = sortedEntries(p.ports, 30).map(([k, v]) => `<span class="chip">${esc(k)} × ${v}</span>`).join('');
   const status = sortedEntries(p.status, 10).map(([k, v]) => `<span class="chip">${esc(k)} × ${v}</span>`).join('');
@@ -1310,11 +1314,11 @@ async function openIP(ip) {
       <div class="k">首次出现</div><div>${esc(fmtTime(p.first_seen))}</div>
       <div class="k">最近活动</div><div>${esc(fmtTime(p.last_seen))}</div>
       <div class="k">事件统计</div><div>总计 ${num(p.events)} · Web 请求 ${num(p.web_reqs)} · 防火墙 ${num(p.fw_events)}（拒绝 ${num(p.denied)}）</div>
-      <div class="k">攻击统计</div><div>攻击 ${num(p.attacks)} 次 · <span class="res-success">疑似成功 ${num(p.successes)}</span> · 结果分布 ${sortedEntries(p.results, 6).map(([k, v]) => `${esc(RESULT[k] || k)} ${v}`).join(' / ')}</div>
+      <div class="k">攻击统计</div><div>攻击命中 ${num(p.attacks)} 次 · <span class="res-success">疑似成功 ${num(p.successes)}</span> · 结果分布 ${sortedEntries(p.results, 6).map(([k, v]) => `${esc(RESULT[k] || k)} ${v}`).join(' / ')}</div>
     </div>
     <h4>攻击链</h4><div class="chain">${chainSteps}</div>
     ${(d.techniques || []).length ? `<h4>ATT&amp;CK 技术</h4><div class="chips">${d.techniques.map((t) => `<span class="chip" title="${esc(t.tactic_name)} · ${esc(t.name)}">${esc(t.id)} ${esc(t.name)} <span class="muted">${esc(t.tactic_name)} × ${num(t.hits)}</span></span>`).join('')}</div>` : ''}
-    <h4>命中规则</h4><table class="table"><thead><tr><th>规则</th><th>等级</th><th>次数</th></tr></thead><tbody>${rules || empty(3)}</tbody></table>
+    <h4>命中规则 <small style="font-weight:400">同一规则在 10 分钟窗口内只生成前若干条告警，其余重复命中只计次数</small></h4><table class="table"><thead><tr><th>规则</th><th>等级</th><th class="num">命中</th><th class="num">告警</th></tr></thead><tbody>${rules || empty(4)}</tbody></table>
     <h4>攻击目标 TOP</h4><table class="table"><thead><tr><th>目标</th><th>次数</th></tr></thead><tbody>${targets || empty(2)}</tbody></table>
     ${ports ? `<h4>探测端口</h4><div class="chips">${ports}</div>` : ''}
     ${status ? `<h4>响应状态码</h4><div class="chips">${status}</div>` : ''}

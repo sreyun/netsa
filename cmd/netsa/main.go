@@ -32,6 +32,7 @@ import (
 	"netsa/internal/config"
 	"netsa/internal/demo"
 	"netsa/internal/detect"
+	"netsa/internal/exposure"
 	"netsa/internal/geo"
 	"netsa/internal/ingest"
 	"netsa/internal/intel"
@@ -44,7 +45,9 @@ import (
 	"netsa/web"
 )
 
-const version = "1.6.2"
+// version 是构建版本号。默认值用于本地构建；镜像构建通过
+// -ldflags "-X main.version=<tag>" 注入，`netsa version` 与 /api/meta 都会显示注入后的值。
+var version = "1.6.3"
 
 func usage() {
 	fmt.Fprintf(os.Stderr, `netsa %s —— 网络安全态势感知与攻击面分析系统
@@ -109,6 +112,7 @@ type app struct {
 	suppress *suppress.Manager // 误报抑制规则
 	raw      *rawlog.Store     // 原始日志留存
 	assets   *assets.Manager   // 资产与漏洞
+	exposure *exposure.Manager // 对外发布服务清单（DNAT 映射）
 	api      *api.Server
 }
 
@@ -120,6 +124,19 @@ func build(cfg *config.Config) (*app, error) {
 	}
 	parser.Location = loc
 	alert.Location = loc // 告警消息中的时间按同一时区展示
+	// 内网 / 保留网段：内置 RFC1918 与保留段 + 配置 geo.intranet + 本机网卡自动探测。
+	// 这些地址不查询任何定位库，避免把内网误用的公网段（如 172.168.100.0/24）解析成境外地址。
+	nets := append([]string(nil), cfg.Geo.Intranet...)
+	if cfg.Geo.AutoDetectIntranet() {
+		nets = append(nets, geo.DetectLocalNetworks()...)
+	}
+	effective, invalid := geo.SetInternalNetworks(nets)
+	if len(invalid) > 0 {
+		log.Printf("[geo] 忽略无法解析的内网网段: %s", strings.Join(invalid, ", "))
+	}
+	if len(effective) > 0 {
+		log.Printf("[geo] 额外内网网段（按内网呈现、不查询定位库）: %s", strings.Join(effective, ", "))
+	}
 	gaz, err := geo.LoadGazetteer(staticFS(cfg))
 	if err != nil {
 		return nil, fmt.Errorf("加载地图地名库失败: %w", err)
@@ -177,11 +194,20 @@ func build(cfg *config.Config) (*app, error) {
 	if a.assets, err = assets.Load(dataFile(cfg, "", "assets.json")); err != nil {
 		return nil, err
 	}
+	if a.exposure, err = exposure.Load(cfg.Exposure); err != nil {
+		return nil, err
+	}
+	a.store.PortPublished = a.exposure.Published
+	if a.exposure.Enforcing() {
+		log.Printf("[exposure] 对外发布服务清单已启用：%d 条映射、%d 个兜底端口；未发布端口上的端口探测与暴力破解只打标签，不产生告警",
+			a.exposure.Count(), len(cfg.Exposure.AllowedPorts))
+	}
 	a.broker = api.NewBroker()
 	a.pipe = &pipeline.Pipeline{
 		Engine: a.engine, Behavior: detect.NewBehavior(cfg.Detect.Thresholds), Store: a.store, Geo: a.geo,
 		RealIP: pipeline.NewRealIP(cfg.RealIP), Notifier: a.notifier,
 		EnrichLevel: model.ParseSeverity(cfg.Geo.EnrichLevel), OnAlert: a.onAlert, Suppress: a.suppress, Assets: a.assets,
+		Exposure: a.exposure,
 	}
 	a.pipe.SetWhitelist(cfg.Detect.Whitelist)
 	a.geo.OnUpdate = a.pipe.OnGeoUpdate
@@ -224,7 +250,7 @@ func (a *app) server(listen string) (*http.Server, error) {
 	s := &api.Server{
 		Cfg: a.cfg, Store: a.store, Ingest: a.ingest, Pipeline: a.pipe, Geo: a.geo, Engine: a.engine,
 		RDAP: a.rdap, Static: staticFS(a.cfg), Version: version, Broker: a.broker, Notifier: a.notifier,
-		Archive: a.archive, Suppress: a.suppress, RawLog: a.raw, Assets: a.assets,
+		Archive: a.archive, Suppress: a.suppress, RawLog: a.raw, Assets: a.assets, Exposure: a.exposure,
 	}
 	a.api = s
 	dir := dataFile(a.cfg, a.cfg.Audit.Dir, "audit")
@@ -257,6 +283,9 @@ func (a *app) server(listen string) (*http.Server, error) {
 		}
 	} else {
 		log.Printf("[auth] 警告: 已关闭登录认证（server.auth: false），任何能访问该端口的人都可以查看和修改配置")
+	}
+	if a.cfg.Server.Pprof {
+		log.Printf("[api] 性能剖析已开启：/debug/pprof/（仅管理员），排障结束后请关闭 server.pprof")
 	}
 	// 读取请求（含请求体）与写出响应都限时，防止慢速发送请求体 / 慢速读取响应的连接长期占用资源；
 	// 实时告警流与历史告警导出在处理时用 http.ResponseController 单独解除 / 延长期限。
@@ -368,10 +397,20 @@ func cmdServe(args []string) error {
 
 	tick := time.NewTicker(cfg.Storage.Interval)
 	defer tick.Stop()
+	candLogged := 0 // 已提示过的候选映射数量，避免每次维护重复打印
 	for {
 		select {
 		case <-tick.C:
 			a.store.Maintain()
+			// 候选映射提示：只在新发现时打印一次摘要，详细清单（含可粘贴的 YAML）在 /api/exposure
+			if n := a.exposure.CandidateCount(); n > candLogged {
+				candLogged = n
+				if list := a.exposure.Candidates(); len(list) > 0 {
+					c := list[0]
+					log.Printf("[exposure] 发现 %d 个疑似对外映射（示例 %s:%d，已放行 %d 次、%d 个来源）；"+
+						"确认后写入 exposure.services，详见 GET /api/exposure", n, c.PublicIP, c.PublicPort, c.Allows, c.Sources)
+				}
+			}
 			if err := a.store.Save(cfg.Storage.Snapshot); err != nil {
 				log.Printf("[store] 保存快照失败: %v", err)
 			}

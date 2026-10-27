@@ -29,6 +29,7 @@ type Config struct {
 	Geo            GeoConfig      `yaml:"geo"`
 	Intel          IntelConfig    `yaml:"intel"`
 	Detect         DetectConfig   `yaml:"detect"`
+	Exposure       ExposureConfig `yaml:"exposure"`
 	Alert          AlertConfig    `yaml:"alert"`
 	Archive        ArchiveConfig  `yaml:"archive"`
 	RawLog         RawLogConfig   `yaml:"rawlog"`
@@ -59,6 +60,9 @@ type ServerConfig struct {
 	AllowNetworks []string `yaml:"allow_networks"`
 	// Require2FA 要求所有本地账号启用双因素认证（TOTP）：未启用的账号登录后须先绑定身份验证器
 	Require2FA bool `yaml:"require_2fa"`
+	// Pprof 开启 /debug/pprof 性能剖析接口（仅管理员，默认关闭）。用于排查 CPU / 内存 / 协程问题，
+	// 剖析期间会带来额外开销，排障结束后建议关闭。
+	Pprof bool `yaml:"pprof"`
 }
 
 // AuthEnabled 返回是否需要登录（默认开启）。
@@ -138,6 +142,61 @@ type GeoConfig struct {
 	ReloadInterval time.Duration `yaml:"reload_interval"`
 	// Custom 自定义网段位置：内网办公区、分支机构、合作方出口等，优先级高于所有定位库
 	Custom []CustomLocation `yaml:"custom"`
+	// Intranet 内网网段：RFC1918 之外的内部地址段。典型场景是企业把 172.168.100.0/24、172.168.200.0/24
+	// 这类**已被分配为公网**的地址段用在内网（RFC1918 只覆盖 172.16 ~ 172.31），定位库会把它们解析成
+	// 美国等境外归属地。列入此处后按内网呈现，不查询任何定位库，也不会出现在境外攻击地图上。
+	// 支持 IP 或 CIDR，例如 "172.168.0.0/16"、"172.168.100.0/24"。
+	Intranet []string `yaml:"intranet"`
+	// DetectLocalNetworks 启动时自动把本机网卡所在网段加入内网网段（默认开启）。部署在内网主机上时
+	// 可自动覆盖本机所在网段；服务器网卡位于公网段时建议关闭，避免把该段真实攻击者误判为内网。
+	DetectLocalNetworks *bool `yaml:"detect_local_networks"`
+}
+
+// AutoDetectIntranet 返回是否自动探测本机网卡网段（默认开启）。
+func (g GeoConfig) AutoDetectIntranet() bool {
+	return g.DetectLocalNetworks == nil || *g.DetectLocalNetworks
+}
+
+// ExposureConfig 是对外发布服务（DNAT 端口映射）清单：用于判断防火墙日志里的端口探测
+// 是否真的打到了对外开放的服务。
+//
+// 互联网背景扫描会持续探测 1433、6379、3389 等端口，防火墙通常只是按默认策略记录并放行；
+// 若该端口并没有做 DNAT 映射，探测必然无法到达任何服务，把这些日志逐条记成高危告警
+// 只会淹没有效信号。开启本项后，目标为公网、端口未列入清单的探测类命中只打标签、不产生告警。
+type ExposureConfig struct {
+	Enabled bool `yaml:"enabled"`
+	// AllowedPorts 兜底白名单：拿不到精确 NAT 表时（例如由云负载均衡 / 上级防火墙转发），
+	// 这些端口在所有公网地址上均视为已发布。0 表示不启用。
+	AllowedPorts []int `yaml:"allowed_ports"`
+	// Services 精确映射：公网 IP:端口 → 内网 IP:端口。public_ip 留空表示任意公网地址，
+	// public_port 留空表示该地址的全部端口。
+	Services []ExposureService `yaml:"services"`
+	// Suggest 候选映射建议：从防火墙日志中「外部来源访问公网地址端口且被放行」的连接反推
+	// 可能已发布的服务。只生成建议，不改变任何检测行为；确认后手工写入 services 才生效。
+	Suggest ExposureSuggest `yaml:"suggest"`
+}
+
+// ExposureSuggest 是候选映射的统计口径。
+type ExposureSuggest struct {
+	// Enabled 默认开启；设为 false 可关闭统计（不记录任何候选）。
+	Enabled *bool `yaml:"enabled"`
+	// MinAllows 为同一「公网 IP:端口」累计放行次数阈值。
+	MinAllows int `yaml:"min_allows"`
+	// MinSources 为不同外部来源数阈值：真实对外服务的客户端来源多，随机探测的来源少。
+	MinSources int `yaml:"min_sources"`
+}
+
+// On 返回是否启用候选建议（未配置时默认开启）。
+func (s ExposureSuggest) On() bool { return s.Enabled == nil || *s.Enabled }
+
+// ExposureService 是一条 DNAT 端口映射。
+type ExposureService struct {
+	PublicIP    string `yaml:"public_ip" json:"public_ip"`
+	PublicPort  int    `yaml:"public_port" json:"public_port"`
+	PrivateIP   string `yaml:"private_ip" json:"private_ip,omitempty"`
+	PrivatePort int    `yaml:"private_port" json:"private_port,omitempty"`
+	Proto       string `yaml:"proto" json:"proto,omitempty"` // tcp / udp / any（默认 any）
+	Name        string `yaml:"name" json:"name,omitempty"`
 }
 
 // CustomLocation 是一个自定义网段的位置信息；未填写经纬度时按省市名称换算区划中心。
@@ -396,6 +455,14 @@ func (c *Config) Validate() error {
 	if c.Home.Lat < -90 || c.Home.Lat > 90 || c.Home.Lon < -180 || c.Home.Lon > 180 {
 		return fmt.Errorf("home 经纬度超出范围")
 	}
+	for i, n := range c.Geo.Intranet {
+		if _, err := ParseNetwork(n); err != nil {
+			return fmt.Errorf("geo.intranet[%d]: %w", i, err)
+		}
+	}
+	if err := c.validateExposure(); err != nil {
+		return err
+	}
 	if (c.Server.Username == "") != (c.Server.Password == "") {
 		return fmt.Errorf("server.username 与 server.password 需同时设置")
 	}
@@ -619,6 +686,50 @@ func ParseSenderCIDR(s string) (netip.Prefix, error) {
 		return netip.Prefix{}, fmt.Errorf("网段范围过大（IPv4 至少 /8，IPv6 至少 /16）: %q", s)
 	}
 	return p.Masked(), nil
+}
+
+// validateExposure 校验对外发布服务清单。
+func (c *Config) validateExposure() error {
+	e := c.Exposure
+	if e.Suggest.MinAllows <= 0 {
+		e.Suggest.MinAllows = 20
+	}
+	if e.Suggest.MinSources <= 0 {
+		e.Suggest.MinSources = 3
+	}
+	c.Exposure = e
+	for i, p := range e.AllowedPorts {
+		if p <= 0 || p > 65535 {
+			return fmt.Errorf("exposure.allowed_ports[%d] 应为 1 ~ 65535: %d", i, p)
+		}
+	}
+	for i, s := range e.Services {
+		n := s.Name
+		if n == "" {
+			n = fmt.Sprintf("#%d", i+1)
+		}
+		switch strings.ToLower(strings.TrimSpace(s.Proto)) {
+		case "", "any", "tcp", "udp":
+		default:
+			return fmt.Errorf("exposure.services %s 的 proto 只能为 tcp / udp / any", n)
+		}
+		for field, port := range map[string]int{"public_port": s.PublicPort, "private_port": s.PrivatePort} {
+			if port < 0 || port > 65535 {
+				return fmt.Errorf("exposure.services %s 的 %s 应为 0（全部端口）或 1 ~ 65535: %d", n, field, port)
+			}
+		}
+		if v := strings.TrimSpace(s.PublicIP); v != "" && !strings.EqualFold(v, "any") {
+			if _, err := ParseNetwork(v); err != nil {
+				return fmt.Errorf("exposure.services %s 的 public_ip 无效: %w", n, err)
+			}
+		}
+		if v := strings.TrimSpace(s.PrivateIP); v != "" {
+			if _, err := ParseNetwork(v); err != nil {
+				return fmt.Errorf("exposure.services %s 的 private_ip 无效: %w", n, err)
+			}
+		}
+	}
+	return nil
 }
 
 func (c *Config) validateSyslog() error {

@@ -130,6 +130,12 @@ func (m *Manager) add(name, path, typ, logFormat, host string) (*source, error) 
 	return s, nil
 }
 
+// QueueLen / QueueCap 返回事件投递通道的当前批次数与容量：长度持续接近容量说明下游处理不过来。
+func (m *Manager) QueueLen() int { return len(m.Out) }
+
+// QueueCap 返回事件投递通道容量。
+func (m *Manager) QueueCap() int { return cap(m.Out) }
+
 // Stats 返回所有数据源状态。
 func (m *Manager) Stats() []Stat {
 	m.mu.Lock()

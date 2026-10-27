@@ -14,7 +14,7 @@ func TestIncidentLifecycle(t *testing.T) {
 	ip := "203.0.113.20"
 	rec := func(at time.Time, rule string, sev model.Severity, result string) *model.Alert {
 		res := s.Record(&model.Event{Kind: model.KindWeb, SrcIP: ip, Method: "GET", URI: "/a?" + rule, Status: 403, Time: at},
-			[]model.Hit{attackHit(rule, "SQL注入", sev, result)})
+			[]model.Hit{attackHit(rule, "XSS跨站脚本", sev, result)})
 		if len(res.Alerts) != 1 {
 			t.Fatalf("应产生告警: %+v", res)
 		}

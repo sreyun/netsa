@@ -5,6 +5,7 @@ import (
 	"compress/gzip"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -13,6 +14,14 @@ import (
 
 	"netsa/internal/model"
 )
+
+// snapshotVersion 是当前快照结构版本。修改持久化字段的含义时递增，并在 migrateSnapshot
+// 中补齐旧版本默认值。旧版本程序读到更高版本会静默丢弃不认识的字段并回写，
+// 因此 Load 对「版本高于本程序」的快照一律拒绝，并先备份原文件再以空状态启动。
+const snapshotVersion = 2
+
+// ErrSnapshotTooNew 表示快照由更新版本的程序写入，当前版本无法安全解析。
+var ErrSnapshotTooNew = errors.New("快照由更新版本的程序写入，当前版本无法安全读取")
 
 // snapshotHead 是快照中除画像以外的部分。
 type snapshotHead struct {
@@ -82,7 +91,7 @@ func (s *Store) writeSnapshot(f io.Writer, compress bool) error {
 
 	s.mu.RLock()
 	head := snapshotHead{
-		Version: 1, SavedAt: time.Now(), NextID: s.nextID, Buckets: s.buckets, Totals: s.totals,
+		Version: snapshotVersion, SavedAt: time.Now(), NextID: s.nextID, Buckets: s.buckets, Totals: s.totals,
 		Categories: s.categories, Rules: s.rules, RuleNames: s.ruleNames, SevCount: s.sevCount, Phases: s.phases,
 		Results: s.results, MinTime: s.minTime, MaxTime: s.maxTime, Surface: s.surf, Scores: s.scores, Incidents: s.incidents, NextInc: s.nextInc, Days: s.days,
 	}
@@ -148,6 +157,52 @@ func (s *Store) writeSnapshot(f io.Writer, compress bool) error {
 	return nil
 }
 
+// migrateSnapshot 把旧版本快照升级到当前版本；版本高于本程序时返回 ErrSnapshotTooNew。
+func migrateSnapshot(snap *snapshot) error {
+	if snap.Version > snapshotVersion {
+		return fmt.Errorf("%w（快照 v%d，本程序支持至 v%d）", ErrSnapshotTooNew, snap.Version, snapshotVersion)
+	}
+	if snap.Version < 1 {
+		snap.Version = 1
+	}
+	if snap.Version < 2 {
+		// v1 → v2：事件新增「命中 / 告警」双计数与每规则告警数。旧快照里 Rules 只统计过告警，
+		// 因此命中数按告警数回填，RuleAlerts 与 Rules 一致。
+		for _, inc := range snap.Incidents {
+			if inc == nil {
+				continue
+			}
+			if inc.Hits < inc.Alerts {
+				inc.Hits = inc.Alerts
+			}
+			if inc.Muted < 0 || inc.Muted > inc.Hits-inc.Alerts {
+				inc.Muted = inc.Hits - inc.Alerts
+			}
+			if inc.RuleAlerts == nil {
+				inc.RuleAlerts = make(map[string]int, len(inc.Rules))
+				for k, v := range inc.Rules {
+					inc.RuleAlerts[k] = v
+				}
+			}
+		}
+		snap.Version = 2
+	}
+	return nil
+}
+
+// snapshotLoadError 在返回错误前把有问题的快照文件改名备份，避免被下一次保存覆盖；
+// 目录不可写等无法备份的情况不掩盖原始错误。
+func snapshotLoadError(path, suffix string, err error) error {
+	backup := path + "." + suffix + ".bak"
+	if _, statErr := os.Stat(backup); statErr == nil {
+		backup = fmt.Sprintf("%s.%s.%s.bak", path, suffix, time.Now().Format("20060102-150405"))
+	}
+	if renameErr := os.Rename(path, backup); renameErr != nil {
+		return fmt.Errorf("%w（原文件备份失败: %v）", err, renameErr)
+	}
+	return fmt.Errorf("%w；原文件已备份为 %s", err, backup)
+}
+
 // Load 从快照恢复状态；文件不存在时不报错。
 func (s *Store) Load(path string) error {
 	if path == "" {
@@ -160,7 +215,15 @@ func (s *Store) Load(path string) error {
 	if err != nil {
 		return err
 	}
-	defer f.Close()
+	// Windows 下重命名被打开的文件会失败：备份前先显式关闭，defer 里只做兜底。
+	closed := false
+	closeFile := func() {
+		if !closed {
+			closed = true
+			f.Close()
+		}
+	}
+	defer closeFile()
 	var r interface {
 		Read([]byte) (int, error)
 	} = f
@@ -174,7 +237,13 @@ func (s *Store) Load(path string) error {
 	}
 	var snap snapshot
 	if err := json.NewDecoder(r).Decode(&snap); err != nil {
-		return err
+		// 文件损坏（截断、gzip 异常）时先备份：否则下一次定时保存会用空状态覆盖掉它
+		closeFile()
+		return snapshotLoadError(path, "corrupt", fmt.Errorf("解析快照失败: %w", err))
+	}
+	if err := migrateSnapshot(&snap); err != nil {
+		closeFile()
+		return snapshotLoadError(path, fmt.Sprintf("v%d", snap.Version), err)
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -193,6 +262,7 @@ func (s *Store) Load(path string) error {
 		}
 		s.rebuildSketch(p)
 	}
+	s.agg.rebuild(s.ips) // 增量统计不持久化，按恢复后的画像重建一次
 	if len(snap.Alerts) > s.maxAlerts {
 		snap.Alerts = snap.Alerts[len(snap.Alerts)-s.maxAlerts:]
 	}

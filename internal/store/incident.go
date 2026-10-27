@@ -72,11 +72,14 @@ type Incident struct {
 	Severity   model.Severity `json:"severity"`
 	Status     string         `json:"status"`
 	Assignee   string         `json:"assignee,omitempty"`
-	Alerts     int            `json:"alerts"`
+	Alerts     int            `json:"alerts"`  // 生成的告警条数（受 detect.alerts_per_rule 节流）
+	Hits       int            `json:"hits"`    // 命中次数：含被规则节流、未生成告警的重复命中
+	Muted      int            `json:"muted"`   // 其中未生成告警的命中数（Hits - Alerts）
 	Success    int            `json:"success"` // 疑似攻击成功的告警数
 	Categories map[string]int `json:"categories"`
 	Phases     map[string]int `json:"phases"`
-	Rules      map[string]int `json:"rules"`
+	Rules      map[string]int `json:"rules"`       // 规则 → 命中次数（含被节流的重复命中）
+	RuleAlerts map[string]int `json:"rule_alerts"` // 规则 → 告警条数
 	Targets    map[string]int `json:"targets"`
 	Assets     map[string]int `json:"assets,omitempty"`      // 涉及的资产
 	AssetLevel string         `json:"asset_level,omitempty"` // 涉及资产的最高重要性
@@ -93,10 +96,17 @@ type Incident struct {
 
 // ensureMaps 补全旧快照中缺失的字段。
 func (i *Incident) ensureMaps() {
-	for _, m := range []*map[string]int{&i.Categories, &i.Phases, &i.Rules, &i.Targets} {
+	for _, m := range []*map[string]int{&i.Categories, &i.Phases, &i.Rules, &i.Targets, &i.RuleAlerts} {
 		if *m == nil {
 			*m = map[string]int{}
 		}
+	}
+	// 旧快照只有告警计数：命中数按告警数回填，保证 Hits >= Alerts
+	if i.Hits < i.Alerts {
+		i.Hits = i.Alerts
+	}
+	if i.Muted < 0 || i.Muted > i.Hits-i.Alerts {
+		i.Muted = i.Hits - i.Alerts
 	}
 	if i.Notes == nil {
 		i.Notes = []IncidentNote{}
@@ -119,6 +129,8 @@ type IncidentView struct {
 	Status     string         `json:"status"`
 	Assignee   string         `json:"assignee,omitempty"`
 	Alerts     int            `json:"alerts"`
+	Hits       int            `json:"hits"`
+	Muted      int            `json:"muted"`
 	Success    int            `json:"success"`
 	Categories []string       `json:"categories"`
 	Phases     []string       `json:"phases"`
@@ -138,7 +150,7 @@ type IncidentView struct {
 func rankKeys(m map[string]int, n int) []string {
 	kv := make([]KV, 0, len(m))
 	for k, v := range m {
-		kv = append(kv, KV{k, int64(v)})
+		kv = append(kv, KV{Name: k, Value: int64(v)})
 	}
 	sort.Slice(kv, func(i, j int) bool {
 		if kv[i].Value != kv[j].Value {
@@ -172,7 +184,7 @@ func (i *Incident) view(now time.Time) IncidentView {
 		}
 	}
 	return IncidentView{ID: i.ID, Key: i.Key, Title: title, Location: i.Location, Severity: i.Severity, Status: i.Status, Assignee: i.Assignee,
-		Alerts: i.Alerts, Success: i.Success, Categories: cats, Phases: phases, FirstSeen: i.FirstSeen, LastSeen: i.LastSeen,
+		Alerts: i.Alerts, Hits: i.Hits, Muted: i.Muted, Success: i.Success, Categories: cats, Phases: phases, FirstSeen: i.FirstSeen, LastSeen: i.LastSeen,
 		Created: i.Created, Updated: i.Updated, Due: i.Due, Closed: i.Closed, Overdue: i.active() && now.After(i.Due), Notes: len(i.Notes), Assets: rankKeys(i.Assets, 5), AssetLevel: i.AssetLevel}
 }
 
@@ -196,6 +208,8 @@ func (s *Store) attachIncidentLocked(a *model.Alert, p *IPProfile) uint64 {
 		inc.Location = p.Geo.Location()
 	}
 	inc.Alerts++
+	inc.Hits++
+	incBounded(&inc.RuleAlerts, a.RuleID, maxIncRules)
 	if a.Result == model.ResultSuccess {
 		inc.Success++
 	}
@@ -232,6 +246,49 @@ func (s *Store) attachIncidentLocked(a *model.Alert, p *IPProfile) uint64 {
 	}
 	inc.Updated = now
 	return inc.ID
+}
+
+// incidentHit 是一次未生成告警的命中。事件内的攻击类型、阶段、目标、疑似成功、资产
+// 全部按「命中」口径累计，避免同一个事件里同时出现告警口径与命中口径两套数字。
+type incidentHit struct {
+	rule, category, phase, target, result string
+	asset                                 *model.AssetRef
+	at                                    time.Time
+}
+
+// muteIncidentLocked 记录一次「命中但未生成告警」的重复命中（调用方持写锁）。
+// 只有仍在处置中的事件才累计，已关闭的事件不因节流命中而被改写。
+func (s *Store) muteIncidentLocked(ip string, h incidentHit) {
+	id, ok := s.incByKey[ip]
+	if !ok {
+		return
+	}
+	inc := s.incidents[id]
+	if inc == nil || !inc.active() {
+		return
+	}
+	inc.Hits++
+	inc.Muted++
+	incBounded(&inc.Rules, h.rule, maxIncRules)
+	incBounded(&inc.Targets, h.target, maxIncTargets)
+	incBounded(&inc.Categories, h.category, 50)
+	incBounded(&inc.Phases, h.phase, 10)
+	if h.result == model.ResultSuccess {
+		inc.Success++
+	}
+	if h.asset != nil {
+		incBounded(&inc.Assets, h.asset.Name, maxIncTargets)
+		if assetRank(h.asset.Level) > assetRank(inc.AssetLevel) {
+			inc.AssetLevel = h.asset.Level
+			if due := inc.Created.Add(slaFor(inc.Severity, inc.AssetLevel)); inc.active() && due.Before(inc.Due) {
+				inc.Due, inc.Reminded = due, false
+			}
+		}
+	}
+	if h.at.After(inc.LastSeen) {
+		inc.LastSeen = h.at
+	}
+	inc.Updated = time.Now()
 }
 
 func appendNote(notes []IncidentNote, n IncidentNote) []IncidentNote {
@@ -395,7 +452,17 @@ func (s *Store) Incident(id uint64) *IncidentDetail {
 	}
 	d := &IncidentDetail{IncidentView: i.view(time.Now()), Notes: append([]IncidentNote{}, i.Notes...), AlertList: []*model.Alert{}, SLA: slaFor(i.Severity, i.AssetLevel).String()}
 	for k, v := range i.Rules {
-		d.Rules = append(d.Rules, KV{k + " " + s.ruleNames[k], int64(v)})
+		name := s.ruleNames[k]
+		if name == "" {
+			name = k
+		} else {
+			name = k + " " + name
+		}
+		alerts, ok := i.RuleAlerts[k]
+		if !ok {
+			alerts = v // 旧快照没有 rule_alerts
+		}
+		d.Rules = append(d.Rules, KV{Name: name, Value: int64(v), Alerts: int64(alerts)})
 	}
 	sort.Slice(d.Rules, func(a, b int) bool { return d.Rules[a].Value > d.Rules[b].Value })
 	d.Targets = topN(intMap(i.Targets), 10, ident)

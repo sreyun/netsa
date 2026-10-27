@@ -1,7 +1,6 @@
 package parser
 
 import (
-	"encoding/json"
 	"regexp"
 	"strconv"
 	"strings"
@@ -158,8 +157,8 @@ func (WindowsSecurity) Parse(line string) (*model.Event, bool) {
 		if !hasWinIDKey(line) { // 先确认有事件 ID 键再解码：其他 JSON 日志（如 Suricata eve 的 event_type）不做无谓的解码
 			return nil, false
 		}
-		var m map[string]any
-		if json.Unmarshal([]byte(line), &m) != nil {
+		m, ok := unmarshalLog(line)
+		if !ok {
 			return nil, false
 		}
 		kv = flattenLower(m)
@@ -477,8 +476,8 @@ func (JSONDNS) Parse(line string) (*model.Event, bool) {
 		!strings.Contains(line, `"qtype"`) && !strings.Contains(line, `"query_type"`) && !(strings.Contains(line, "dns") && strings.Contains(line, `"domain"`)) {
 		return nil, false
 	}
-	var m map[string]any
-	if json.Unmarshal([]byte(line), &m) != nil {
+	m, ok := unmarshalLog(line)
+	if !ok {
 		return nil, false
 	}
 	kv := flattenLower(m)

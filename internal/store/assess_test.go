@@ -189,14 +189,15 @@ func TestAssessment(t *testing.T) {
 func TestOverviewSituation(t *testing.T) {
 	s := newTestStore()
 	now := time.Now()
-	hit := func(ip string, at time.Time, sev model.Severity, res string) {
+	hit := func(ip string, at time.Time, cat string, sev model.Severity, res string) {
 		s.Record(&model.Event{Kind: model.KindWeb, SrcIP: ip, Method: "GET", URI: "/x", Status: 200, Time: at},
-			[]model.Hit{{RuleID: "r" + sev.String(), Name: "r", Category: detect.CatSQLi, Severity: sev, Phase: model.PhaseExploit, Result: res}})
+			[]model.Hit{{RuleID: "r" + sev.String(), Name: "r", Category: cat, Severity: sev, Phase: model.PhaseExploit, Result: res}})
 	}
-	hit("198.51.100.1", now.Add(-90*time.Minute), model.SevMedium, model.ResultBlocked)
-	hit("198.51.100.1", now.Add(-80*time.Minute), model.SevMedium, model.ResultBlocked)
-	hit("198.51.100.2", now.Add(-10*time.Minute), model.SevCritical, model.ResultSuccess)
-	hit("198.51.100.3", now.Add(-5*time.Minute), model.SevLow, model.ResultBlocked)
+	hit("198.51.100.1", now.Add(-90*time.Minute), detect.CatXSS, model.SevMedium, model.ResultBlocked)
+	hit("198.51.100.1", now.Add(-80*time.Minute), detect.CatXSS, model.SevMedium, model.ResultBlocked)
+	hit("198.51.100.2", now.Add(-10*time.Minute), detect.CatSQLi, model.SevCritical, model.ResultSuccess)
+	// 低危来源用端口扫描：SQL 注入的分类底线是高危，构造不出低危攻击源
+	hit("198.51.100.3", now.Add(-5*time.Minute), detect.CatPortScan, model.SevLow, model.ResultBlocked)
 	o := s.Overview()
 	if o.Prev.Attacks != 2 || o.Recent.Attacks != 2 || o.NewAttackers != 2 || o.ActiveHigh != 1 || o.RecentSuccess != 1 || o.Compromised != 1 {
 		t.Fatalf("态势研判: prev=%d recent=%d new=%d high=%d succ=%d comp=%d", o.Prev.Attacks, o.Recent.Attacks, o.NewAttackers, o.ActiveHigh, o.RecentSuccess, o.Compromised)

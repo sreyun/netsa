@@ -49,14 +49,25 @@ func (s *Severity) UnmarshalJSON(b []byte) error {
 }
 
 // ParseSeverity 解析英文或中文等级名，未知值视为 info。
+//
+// 用于「展示类」输入（查询参数、设备上报文本），容错优先。配置文件里的规则等级应使用
+// TryParseSeverity，避免拼写错误被静默降为 info。
 func ParseSeverity(s string) Severity {
+	if v, ok := TryParseSeverity(s); ok {
+		return v
+	}
+	return SevInfo
+}
+
+// TryParseSeverity 严格解析等级名，无法识别时返回 false。
+func TryParseSeverity(s string) (Severity, bool) {
 	s = strings.ToLower(strings.TrimSpace(s))
 	for i, n := range sevNames {
 		if s == n || s == sevLabels[i] {
-			return Severity(i)
+			return Severity(i), true
 		}
 	}
-	return SevInfo
+	return SevInfo, false
 }
 
 // Bump 将等级提升 n 级（不超过 critical）。

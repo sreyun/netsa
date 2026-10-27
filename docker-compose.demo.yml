@@ -8,7 +8,7 @@ services:
     build:
       context: .
       args:
-        GOPROXY: ${GOPROXY:-https://proxy.golang.org,direct}
+        GOPROXY: ${GOPROXY:-https://goproxy.cn,direct}
     image: netsa:latest
     restart: unless-stopped
     command: ["simulate", "-o", "/app/demo-logs", "-hours", "6", "-live", "-interval", "2s"]
@@ -21,7 +21,7 @@ services:
     build:
       context: .
       args:
-        GOPROXY: ${GOPROXY:-https://proxy.golang.org,direct}
+        GOPROXY: ${GOPROXY:-https://goproxy.cn,direct}
     image: netsa:latest
     restart: unless-stopped
     depends_on:
@@ -33,6 +33,14 @@ services:
       - "8080:8080"
     volumes:
       - demo-logs:/app/demo-logs:ro
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/healthz"]
+      interval: 30s
+      timeout: 5s
+      start_period: 30s
+      retries: 3
+    # 演示环境默认关闭登录校验以外的额外接口；如需性能剖析，在 configs/demo.yaml 中设置 server.pprof: true
+    # 监控指标：docker compose -f docker-compose.demo.yml exec netsa wget -qO- http://127.0.0.1:8080/metrics
 
 volumes:
   demo-logs:

@@ -287,15 +287,20 @@ func (r *Resolver) Lookup(ip string) *Info {
 	return e.info
 }
 
-// lookupLocal 查询自定义网段与离线库。内网地址只认自定义网段，未命中时归入“内网”。
-func (r *Resolver) lookupLocal(addr netip.Addr, private bool) []SourceResult {
+// lookupLocal 查询自定义网段与离线库。内网与保留地址只认自定义网段，未命中时按类别标注，
+// 绝不提交定位库查询（否则 172.168.100.0/24 这类被内网误用的公网段会返回「美国」）。
+func (r *Resolver) lookupLocal(addr netip.Addr, nonPublic bool) []SourceResult {
 	var out []SourceResult
 	if sr, _ := r.custom.Load().Lookup(addr); sr != nil {
 		out = append(out, *sr)
 	}
-	if private {
+	if nonPublic {
 		if len(out) == 0 {
-			out = append(out, SourceResult{Source: "private", Country: "内网", Province: "局域网", Lat: r.opt.HomeLat, Lon: r.opt.HomeLon})
+			if IsInternal(addr) {
+				out = append(out, SourceResult{Source: "private", Country: "内网", Province: "局域网", Lat: r.opt.HomeLat, Lon: r.opt.HomeLon})
+			} else {
+				out = append(out, SourceResult{Source: "private", Country: "保留地址", Province: "非公网地址"})
+			}
 		}
 		return out
 	}
@@ -472,8 +477,8 @@ func (r *Resolver) merge(ip string, e *entry) *Info {
 	}
 	if e.private {
 		info.Private = true
-		// 未配置坐标的内网网段默认落在受保护资产所在位置
-		if !info.HasCoord {
+		// 未配置坐标的内网网段默认落在受保护资产所在位置；保留 / 文档地址没有真实位置，不给坐标
+		if !info.HasCoord && IsInternal(addrOf(ip)) {
 			info.Lat, info.Lon, info.HasCoord, info.CoordSource = r.opt.HomeLat, r.opt.HomeLon, true, "private"
 		}
 	}
@@ -496,6 +501,9 @@ func confidence(all []SourceResult, info *Info) (string, []string) {
 		return "high", notes
 	}
 	if info.Private {
+		if info.Country == "保留地址" {
+			return "high", []string{"保留 / 非公网地址，不属于任何真实地理位置（常见于测试或异常日志）"}
+		}
 		return "high", []string{"内网地址，来源为内部主机"}
 	}
 	countries := map[string]bool{}
@@ -590,6 +598,8 @@ func isCloudISP(s string) bool {
 
 func netType(i *Info) string {
 	switch {
+	case i.Private && i.Country == "保留地址":
+		return "保留地址"
 	case i.Private:
 		return "内网"
 	case i.Proxy:
@@ -604,17 +614,8 @@ func netType(i *Info) string {
 	return ""
 }
 
-var cgnat = netip.MustParsePrefix("100.64.0.0/10")
-
-func isPrivate(a netip.Addr) bool {
-	return a.IsPrivate() || a.IsLoopback() || a.IsLinkLocalUnicast() || a.IsUnspecified() || cgnat.Contains(a)
-}
-
-// IsPrivate 判断字符串形式的 IP 是否为内网 / 保留地址。
-func IsPrivate(ip string) bool {
-	a, err := netip.ParseAddr(ip)
-	return err == nil && isPrivate(a.Unmap())
-}
+// isPrivate 判断地址是否为内网 / 保留（非公网）地址，见 internal.go 中的网段集合。
+func isPrivate(a netip.Addr) bool { return IsNonPublic(a.Unmap()) }
 
 // QueueLen 返回尚未完成的在线查询与 rDNS 任务数（含排队与进行中）。
 func (r *Resolver) QueueLen() int {

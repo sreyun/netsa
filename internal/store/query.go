@@ -16,12 +16,14 @@ import (
 type KV struct {
 	Name  string `json:"name"`
 	Value int64  `json:"value"`
+	// Alerts 仅用于「规则 → 命中次数」这类既需要命中数、又需要告警数的场景
+	Alerts int64 `json:"alerts,omitempty"`
 }
 
 func topN[K comparable](m map[K]int64, n int, name func(K) string) []KV {
 	out := make([]KV, 0, len(m))
 	for k, v := range m {
-		out = append(out, KV{name(k), v})
+		out = append(out, KV{Name: name(k), Value: v})
 	}
 	sort.Slice(out, func(i, j int) bool {
 		if out[i].Value != out[j].Value {
@@ -102,51 +104,26 @@ func (s *Store) Overview() *Overview {
 	o.Categories = topN(s.categories, 0, ident)
 	o.TopRules = topN(s.rules, 10, func(id string) string { return s.ruleNames[id] })
 
-	countries, provinces, cities, isps, nettypes, targets := map[string]int64{}, map[string]int64{}, map[string]int64{}, map[string]int64{}, map[string]int64{}, map[string]int64{}
+	// 攻击源画像的分布统计由增量计数器维护（写入 / 淘汰 / 归属地更新时更新），
+	// 这里只做一次小规模拷贝与排序，不再遍历全部画像。
 	recentCut := s.maxTime.Add(-time.Hour)
-	for _, p := range s.ips {
-		if !isAttacker(p) {
-			continue
-		}
-		o.Attackers++
-		o.LevelCounts[p.Level.String()]++
-		if p.LastSeen.After(recentCut) {
-			o.Recent.Attackers++
-			if p.Level >= model.SevHigh {
-				o.ActiveHigh++
-			}
-			if p.FirstSeen.After(recentCut) {
-				o.NewAttackers++
-			}
-		}
-		country, prov, city, isp, nt := geoKeys(p)
-		countries[country]++
-		if prov != "" {
-			provinces[prov]++
-		}
-		if city != "" {
-			cities[city]++
-		}
-		if isp != "" {
-			isps[isp]++
-		}
-		nettypes[nt]++
-		for t, n := range p.Targets {
-			if len(targets) < 20000 || targets[t] > 0 {
-				targets[t] += int64(n)
-			}
+	o.Attackers = s.agg.attackers
+	for i, n := range s.agg.levels {
+		if n > 0 {
+			o.LevelCounts[model.Severity(i).String()] = n
 		}
 	}
-	o.TopCountries = topN(countries, 15, ident)
-	o.TopProvinces = topN(provinces, 15, ident)
-	o.TopCities = topN(cities, 15, ident)
-	o.CountryCount, o.CityCount, o.Findings = len(countries), len(cities), len(s.surf.Findings)
-	if _, ok := countries["未知"]; ok {
+	o.Recent.Attackers, o.ActiveHigh, o.NewAttackers = s.agg.recent(recentCut.Unix() / 60)
+	o.TopCountries = topN(s.agg.countries, 15, ident)
+	o.TopProvinces = topN(s.agg.provinces, 15, ident)
+	o.TopCities = topN(s.agg.cities, 15, ident)
+	o.CountryCount, o.CityCount, o.Findings = len(s.agg.countries), len(s.agg.cities), len(s.surf.Findings)
+	if _, ok := s.agg.countries["未知"]; ok {
 		o.CountryCount--
 	}
-	o.TopISPs = topN(isps, 10, ident)
-	o.TopNetTypes = topN(nettypes, 0, ident)
-	o.TopTargets = topN(targets, 10, ident)
+	o.TopISPs = topN(s.agg.isps, 10, ident)
+	o.TopNetTypes = topN(s.agg.nettypes, 0, ident)
+	o.TopTargets = topN(s.agg.targets, 10, ident)
 	o.TopPorts = topN(s.surf.Ports, 10, func(p int) string {
 		name, _ := serviceInfo(p)
 		return itoa(p) + "/" + name
@@ -190,8 +167,12 @@ func (s *Store) Overview() *Overview {
 // geoKeys 返回攻击源在总览排行中的国家、省份、城市、运营商与网络类型。总览下钻时按相同的值筛选攻击源，
 // 保证点击排行条目后列出的攻击源数量与图表一致。
 func geoKeys(p *IPProfile) (country, prov, city, isp, nt string) {
+	return geoKeysInfo(p.Geo)
+}
+
+// geoKeysInfo 与 geoKeys 相同，但直接接受归属地对象（增量统计在替换归属地时需要分别计算新旧值）。
+func geoKeysInfo(g *geo.Info) (country, prov, city, isp, nt string) {
 	country, nt = "未知", "未知"
-	g := p.Geo
 	if g == nil {
 		return
 	}
@@ -406,9 +387,17 @@ func searchText(p *IPProfile) string {
 // 攻击源数量很多（数万）时避免为每个画像构造摘要，减少读锁占用时间与内存分配。
 func (s *Store) Attackers(q AttackerQuery) ([]AttackerSummary, int) {
 	search := strings.ToLower(strings.TrimSpace(q.Search))
+	// 读锁内只做筛选并复制排序键：排序（O(n log n)）与分页在锁外完成，
+	// 翻页时再短暂加锁取摘要。20 万画像下读锁持有时长从「扫描 + 排序」降到「扫描」。
+	type cand struct {
+		p       *IPProfile
+		ip      string
+		score   float64
+		attacks int64
+		last    time.Time
+	}
+	list := make([]cand, 0, 256)
 	s.mu.RLock()
-	defer s.mu.RUnlock()
-	list := make([]*IPProfile, 0, 256)
 	for _, p := range s.ips {
 		if !isAttacker(p) || p.Level < q.MinLevel || !q.match(p) {
 			continue
@@ -416,27 +405,29 @@ func (s *Store) Attackers(q AttackerQuery) ([]AttackerSummary, int) {
 		if search != "" && !strings.Contains(searchText(p), search) {
 			continue
 		}
-		list = append(list, p)
+		list = append(list, cand{p: p, ip: p.IP, score: p.Score, attacks: p.Attacks, last: p.LastSeen})
 	}
+	s.mu.RUnlock()
+
 	sort.Slice(list, func(i, j int) bool {
 		x, y := list[i], list[j]
 		switch q.Sort {
 		case "attacks":
-			if x.Attacks != y.Attacks {
-				return x.Attacks > y.Attacks
+			if x.attacks != y.attacks {
+				return x.attacks > y.attacks
 			}
 		case "last":
-			if !x.LastSeen.Equal(y.LastSeen) {
-				return x.LastSeen.After(y.LastSeen)
+			if !x.last.Equal(y.last) {
+				return x.last.After(y.last)
 			}
 		}
-		if x.Score != y.Score {
-			return x.Score > y.Score
+		if x.score != y.score {
+			return x.score > y.score
 		}
-		if x.Attacks != y.Attacks {
-			return x.Attacks > y.Attacks
+		if x.attacks != y.attacks {
+			return x.attacks > y.attacks
 		}
-		return x.IP < y.IP // 排序稳定，翻页时不会重复或遗漏
+		return x.ip < y.ip // 排序稳定，翻页时不会重复或遗漏
 	})
 	total := len(list)
 	if q.Offset > 0 {
@@ -449,9 +440,15 @@ func (s *Store) Attackers(q AttackerQuery) ([]AttackerSummary, int) {
 		list = list[:q.Limit]
 	}
 	out := make([]AttackerSummary, len(list))
-	for i, p := range list {
-		out[i] = summarize(p)
+	s.mu.RLock()
+	for i := range list {
+		if cur := s.ips[list[i].ip]; cur != nil { // 期间被淘汰时不再有写者，读取快照对象是安全的
+			out[i] = summarize(cur)
+		} else {
+			out[i] = summarize(list[i].p)
+		}
 	}
+	s.mu.RUnlock()
 	return out, total
 }
 
@@ -471,11 +468,24 @@ type ChainStep struct {
 	Count int       `json:"count"`
 }
 
+// RuleHits 返回本次运行以来各规则的命中次数（副本，可直接序列化）。
+// 用于识别长期未触发的规则——规则写错、被封禁绕过或已失效时，命中数会一直是 0。
+func (s *Store) RuleHits() map[string]int64 {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make(map[string]int64, len(s.rules))
+	for k, v := range s.rules {
+		out[k] = v
+	}
+	return out
+}
+
 type RuleHit struct {
 	ID       string         `json:"id"`
 	Name     string         `json:"name"`
 	Severity model.Severity `json:"severity"`
-	Count    int            `json:"count"`
+	Count    int            `json:"count"`  // 命中次数（含按规则节流、未生成告警的重复命中）
+	Alerts   int            `json:"alerts"` // 生成告警的条数
 }
 
 // IPDetail 返回 IP 溯源详情。同源关联分析在释放读锁后分批进行，不会长时间阻塞日志写入。
@@ -498,6 +508,7 @@ func (s *Store) ipDetail(ip string) *IPDetail {
 	cp.Categories, cp.Rules, cp.RuleNames, cp.RuleSev = copyMap(p.Categories), copyMap(p.Rules), copyMap(p.RuleNames), copyMap(p.RuleSev)
 	cp.Phases, cp.PhaseFirst, cp.Results, cp.Targets = copyMap(p.Phases), copyMap(p.PhaseFirst), copyMap(p.Results), copyMap(p.Targets)
 	cp.Ports, cp.Status, cp.UAs, cp.Tags = copyMap(p.Ports), copyMap(p.Status), copyMap(p.UAs), copyMap(p.Tags)
+	cp.RuleAlerts = copyMap(p.RuleAlerts)
 	cp.Proxies = copyMap(p.Proxies)
 	cp.CatSev, cp.CatPhase = copyMap(p.CatSev), copyMap(p.CatPhase)
 	cp.Recent = append([]*model.Alert(nil), p.Recent...)
@@ -509,7 +520,12 @@ func (s *Store) ipDetail(ip string) *IPDetail {
 		}
 	}
 	for id, n := range p.Rules {
-		d.Rules = append(d.Rules, RuleHit{id, p.RuleNames[id], p.RuleSev[id], n})
+		// 旧快照没有 rule_alerts，退化为「命中即告警」，避免详情页出现「命中 5 / 告警 0」
+		alerts, ok := p.RuleAlerts[id]
+		if !ok {
+			alerts = n
+		}
+		d.Rules = append(d.Rules, RuleHit{ID: id, Name: p.RuleNames[id], Severity: p.RuleSev[id], Count: n, Alerts: alerts})
 	}
 	sort.Slice(d.Rules, func(i, j int) bool {
 		if d.Rules[i].Severity != d.Rules[j].Severity {

@@ -1,7 +1,6 @@
 package parser
 
 import (
-	"encoding/json"
 	"regexp"
 	"strconv"
 	"strings"
@@ -304,8 +303,8 @@ func (JSONFirewall) Parse(line string) (*model.Event, bool) {
 	if !strings.HasPrefix(line, "{") {
 		return nil, false
 	}
-	var m map[string]any
-	if err := json.Unmarshal([]byte(line), &m); err != nil {
+	m, ok := unmarshalLog(line)
+	if !ok {
 		return nil, false
 	}
 	raw := flattenLower(m)
