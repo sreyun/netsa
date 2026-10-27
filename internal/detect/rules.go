@@ -2,14 +2,17 @@ package detect
 
 import (
 	"fmt"
+	"log"
 	"os"
 	"regexp"
 	"regexp/syntax"
+	"sort"
 	"strings"
 
 	"gopkg.in/yaml.v3"
 
 	"netsa/internal/model"
+	"netsa/internal/risk"
 )
 
 // 攻击分类。
@@ -80,7 +83,25 @@ func (r *Rule) compile() error {
 	}
 	r.re = re
 	r.need = buildPrefilter(r.Pattern, flags)
-	r.sev = model.ParseSeverity(r.Severity)
+	// 等级必须显式且合法：拼写错误（如 "hgih"）若按 info 处理，会让高危攻击静默降级，
+	// 属于最难发现的配置故障，因此在加载阶段直接报错。
+	sev, ok := model.TryParseSeverity(r.Severity)
+	if r.Severity == "" {
+		sev, ok = model.SevInfo, true // 未声明：由分类底线决定，最低 info
+	}
+	if !ok {
+		return fmt.Errorf("规则 %s 的 severity %q 无法识别（可选 info/low/medium/high/critical）", r.ID, r.Severity)
+	}
+	r.sev = sev
+	// 低于分类底线的声明在加载阶段纠正并输出告警，便于发现配置错误
+	if f := risk.Floor(r.Category); sev < f {
+		log.Printf("[detect] 规则 %s（%s）声明的等级 %s 低于分类底线，已提升为 %s",
+			r.ID, r.Category, sev, f)
+		r.sev = f
+	}
+	// 对外暴露的等级统一为「最终生效值」：/api/rules 与界面展示的等级必须与实际检测一致，
+	// 否则排查时会看到规则写 low、告警却是 high，产生口径分歧。
+	r.Severity = r.sev.String()
 	if r.Name == "" {
 		r.Name = r.ID
 	}
@@ -263,6 +284,20 @@ func LoadRules(path string) ([]*Rule, error) {
 			index[r.ID] = len(out)
 			out = append(out, &r)
 		}
+	}
+	// 自定义分类没有等级底线，完全按声明值使用；拼写错误（如「SQL 注入」多一个空格）
+	// 会让底线的防漏机制失效，因此在启动日志里列出未知分类，便于核对。
+	var unknown []string
+	seen := map[string]bool{}
+	for _, r := range out {
+		if !r.builtin && risk.Floor(r.Category) == model.SevInfo && !seen[r.Category] && r.Category != "" {
+			seen[r.Category] = true
+			unknown = append(unknown, r.Category)
+		}
+	}
+	if len(unknown) > 0 {
+		sort.Strings(unknown)
+		log.Printf("[detect] 自定义分类无等级底线（按规则声明执行，请确认拼写）: %s", strings.Join(unknown, "、"))
 	}
 	return out, nil
 }

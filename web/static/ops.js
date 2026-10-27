@@ -97,7 +97,7 @@ async function loadIncidents() {
     <td><b>${esc(i.title)}</b><div class="cell-chips">${(i.phases || []).map((ph) => `<span class="chip">${esc(PHASE[ph] || ph)}</span>`).join('')}${(i.assets || []).map((a) => `<span class="chip ${i.asset_level === 'core' ? 'warn' : ''}">资产 ${esc(a)}</span>`).join('')}</div></td>
     <td>${badge(i.severity)}</td><td class="nowrap">${statusChip(i.status)}</td>
     <td class="nowrap">${esc(i.assignee || '-')}</td>
-    <td class="num">${num(i.alerts)}${i.success ? `<div class="res-success" style="font-size:11px">${i.success} 次疑似成功</div>` : ''}</td>
+    <td class="num">${num(i.alerts)}${i.hits && i.hits !== i.alerts ? `<div class="muted" style="font-size:11px" title="同一规则在节流窗口内只记录前若干条告警，其余命中只计数">命中 ${num(i.hits)}</div>` : ''}${i.success ? `<div class="res-success" style="font-size:11px">${i.success} 次疑似成功</div>` : ''}</td>
     <td class="nowrap muted">${esc(fmtShort(i.first_seen))}<br>${esc(fmtShort(i.last_seen))}</td>
     <td class="nowrap">${incDue(i)}</td><td class="num">${i.notes || ''}</td></tr>`).join('');
   $('#incTable').innerHTML = `<thead><tr>${ops ? '<th class="chk"><input type="checkbox" id="incAll" aria-label="全选本页"></th>' : ''}<th>编号</th><th>事件</th><th>等级</th><th>状态</th><th>负责人</th><th class="num">告警</th><th>首次 / 最近</th><th>处置时限</th><th class="num">记录</th></tr></thead><tbody>${rows || empty(ops ? 10 : 9, '没有符合条件的事件')}</tbody>`;
@@ -183,17 +183,21 @@ async function openIncident(id) {
     <div class="kv">
       <div class="k">来源</div><div>${ipLink(d.key)} <span class="muted">${esc(d.location || '')}</span></div>
       <div class="k">时间</div><div>${esc(fmtTime(d.first_seen))} ~ ${esc(fmtTime(d.last_seen))}</div>
-      <div class="k">告警</div><div>${num(d.alerts)} 条${d.success ? ` · <span class="res-success">疑似成功 ${d.success} 次</span>` : ''}</div>
+      <div class="k">告警</div><div>${num(d.alerts)} 条${d.muted ? ` <span class="muted">（累计命中 ${num(d.hits)} 次，其中 ${num(d.muted)} 次同类命中按规则节流未生成告警）</span>` : d.hits && d.hits !== d.alerts ? ` <span class="muted">（累计命中 ${num(d.hits)} 次）</span>` : ''}${d.success ? ` · <span class="res-success">疑似成功 ${d.success} 次</span>` : ''}</div>
       <div class="k">攻击类型</div><div>${(d.categories || []).map((c) => `<span class="chip">${esc(c)}</span>`).join('') || '-'}</div>
       <div class="k">攻击阶段</div><div>${(d.phases || []).map((p) => `<span class="chip">${esc(PHASE[p] || p)}</span>`).join('') || '-'}</div>
       ${(d.assets || []).length ? `<div class="k">涉及资产</div><div>${d.assets.map((a) => `<span class="chip">${esc(a)}</span>`).join('')} ${IMPC(d.asset_level)}</div>` : ''}
       <div class="k">负责人</div><div>${esc(d.assignee || '未指派')}</div>
       <div class="k">处置时限</div><div>${esc(fmtTime(d.due))}（${esc(fmtDur(d.sla))}，${d.asset_level === 'core' ? '涉及核心资产，时限按高一级计算' : '按事件等级计算'}）· ${incDue(d)}</div>
-      <div class="k">命中规则</div><div>${(d.rules || []).map((r) => `<span class="chip">${esc(r.name)} × ${num(r.value)}</span>`).join('') || '-'}</div>
+      <div class="k">命中规则</div><div>${(d.rules || []).map((r) => {
+        const alerts = r.alerts == null ? r.value : r.alerts;
+        const extra = alerts !== r.value ? ` / ${num(alerts)} 告警` : '';
+        return `<span class="chip" title="命中 ${num(r.value)} 次，生成告警 ${num(alerts)} 条（同一规则在节流窗口内只记录前若干条）">${esc(r.name)} × ${num(r.value)} 命中${extra}</span>`;
+      }).join('') || '-'}</div>
       <div class="k">攻击目标</div><div class="mono">${(d.targets || []).map((t) => `<div>${esc(t.name)} <span class="muted">× ${num(t.value)}</span></div>`).join('') || '-'}</div>
     </div>
     <h4>处置记录</h4><ul class="timeline">${notes || '<li class="muted">暂无处置记录</li>'}</ul>
-    <h4>相关告警 <small>内存中保留的最近 ${num((d.alert_list || []).length)} 条</small></h4>
+    <h4>相关告警 <small>累计 ${num(d.alerts)} 条，当前内存保留最近 ${num((d.alert_list || []).length)} 条</small></h4>
     <div class="scroll"><table class="table"><thead><tr><th>时间</th><th>规则</th><th>目标</th><th>结果</th><th>证据</th><th></th></tr></thead><tbody>${alerts || empty(6, '告警已超出内存保留范围')}</tbody></table></div>`;
   // 处置栏
   const ass = await loadAssignees();

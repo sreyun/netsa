@@ -18,6 +18,7 @@ import (
 	"netsa/internal/auth"
 	"netsa/internal/config"
 	"netsa/internal/detect"
+	"netsa/internal/exposure"
 	"netsa/internal/geo"
 	"netsa/internal/ingest"
 	"netsa/internal/model"
@@ -461,5 +462,97 @@ func TestSendReportAPI(t *testing.T) {
 	}
 	if rec := do(h, http.MethodPost, "/api/alert/robots/nope/report", "", admin); rec.Code != 404 {
 		t.Fatalf("不存在的机器人: %d", rec.Code)
+	}
+}
+
+// TestPprofRoutesDoNotConflict 回归 Go 1.22+ ServeMux 的模式冲突：
+// 不带方法的 "/debug/pprof/" 与兜底静态路由 "GET /" 会被判定为互相冲突，启动即 panic。
+// 该问题只在 server.pprof 开启时暴露，默认配置下测不到，因此单独覆盖。
+func TestPprofRoutesDoNotConflict(t *testing.T) {
+	s, _ := testServer(t, "admin", "secret")
+	s.Cfg.Server.Pprof = true
+
+	var h http.Handler
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				t.Fatalf("注册 pprof 路由时 panic（与 GET / 模式冲突）: %v", r)
+			}
+		}()
+		h = s.Handler()
+	}()
+
+	if rec := get(h, "/debug/pprof/"); rec.Code != http.StatusUnauthorized {
+		t.Fatalf("未认证访问 pprof 应被拒绝: %d", rec.Code)
+	}
+	if rec := get(h, "/debug/pprof/", "admin", "secret"); rec.Code != http.StatusOK {
+		t.Fatalf("管理员访问 pprof 应成功: %d", rec.Code)
+	}
+	// 兜底静态路由不能被 pprof 抢走（未登录时首页会 302 到登录页，因此带认证判定内容）
+	if rec := get(h, "/", "admin", "secret"); rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "<html") {
+		t.Fatalf("首页应仍由静态资源处理: %d", rec.Code)
+	}
+}
+
+// 规则命中统计：/api/rules/stats 与 /api/meta 的 rules_hit 必须与 store 中的命中计数一致，
+// 便于识别长期未触发的规则（误配或已被前置条件短路）。
+func TestRulesStats(t *testing.T) {
+	s, st := testServer(t, "admin", "secret")
+	st.Record(&model.Event{Kind: model.KindWeb, SrcIP: "203.0.113.9", Method: "GET", URI: "/x", Status: 403, Time: time.Now()},
+		[]model.Hit{{RuleID: "sqli-union", Name: "UNION联合查询注入", Category: "SQL注入",
+			Severity: model.SevHigh, Phase: model.PhaseExploit, Result: model.ResultBlocked}})
+
+	rec := get(s.Handler(), "/api/rules/stats", "admin", "secret")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("规则统计接口状态码: %d", rec.Code)
+	}
+	var out struct {
+		Total int              `json:"total"`
+		Hit   int              `json:"hit"`
+		Hits  map[string]int64 `json:"hits"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatal(err)
+	}
+	if out.Total == 0 || out.Hit != 1 || out.Hits["sqli-union"] != 1 {
+		t.Fatalf("规则命中统计错误: %+v", out)
+	}
+
+	var meta map[string]any
+	if err := json.Unmarshal(get(s.Handler(), "/api/meta", "admin", "secret").Body.Bytes(), &meta); err != nil {
+		t.Fatal(err)
+	}
+	if got := int(meta["rules_hit"].(float64)); got != 1 {
+		t.Fatalf("meta.rules_hit 应为 1，实际 %d", got)
+	}
+}
+
+// 暴露面接口返回候选映射：界面据此提示「可能漏登记的 DNAT 映射」。
+func TestExposureCandidatesAPI(t *testing.T) {
+	s, _ := testServer(t, "admin", "secret")
+	m, err := exposure.Load(config.ExposureConfig{Suggest: config.ExposureSuggest{MinAllows: 1, MinSources: 1}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.Exposure = m
+	m.Observe("43.242.97.40", 8443, "tcp", "198.51.100.1", true, time.Now())
+
+	var out struct {
+		Enabled    bool                 `json:"enabled"`
+		Candidates []exposure.Candidate `json:"candidates"`
+	}
+	if err := json.Unmarshal(get(s.Handler(), "/api/exposure", "admin", "secret").Body.Bytes(), &out); err != nil {
+		t.Fatal(err)
+	}
+	if out.Enabled || len(out.Candidates) != 1 || out.Candidates[0].PublicPort != 8443 || out.Candidates[0].YAML == "" {
+		t.Fatalf("候选映射返回错误: %+v", out)
+	}
+
+	var meta map[string]any
+	if err := json.Unmarshal(get(s.Handler(), "/api/meta", "admin", "secret").Body.Bytes(), &meta); err != nil {
+		t.Fatal(err)
+	}
+	if got := int(meta["exposure_candidates"].(float64)); got != 1 {
+		t.Fatalf("meta.exposure_candidates 应为 1，实际 %d", got)
 	}
 }

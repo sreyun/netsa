@@ -1,0 +1,60 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  go:
+    name: go · fmt / vet / race test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: go mod verify
+        run: go mod verify
+
+      - name: gofmt
+        run: |
+          files=$(git ls-files '*.go')
+          out=$(gofmt -l $files)
+          if [ -n "$out" ]; then
+            echo "以下文件未按 gofmt 格式化："
+            echo "$out"
+            exit 1
+          fi
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: go test (race)
+        run: go test -race -count=1 ./...
+
+      - name: build
+        run: CGO_ENABLED=0 go build -trimpath -o /tmp/netsa ./cmd/netsa
+
+  web:
+    name: web · syntax
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: node --check
+        run: |
+          for f in web/static/*.js; do
+            echo "checking $f"
+            node --check "$f"
+          done

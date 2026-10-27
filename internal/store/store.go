@@ -3,7 +3,6 @@ package store
 
 import (
 	"math"
-	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -11,6 +10,7 @@ import (
 
 	"netsa/internal/geo"
 	"netsa/internal/model"
+	"netsa/internal/risk"
 	"netsa/internal/safe"
 )
 
@@ -31,7 +31,8 @@ type IPProfile struct {
 	Categories map[string]int            `json:"categories"`
 	CatSev     map[string]model.Severity `json:"cat_sev"`
 	CatPhase   map[string]string         `json:"cat_phase"`
-	Rules      map[string]int            `json:"rules"`
+	Rules      map[string]int            `json:"rules"`       // 命中次数（含按规则节流、未生成告警的重复命中）
+	RuleAlerts map[string]int            `json:"rule_alerts"` // 生成告警的条数（受 alerts_per_rule 节流）
 	RuleNames  map[string]string         `json:"rule_names"`
 	RuleSev    map[string]model.Severity `json:"rule_sev"`
 	Phases     map[string]int            `json:"phases"`
@@ -50,6 +51,11 @@ type IPProfile struct {
 
 	throttle map[string]*window
 	sk       sketch // 规则 / 端口集合指纹，用于同源关联分析的快速筛选
+
+	// 以下为增量统计的簿记字段，不持久化（快照恢复后由 rebuild 重建）
+	inAgg    bool   `json:"-"`
+	aggMask  uint64 `json:"-"` // 已计入 ATT&CK 矩阵的技术位
+	aggFlags uint8  `json:"-"` // 已计入的攻击手法标记
 }
 
 type window struct {
@@ -131,7 +137,15 @@ func (p *IPProfile) recompute() {
 	p.Score = math.Round(math.Min(sum, 100)*10) / 10
 	// 攻击源等级不低于其触发过的最高告警等级：触发过高危告警的 IP 必然计入“高危以上攻击源”，
 	// 与告警事件中的等级一致。评分同步抬升到该等级的下限，保证评分、等级与排序相互一致。
-	if f := levelFloor[p.MaxSev]; p.Score < f {
+	//
+	// 严重级额外要求佐证：单条「严重」告警若既没有成功命中、也没有失陷迹象类分类
+	// （带外、远控、挖矿、主机事件），只按高危封顶。否则一条误判的设备告警就能把
+	// 任意 IP 抬到严重，污染整体评级与处置排序。
+	floorSev := p.MaxSev
+	if floorSev >= model.SevCritical && p.Successes == 0 && !p.hasCompromiseEvidence() {
+		floorSev = model.SevHigh
+	}
+	if f := levelFloor[floorSev]; p.Score < f {
 		p.Score = f
 	}
 	lvl := model.SevInfo
@@ -146,6 +160,16 @@ func (p *IPProfile) recompute() {
 		lvl = model.SevLow
 	}
 	p.Level = lvl
+}
+
+// hasCompromiseEvidence 判断画像是否出现过「观察即证据」的失陷迹象分类。
+func (p *IPProfile) hasCompromiseEvidence() bool {
+	for cat, sev := range p.CatSev {
+		if sev >= model.SevHigh && risk.CompromiseEvidence(cat) {
+			return true
+		}
+	}
+	return false
 }
 
 // Bucket 是一分钟粒度的统计桶。
@@ -203,6 +227,7 @@ type Store struct {
 	incidents  map[uint64]*Incident // 安全事件（同一来源的告警合并处置）
 	incByKey   map[string]uint64    // 来源 IP → 最近的事件
 	nextInc    uint64
+	agg        *aggregate          // 总览增量统计（国家/省份/城市/等级/目标/近 1 小时）
 	days       map[string]*DayStat // 按自然日的汇总（周报 / 月报）
 	curDay     *DayStat
 	dayStart   int64
@@ -212,6 +237,9 @@ type Store struct {
 	// GeoLookup / IntelMatch 在创建新画像时调用。
 	GeoLookup  func(ip string) *geo.Info
 	IntelMatch func(ip string) []string
+	// PortPublished 判断公网目标端口是否确实对外发布（DNAT 映射）。为 nil 时视为全部发布（保持原有行为）。
+	// 用于避免「防火墙默认策略放行过一次探测」被误判为「该端口对公网开放」，进而影响暴露面评估与安全评分。
+	PortPublished func(dstIP string, port int, proto string) bool
 }
 
 func New(maxIPs, maxAlerts, alertsPerRule int, retention time.Duration) *Store {
@@ -221,7 +249,7 @@ func New(maxIPs, maxAlerts, alertsPerRule int, retention time.Duration) *Store {
 		categories: map[string]int64{}, rules: map[string]int64{}, ruleNames: map[string]string{},
 		phases: map[string]int64{}, results: map[string]int64{}, surf: newSurface(), ruleBits: map[string]int{},
 		incidents: map[uint64]*Incident{}, incByKey: map[string]uint64{},
-		days: map[string]*DayStat{},
+		agg: newAggregate(), days: map[string]*DayStat{},
 	}
 }
 
@@ -236,6 +264,9 @@ type RecordResult struct {
 }
 
 const throttleWindow = 10 * time.Minute
+
+// alertRuleCap 是单个画像记录的规则数上限（规则总量有限，预留余量防止自定义规则过多时内存膨胀）。
+const alertRuleCap = 500
 
 // Record 记录一个事件及其检测命中。
 func (s *Store) Record(ev *model.Event, hits []model.Hit) RecordResult {
@@ -344,7 +375,7 @@ func (s *Store) recordLocked(ev *model.Event, hits []model.Hit) RecordResult {
 				if ev.Kind == model.KindWeb {
 					s.surf.observeWeb(ev, hits, false)
 				} else {
-					s.surf.observeFw(ev)
+					s.surf.observeFw(ev, s.published(ev))
 				}
 				return res
 			}
@@ -359,12 +390,13 @@ func (s *Store) recordLocked(ev *model.Event, hits []model.Hit) RecordResult {
 		}
 		s.ips[ev.SrcIP] = p
 		res.NewIP = true
+		s.agg.add(p) // 威胁情报命中时创建即为攻击源；普通访客由首次攻击时补登记
 		if len(p.Intel) > 0 {
 			hits = append(hits, model.Hit{RuleID: "intel", Name: "威胁情报命中", Category: "威胁情报", Severity: model.SevHigh,
 				Phase: model.PhaseRecon, Evidence: strings.Join(p.Intel, ", "), Result: model.ResultUnknown})
 		}
 	}
-	oldLevel := p.Level
+	oldLevel, oldSeen, oldFirst := p.Level, p.LastSeen, p.FirstSeen
 	p.Events++
 	if ev.Time.After(p.LastSeen) {
 		p.LastSeen = ev.Time
@@ -372,6 +404,8 @@ func (s *Store) recordLocked(ev *model.Event, hits []model.Hit) RecordResult {
 	if ev.Time.Before(p.FirstSeen) {
 		p.FirstSeen = ev.Time
 	}
+	s.agg.moveLastSeen(p, oldSeen)
+	s.agg.moveFirstSeen(p, oldFirst)
 	if ev.Kind == model.KindWeb {
 		p.WebReqs++
 		incBounded(&p.Status, ev.Status, 50)
@@ -394,6 +428,11 @@ func (s *Store) recordLocked(ev *model.Event, hits []model.Hit) RecordResult {
 
 	if ev.Kind == model.KindWeb && ev.Status >= 200 && ev.Status < 300 {
 		hits = s.verifySuccess(ev, hits)
+	}
+	// 入库前最后一道等级裁决：复核可能把「疑似成功」改判为「未成功」，
+	// 等级必须随之回落，避免严重级告警只靠一次误判的 2xx 长期滞留。
+	for i := range hits {
+		risk.Finalize(&hits[i])
 	}
 	wasAttacker := p.Attacks > 0
 	attacked := false
@@ -430,9 +469,17 @@ func (s *Store) recordLocked(ev *model.Event, hits []model.Hit) RecordResult {
 			p.Successes++
 		}
 		p.Attacks++
+		firstCat := p.Categories[h.Category] == 0
 		p.Categories[h.Category]++
+		oldCatSev := p.CatSev[h.Category]
 		if h.Severity > p.CatSev[h.Category] {
 			p.CatSev[h.Category] = h.Severity
+		}
+		// 同步安全评估的增量统计：新增攻击类型、同类攻击出现更高等级
+		if firstCat {
+			s.agg.addCategory(p, h.Category, p.CatSev[h.Category])
+		} else if h.Severity > oldCatSev {
+			s.agg.setCategorySeverity(p, h.Category, oldCatSev, p.CatSev[h.Category])
 		}
 		if _, ok := p.CatPhase[h.Category]; !ok {
 			p.CatPhase[h.Category] = h.Phase
@@ -451,11 +498,21 @@ func (s *Store) recordLocked(ev *model.Event, hits []model.Hit) RecordResult {
 			p.PhaseFirst[h.Phase] = ev.Time
 		}
 		p.Results[h.Result]++
-		incBounded(&p.Targets, truncate(ev.Target(), 200), 100)
+		if target := truncate(ev.Target(), 200); incBounded(&p.Targets, target, 100) {
+			s.agg.addTarget(p, target)
+		}
 
 		if s.allowAlert(p, h.RuleID, ev.Time) {
+			incBounded(&p.RuleAlerts, h.RuleID, alertRuleCap)
 			a := s.newAlert(ev, &h, p)
 			res.Alerts = append(res.Alerts, a)
+		} else {
+			// 同一规则在节流窗口内的重复命中：仍然计入「命中」，但不生成告警。
+			// 事件里单独累计，避免出现「命中 10 次、告警 6 条」却无处解释的口径差异。
+			s.muteIncidentLocked(ev.SrcIP, incidentHit{
+				rule: h.RuleID, category: h.Category, phase: h.Phase, result: h.Result,
+				target: truncate(ev.Target(), 300), asset: ev.Asset, at: ev.Time,
+			})
 		}
 	}
 	if attacked {
@@ -468,8 +525,12 @@ func (s *Store) recordLocked(ev *model.Event, hits []model.Hit) RecordResult {
 		}
 		day.Alerts += int64(len(res.Alerts))
 	}
+	if attacked && !p.inAgg {
+		s.agg.add(p) // 兜底：确保首次攻击一定进入总览统计（目标表已满时 addTarget 可能未被调用）
+	}
 	if attacked || len(p.Intel) > 0 {
 		p.recompute()
+		s.agg.setLevel(p, oldLevel)
 	}
 	if ev.Kind == model.KindWeb {
 		s.surf.observeWeb(ev, hits, attacked)
@@ -485,12 +546,12 @@ func (s *Store) recordLocked(ev *model.Event, hits []model.Hit) RecordResult {
 		h := hitOf(hits, CatMalware)
 		s.surf.finding("c2:"+ev.SrcIP, "内网主机触发恶意软件 / 远控告警", "失陷迹象", h.Severity, ev.SrcIP, h.Name+"："+h.Evidence,
 			"隔离该主机并使用终端安全软件全盘查杀，排查恶意进程、自启动项与外连；确认感染途径后修复", ev.DstIP, ev.Time)
-		s.surf.observeFw(ev)
+		s.surf.observeFw(ev, s.published(ev))
 	} else if c2 != nil {
 		s.surf.finding("c2:"+ev.SrcIP, "内网主机外连威胁情报地址", "失陷迹象", c2.Severity, ev.SrcIP, c2.Evidence,
 			"立即隔离该主机，排查恶意进程、计划任务、自启动项与可疑账号；在出口防火墙封禁该地址，并核查同网段其他主机是否存在相同外连", ev.DstIP, ev.Time)
 	} else {
-		s.surf.observeFw(ev)
+		s.surf.observeFw(ev, s.published(ev))
 	}
 	res.Level, res.Score = p.Level, p.Score
 	res.LevelUp = p.Level > oldLevel
@@ -569,7 +630,9 @@ func (s *Store) UpdateGeo(ip string, info *geo.Info) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if p := s.ips[ip]; p != nil {
+		old := p.Geo
 		p.Geo = info
+		s.agg.setGeo(p, old)
 	}
 }
 
@@ -598,6 +661,7 @@ func (s *Store) RefreshGeo(relocate func(ip string, old *geo.Info) *geo.Info) in
 				n++
 			}
 			p.Geo = info
+			s.agg.setGeo(p, it.old)
 		}
 		s.mu.Unlock()
 	}
@@ -624,10 +688,20 @@ func (s *Store) Maintain() {
 				delete(s.buckets, k)
 			}
 		}
+		// 「近 1 小时」只用到 60 分钟，保留 2 小时的分钟桶即可
+		s.agg.prune(s.maxTime.Add(-2 * time.Hour))
 	}
 	if len(s.ips) > s.maxIPs {
 		s.evictLocked()
 	}
+}
+
+// published 判断防火墙事件的目标端口是否真实对外开放；内网目标视为已发布（已过 DNAT 或东西向流量）。
+func (s *Store) published(ev *model.Event) bool {
+	if s.PortPublished == nil || ev.DstIP == "" || geo.IsPrivate(ev.DstIP) {
+		return true
+	}
+	return s.PortPublished(ev.DstIP, ev.DstPort, ev.Proto)
 }
 
 // hasAttack 判断命中中是否包含攻击（仅打标签的命中不算）。
@@ -641,25 +715,68 @@ func hasAttack(hits []model.Hit) bool {
 }
 
 // evictLocked 淘汰评分最低、最久未活动的画像，使数量回到上限的 90%（调用方持写锁）。
+//
+// 只淘汰 maxIPs/10 个，因此用「定长大顶堆 + 部分选择」而不是为全部画像分配切片再全量排序：
+// 20 万画像时比较次数从 O(N log N) 降到 O(N log K)、额外内存从 O(N) 降到 O(K)，
+// 写锁持有时长同步下降（该函数运行在日志入库的写锁内，停顿越小越好）。
 func (s *Store) evictLocked() {
-	type cand struct {
-		ip    string
-		score float64
-		last  time.Time
-	}
-	var cs []cand
-	for ip, p := range s.ips {
-		cs = append(cs, cand{ip, p.Score, p.LastSeen})
-	}
-	sort.Slice(cs, func(i, j int) bool {
-		if cs[i].score != cs[j].score {
-			return cs[i].score < cs[j].score
-		}
-		return cs[i].last.Before(cs[j].last)
-	})
 	n := len(s.ips) - s.maxIPs + s.maxIPs/10
-	for i := 0; i < n && i < len(cs); i++ {
-		delete(s.ips, cs[i].ip)
+	if n <= 0 {
+		return
+	}
+	// 堆中保存「最该淘汰的 n 个」，堆顶是其中最不该淘汰的一个（评分最高 / 最近活动）
+	h := make([]*IPProfile, 0, min(n, len(s.ips)))
+	for _, p := range s.ips {
+		if len(h) < n {
+			h = append(h, p)
+			heapSiftUp(h, len(h)-1)
+			continue
+		}
+		if evictsAfter(h[0], p) { // 堆顶比新候选更值得保留 → 用新候选替换堆顶
+			h[0] = p
+			heapSiftDown(h, 0)
+		}
+	}
+	for _, p := range h {
+		s.agg.remove(p)
+		delete(s.ips, p.IP)
+	}
+}
+
+// evictsAfter 判断 a 是否应比 b 更晚被淘汰：评分高者优先保留，评分相同时更近活动者优先保留。
+func evictsAfter(a, b *IPProfile) bool {
+	if a.Score != b.Score {
+		return a.Score > b.Score
+	}
+	return a.LastSeen.After(b.LastSeen)
+}
+
+// heapSiftUp / heapSiftDown 维护按 evictsAfter 排序的大顶堆。
+func heapSiftUp(h []*IPProfile, i int) {
+	for i > 0 {
+		parent := (i - 1) / 2
+		if !evictsAfter(h[i], h[parent]) {
+			return
+		}
+		h[i], h[parent] = h[parent], h[i]
+		i = parent
+	}
+}
+
+func heapSiftDown(h []*IPProfile, i int) {
+	for {
+		left, right, top := 2*i+1, 2*i+2, i
+		if left < len(h) && evictsAfter(h[left], h[top]) {
+			top = left
+		}
+		if right < len(h) && evictsAfter(h[right], h[top]) {
+			top = right
+		}
+		if top == i {
+			return
+		}
+		h[i], h[top] = h[top], h[i]
+		i = top
 	}
 }
 

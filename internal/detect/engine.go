@@ -1,11 +1,12 @@
 package detect
 
 import (
-	"net/netip"
 	"strings"
 	"sync"
 
+	"netsa/internal/geo"
 	"netsa/internal/model"
+	"netsa/internal/risk"
 )
 
 // 规则作用的文本段。
@@ -78,27 +79,41 @@ func NewEngine(rulesFile string, successMinBytes int64) (*Engine, error) {
 func (e *Engine) Rules() []*Rule { return e.rules }
 
 // Inspect 对单个事件执行特征检测。
+//
+// 所有分支的命中都会经过 risk.Finalize 统一裁决等级：特征规则、设备告警、防火墙端口探测
+// 各自声明的等级只作为「建议值」，最终是否够严重由分类底线与响应结果共同决定。
 func (e *Engine) Inspect(ev *model.Event) []model.Hit {
 	if ev.Outbound {
 		return nil
 	}
+	var hits []model.Hit
 	switch ev.Kind {
 	case model.KindFirewall:
-		return inspectFirewall(ev)
+		hits = inspectFirewall(ev)
 	case model.KindDNS:
-		return inspectDNS(ev)
+		hits = inspectDNS(ev)
 	case model.KindAuth:
-		return inspectAuth(ev)
+		hits = inspectAuth(ev)
+	default:
+		hits = e.inspectWeb(ev)
 	}
-	return e.inspectWeb(ev)
+	for i := range hits {
+		before := hits[i].Severity
+		risk.Finalize(&hits[i])
+		// 只在等级被下调时写入说明：上调（分类底线）是常态，写进证据会让页面变得嘈杂
+		if hits[i].Severity < before {
+			if d := risk.Describe(&hits[i], before); d != "" {
+				hits[i].Evidence = Printable(hits[i].Evidence+"（"+d+"）", 400)
+			}
+		}
+	}
+	return hits
 }
 
-// 能由响应判断是否成功的分类：命中且返回 2xx 时研判为“疑似成功”并升级风险。
-// SSRF、XXE、表达式注入（Log4j / OGNL / SpEL / SSTI）、反序列化多为盲打或带外利用，页面正常返回 200 是常态，
-// 无法据此判断成功，研判为“未拦截”，避免把正常响应误判为失陷。
-var bumpOnSuccess = map[string]bool{
-	CatSQLi: true, CatTraversal: true, CatCmdExec: true, CatWebShell: true, CatCVE: true, CatSensitive: true,
-}
+// 能由响应判断是否成功的分类由 risk.SuccessEscalates 统一定义：
+// SSRF、XXE、表达式注入（Log4j / OGNL / SpEL / SSTI）、反序列化多为盲打或带外利用，
+// 页面正常返回 200 是常态，无法据此判断成功，一律标注为「未拦截」，避免误判为失陷；
+// 敏感文件探测只能证明资源可访问，同样不作为成功证据。
 
 // scanSegments 一次扫描 "uri\nua\nreferer"，按出现位置把命中的字面量记入各文本段的位图。
 func (e *Engine) scanSegments(all string, uriLen, pathLen, uaLen int, segs *[segCount]bitset) {
@@ -191,12 +206,8 @@ func (e *Engine) inspectWeb(ev *model.Event) []model.Hit {
 			RuleID: r.ID, Name: r.Name, Category: r.Category, Severity: r.sev, Phase: r.Phase,
 			Evidence: excerpt(text, loc[0], loc[1]), Result: result, TagOnly: r.TagOnly,
 		}
-		if result == model.ResultSuccess {
-			if bumpOnSuccess[r.Category] {
-				h.Severity = h.Severity.Bump(1)
-			} else {
-				h.Result = model.ResultPassed
-			}
+		if result == model.ResultSuccess && !risk.ResponseProvable(r.Category) {
+			h.Result = model.ResultPassed
 		}
 		hits = append(hits, h)
 	}
@@ -222,7 +233,7 @@ func specialWebChecks(ev *model.Event, uri, result string) []model.Hit {
 	var hits []model.Hit
 	add := func(id, name, cat string, sev model.Severity, phase, evidence string) {
 		r := result
-		if r == model.ResultSuccess && !bumpOnSuccess[cat] {
+		if r == model.ResultSuccess && !risk.ResponseProvable(cat) {
 			r = model.ResultPassed
 		}
 		hits = append(hits, model.Hit{RuleID: id, Name: name, Category: cat, Severity: sev, Phase: phase, Evidence: evidence, Result: r})
@@ -271,6 +282,9 @@ func hasScriptExt(uri string) bool {
 	}
 	return false
 }
+
+// Result 用引擎配置的最小响应字节数研判攻击结果（与特征检测使用同一口径）。
+func (e *Engine) Result(ev *model.Event) string { return WebResult(ev, e.minBytes) }
 
 // WebResult 根据响应码与响应大小研判攻击结果。
 func WebResult(ev *model.Event, minBytes int64) string {
@@ -352,21 +366,14 @@ func inspectFirewall(ev *model.Event) []model.Hit {
 	return nil
 }
 
-var cgnat = netip.MustParsePrefix("100.64.0.0/10")
-
 // IsEgress 判断防火墙事件是否为内网主机访问公网的出站连接（部分设备日志不标注方向，按地址判断）。
 func IsEgress(ev *model.Event) bool {
 	return ev.Kind == model.KindFirewall && ev.DstIP != "" && isPrivateIP(ev.SrcIP) && !isPrivateIP(ev.DstIP)
 }
 
-func isPrivateIP(ip string) bool {
-	a, err := netip.ParseAddr(ip)
-	if err != nil {
-		return false
-	}
-	a = a.Unmap()
-	return a.IsPrivate() || a.IsLoopback() || a.IsLinkLocalUnicast() || cgnat.Contains(a)
-}
+// isPrivateIP 统一使用 geo 包的网段集合（内置 RFC1918 / 保留段 + 配置的内网段 + 本机自动探测的网段），
+// 避免各模块各自维护一套判定导致 172.168.100.0/24 这类内网误用段被当成公网。
+func isPrivateIP(ip string) bool { return geo.IsPrivate(ip) }
 
 // 安全设备威胁名称关键字 → 本系统攻击分类与攻击阶段（按顺序匹配，越具体越靠前）。
 // 关键字按“词”匹配避免误判（如 windows 不应匹配 dos）：以 * 结尾表示词前缀，含空格或符号的为短语子串。

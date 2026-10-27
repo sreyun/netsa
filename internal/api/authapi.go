@@ -46,6 +46,10 @@ var selfService = map[string]bool{
 // 账号、令牌、审计与其余配置变更为管理员；空字符串表示任何已登录账号均可（自助操作）。
 func requiredRole(r *http.Request) string {
 	p := r.URL.Path
+	// 性能剖析包含内存与协程内容，只允许管理员使用
+	if strings.HasPrefix(p, "/debug/pprof") {
+		return auth.RoleAdmin
+	}
 	if !strings.HasPrefix(p, "/api/") {
 		return auth.RoleViewer
 	}

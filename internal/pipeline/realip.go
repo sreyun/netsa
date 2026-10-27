@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"netsa/internal/config"
+	"netsa/internal/geo"
 	"netsa/internal/model"
 )
 
@@ -143,7 +144,7 @@ func (r *RealIP) Apply(ev *model.Event) *model.Hit {
 		case containsLoopback(ev.XFF) || containsLoopback(ev.XRealIP):
 			return &model.Hit{RuleID: "spoof-xff", Name: "伪造来源地址头(绕过IP限制)", Category: "IP伪造",
 				Severity: model.SevLow, Phase: model.PhaseRecon, Evidence: "X-Forwarded-For: " + ev.XFF + " X-Real-IP: " + ev.XRealIP}
-		case r.cdnOnly && !peer.IsPrivate() && !peer.IsLoopback():
+		case r.cdnOnly && !geo.IsInternal(peer) && !peer.IsLoopback():
 			return &model.Hit{RuleID: "cdn-bypass", Name: "绕过CDN直连源站", Category: "CDN绕过",
 				Severity: model.SevMedium, Phase: model.PhaseRecon, Evidence: "直连地址 " + ev.SrcIP + " 不属于可信 CDN/代理网段，源站地址可能已暴露"}
 		}

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io/fs"
 	"net/http"
+	"net/http/pprof"
 	"net/netip"
 	"os"
 	"runtime"
@@ -23,6 +24,7 @@ import (
 	"netsa/internal/auth"
 	"netsa/internal/config"
 	"netsa/internal/detect"
+	"netsa/internal/exposure"
 	"netsa/internal/geo"
 	"netsa/internal/ingest"
 	"netsa/internal/model"
@@ -68,6 +70,7 @@ type Server struct {
 	Suppress *suppress.Manager // 误报抑制规则
 	RawLog   *rawlog.Store     // 原始日志留存，为 nil 表示未启用
 	Assets   *assets.Manager   // 资产与漏洞
+	Exposure *exposure.Manager // 对外发布服务清单（DNAT 映射），为 nil 表示未启用
 	Trail    *audit.Trail      // 防篡改审计链
 
 	started    time.Time
@@ -110,6 +113,11 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/assessment", cached(3*time.Second, s.assessment))
 	mux.HandleFunc("GET /api/sources", s.sources)
 	mux.HandleFunc("GET /api/rules", func(w http.ResponseWriter, r *http.Request) { writeJSON(w, s.Engine.Rules()) })
+	mux.HandleFunc("GET /api/rules/stats", func(w http.ResponseWriter, r *http.Request) {
+		total, hit, hits := s.ruleStats()
+		writeJSON(w, map[string]any{"total": total, "hit": hit, "hits": hits})
+	})
+	mux.HandleFunc("GET /api/exposure", s.exposureInfo)
 	mux.HandleFunc("GET /api/stream", func(w http.ResponseWriter, r *http.Request) { s.Broker.Serve(w, r, s.sessionAlive(r)) })
 	mux.HandleFunc("GET /api/export/blocklist", s.blocklist)
 	mux.HandleFunc("GET /api/report", s.report)
@@ -178,6 +186,17 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/alert/robots/{id}/test", s.robotTest)
 	mux.HandleFunc("POST /api/alert/robots/{id}/report", s.sendReport)
 	mux.HandleFunc("POST /api/alert/test", s.robotTest)
+	// 性能剖析接口（仅管理员，需 server.pprof 开启）：排查 CPU、内存与协程问题时按需打开。
+	// 必须带方法注册：Go 1.22 起 ServeMux 会判定「不限方法的 /debug/pprof/」与「GET /」互相冲突
+	// （前者方法更宽、后者路径更泛），启动时直接 panic。
+	if s.Cfg != nil && s.Cfg.Server.Pprof {
+		mux.HandleFunc("GET /debug/pprof/", pprof.Index)
+		mux.HandleFunc("GET /debug/pprof/cmdline", pprof.Cmdline)
+		mux.HandleFunc("GET /debug/pprof/profile", pprof.Profile)
+		mux.HandleFunc("GET /debug/pprof/symbol", pprof.Symbol)
+		mux.HandleFunc("POST /debug/pprof/symbol", pprof.Symbol) // symbolize 支持批量 POST
+		mux.HandleFunc("GET /debug/pprof/trace", pprof.Trace)
+	}
 	if s.Static != nil {
 		files := http.FileServer(http.FS(s.Static))
 		mux.Handle("GET /", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -276,13 +295,29 @@ func clamp(v, lo, hi int) int {
 	return min(max(v, lo), hi)
 }
 
+// ruleStats 统计已加载规则数、本次运行有命中的规则数，以及每条规则的命中次数。
+func (s *Server) ruleStats() (total, hit int, hits map[string]int64) {
+	rules := s.Engine.Rules()
+	hits = s.Store.RuleHits()
+	for _, r := range rules {
+		if hits[r.ID] > 0 {
+			hit++
+		}
+	}
+	return len(rules), hit, hits
+}
+
 func (s *Server) meta(w http.ResponseWriter, r *http.Request) {
+	ruleTotal, ruleHit, _ := s.ruleStats()
 	writeJSON(w, map[string]any{
 		"version": s.Version, "home": s.Cfg.Home, "started": s.started, "timezone": s.displayTimezone(),
 		"time_correction": s.Cfg.TimeCorrection != "off", "archive": s.Archive != nil,
-		"geo_providers": s.Geo.ProviderNames(), "rdap": s.RDAP != nil, "rules": len(s.Engine.Rules()),
-		"china_maps":  s.Geo.Gazetteer().ChinaMaps(),
-		"require_2fa": s.Cfg.Server.Require2FA, "rawlog": s.RawLog != nil, "assets": s.Assets != nil, "audit": s.Trail != nil,
+		"geo_providers": s.Geo.ProviderNames(), "rdap": s.RDAP != nil, "rules": ruleTotal, "rules_hit": ruleHit,
+		"china_maps": s.Geo.Gazetteer().ChinaMaps(),
+		"intranet":   geo.ExtraInternalNetworks(),
+		"exposure":   s.Exposure.Enforcing(), "exposure_rules": s.Exposure.Count(), "exposure_muted": s.Exposure.Muted(),
+		"exposure_candidates": s.Exposure.CandidateCount(),
+		"require_2fa":         s.Cfg.Server.Require2FA, "rawlog": s.RawLog != nil, "assets": s.Assets != nil, "audit": s.Trail != nil,
 		"syslog": s.Cfg.Syslog.Enabled, "suppress": s.Suppress != nil, "auth": s.Auth != nil,
 	})
 }
@@ -317,7 +352,7 @@ func (s *Server) rdap(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	addr, err := netip.ParseAddr(r.PathValue("ip"))
-	if err != nil || geo.IsPrivate(addr.String()) || !addr.IsGlobalUnicast() {
+	if err != nil || geo.IsNonPublic(addr) || !addr.IsGlobalUnicast() {
 		writeError(w, http.StatusBadRequest, "仅支持公网 IP")
 		return
 	}

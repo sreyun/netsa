@@ -1,7 +1,6 @@
 package parser
 
 import (
-	"encoding/json"
 	"fmt"
 	"net"
 	"net/netip"
@@ -127,20 +126,22 @@ func (NginxJSON) Parse(line string) (*model.Event, bool) {
 	if !strings.HasPrefix(line, "{") {
 		return nil, false
 	}
-	var m map[string]any
-	if err := json.Unmarshal([]byte(line), &m); err != nil {
+	m, ok := unmarshalLog(line)
+	if !ok {
 		return nil, false
 	}
 	kv := flattenLower(m)
-	// 兼容 nginx escape=json、Caddy（request.remote_ip / headers.User-Agent）与 Traefik（ClientHost / RequestPath）等
-	status := pick(kv, "status", "response", "response_code", "status_code", "downstreamstatus")
+	// 兼容 nginx escape=json、Caddy（request.remote_ip / headers.User-Agent）、Traefik（ClientHost / RequestPath）
+	// 与 Elastic ECS（source.ip / url.original / user_agent.original，按完整路径优先取，避免同名的最后一级键混淆）等
+	status := pick(kv, "status", "http.response.status_code", "response", "response_code", "status_code", "downstreamstatus")
 	req := pick(kv, "request")
-	uri := pick(kv, "request_uri", "uri", "path", "url", "requestpath")
-	method := pick(kv, "request_method", "method", "requestmethod")
+	uri := pick(kv, "request_uri", "url.original", "uri", "url.path", "path", "url", "requestpath")
+	method := pick(kv, "request_method", "http.request.method", "method", "requestmethod")
 	if status == "" || (req == "" && uri == "" && method == "") {
 		return nil, false
 	}
-	ip := pick(kv, "remote_addr", "client_ip", "clientip", "remote_ip", "clienthost", "clientaddr", "ip", "client", "real_ip", "realip")
+	ip := pick(kv, "remote_addr", "source.ip", "client.ip", "source.address", "client.address", "client_ip", "clientip", "remote_ip", "clienthost",
+		"clientaddr", "ip", "client", "real_ip", "realip")
 	if h, _, err := net.SplitHostPort(ip); err == nil {
 		ip = h // Traefik ClientAddr 形如 1.2.3.4:5678
 	}
@@ -152,15 +153,15 @@ func (NginxJSON) Parse(line string) (*model.Event, bool) {
 		Kind:    model.KindWeb,
 		Format:  "nginx_json",
 		SrcIP:   ip,
-		Host:    pick(kv, "host", "http_host", "server_name", "domain", "requesthost"),
-		Referer: dash(pick(kv, "http_referer", "referer", "referrer", "request_referer")),
-		UA:      dash(pick(kv, "http_user_agent", "user_agent", "user-agent", "agent", "ua", "request_user-agent")),
+		Host:    pick(kv, "host", "http_host", "url.domain", "server_name", "domain", "requesthost"),
+		Referer: dash(pick(kv, "http_referer", "http.request.referrer", "referer", "referrer", "request_referer")),
+		UA:      dash(pick(kv, "http_user_agent", "user_agent.original", "user_agent", "user-agent", "agent", "ua", "request_user-agent")),
 		XFF:     dash(pick(kv, "http_x_forwarded_for", "x_forwarded_for", "x-forwarded-for", "xff", "request_x-forwarded-for")),
 		XRealIP: dash(pick(kv, "http_x_real_ip", "x_real_ip")),
-		DstIP:   pick(kv, "server_addr"),
+		DstIP:   pick(kv, "server_addr", "destination.ip"),
 	}
 	ev.Status, _ = strconv.Atoi(status)
-	ev.Bytes, _ = strconv.ParseInt(pick(kv, "body_bytes_sent", "bytes_sent", "size", "bytes", "downstreamcontentsize"), 10, 64)
+	ev.Bytes, _ = strconv.ParseInt(pick(kv, "body_bytes_sent", "http.response.body.bytes", "bytes_sent", "size", "bytes", "downstreamcontentsize"), 10, 64)
 	ev.ReqTime, _ = strconv.ParseFloat(pick(kv, "request_time", "duration"), 64)
 	ev.DstPort, _ = strconv.Atoi(pick(kv, "server_port"))
 	if req != "" {
@@ -171,48 +172,20 @@ func (NginxJSON) Parse(line string) (*model.Event, bool) {
 	}
 	if uri != "" && (ev.URI == "" || req == "") {
 		ev.URI = uri
-		if args := pick(kv, "args", "query_string"); args != "" && !strings.Contains(uri, "?") {
+		if args := pick(kv, "args", "query_string", "url.query"); args != "" && !strings.Contains(uri, "?") {
 			ev.URI += "?" + args
 		}
 	}
 	if p := pick(kv, "server_protocol", "protocol"); p != "" && ev.HTTPProto == "" {
 		ev.HTTPProto = p
+	} else if v := kv["http.version"]; v != "" && ev.HTTPProto == "" {
+		ev.HTTPProto = "HTTP/" + v // ECS 只记录版本号
 	}
 	fillClientHeaders(ev, kv)
 	if rp := pick(kv, "realip_remote_addr"); isIP(rp) && rp != ip {
 		ev.PeerIP = rp
 	}
 	return ev, true
-}
-
-// flattenLower 将 JSON 对象展开为小写键的字符串映射（嵌套对象使用最后一级键）。
-func flattenLower(m map[string]any) map[string]string {
-	out := make(map[string]string, len(m))
-	var walk func(map[string]any)
-	walk = func(m map[string]any) {
-		for k, v := range m {
-			k = strings.ToLower(k)
-			switch x := v.(type) {
-			case string:
-				out[k] = x
-			case float64:
-				out[k] = strconv.FormatFloat(x, 'f', -1, 64)
-			case bool:
-				out[k] = strconv.FormatBool(x)
-			case map[string]any:
-				walk(x)
-			case []any:
-				// Caddy 的请求头为字符串数组，取第一个值
-				if len(x) > 0 {
-					if s, ok := x[0].(string); ok {
-						out[k] = s
-					}
-				}
-			}
-		}
-	}
-	walk(m)
-	return out
 }
 
 func pick(kv map[string]string, keys ...string) string {

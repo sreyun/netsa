@@ -131,39 +131,15 @@ func (s *Store) collectAssessLocked() *assessData {
 	}
 	sort.Slice(d.services, func(i, j int) bool { return d.services[i].Risk > d.services[j].Risk })
 	recentCut := s.maxTime.Add(-time.Hour)
-	// 一次遍历画像同时完成各项计数与 ATT&CK 矩阵累计；每个画像只遍历自身的攻击类型，不按名称逐个查表
-	var acc matrixAcc
-	for _, p := range s.ips {
-		if !isAttacker(p) {
-			continue
-		}
-		if p.LastSeen.After(recentCut) && p.Level >= model.SevHigh {
-			d.activeHigh++
-		}
-		if len(p.Intel) > 0 {
-			d.intelHits++
-		}
-		var brute, scan, cc, port bool
-		for cat := range p.Categories {
-			switch cat {
-			case "暴力破解":
-				brute = true
-			case "扫描器", "网络空间测绘", "目录扫描":
-				scan = true
-			case "CC攻击", "洪水攻击":
-				cc = true
-			case "端口扫描", "主机探测", "高危服务探测":
-				port = true
-			}
-			acc.category(cat, p.CatSev[cat])
-		}
-		acc.done()
-		d.brute += int64(b2i(brute))
-		d.scanners += b2i(scan)
-		d.ccSources += b2i(cc)
-		d.portScanners += b2i(port)
-	}
-	d.matrix = s.buildMatrixLocked(&acc)
+	// 画像级统计由增量计数器维护（新增攻击源、新增攻击类型、淘汰时同步更新），
+	// 这里不再遍历全部画像，避免在读锁内做 5 万次 map 遍历。
+	_, d.activeHigh, _ = s.agg.recent(minuteOf(recentCut))
+	d.intelHits = s.agg.intelHits
+	d.brute = int64(s.agg.brute)
+	d.scanners = s.agg.scanners
+	d.ccSources = s.agg.ccSources
+	d.portScanners = s.agg.portScanners
+	d.matrix = s.buildMatrixLocked(s.agg.matrixAcc())
 	var weighted float64
 	cut := recentCut.Unix() / 60
 	for k, b := range s.buckets {

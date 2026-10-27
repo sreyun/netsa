@@ -39,6 +39,7 @@ type Auto struct {
 	cands  []Parser
 	hits   map[string]int
 	miss   int
+	wrap   atomic.Int32 // 识别出的包装格式（Docker / 采集器 / CRI），wrapNone 表示未包装
 }
 
 // NewAuto 根据数据源类型构造解析器。typ 取值 auto / nginx / web / firewall / dns / auth 或具体解析器名；
@@ -78,8 +79,16 @@ func NewAuto(typ, logFormat string) (*Auto, error) {
 	return &Auto{cands: cands, hits: map[string]int{}}, nil
 }
 
-// Detected 返回当前识别出的格式名。
+// Detected 返回当前识别出的格式名，日志被包装时注明包装格式。
 func (a *Auto) Detected() string {
+	name := a.detected()
+	if w := a.wrap.Load(); w != wrapNone && name != "" {
+		name += "（" + wrapLabel[w] + "）"
+	}
+	return name
+}
+
+func (a *Auto) detected() string {
 	if b := a.locked.Load(); b != nil {
 		return b.p.Name()
 	}
@@ -115,8 +124,45 @@ func (a *Auto) Directive(line string) {
 	}
 }
 
+// Parse 解析一行日志。日志被容器运行时或采集器包装（Docker json-file、Filebeat 的 message 字段、CRI 前缀）时，
+// 取出原始日志再识别；识别出包装格式后先拆包装再解析，未包装的行照常解析。
 func (a *Auto) Parse(line string) (*model.Event, bool) {
 	line = strings.TrimRight(line, "\r\n")
+	if a.wrap.Load() != wrapNone || criPrefix(line) > 0 {
+		if ev, ok := a.parseWrapped(line); ok {
+			return ev, true
+		}
+		return a.parseLine(line)
+	}
+	if ev, ok := a.parseLine(line); ok {
+		return ev, true
+	}
+	return a.parseWrapped(line)
+}
+
+// parseWrapped 拆开包装后解析（最多两层，例如 Fluent Bit 转发的 Docker 日志）。
+func (a *Auto) parseWrapped(line string) (*model.Event, bool) {
+	outer := wrapNone // 记录最外层的包装格式
+	for range 2 {
+		inner, kind := unwrapLine(line)
+		if kind == wrapNone {
+			return nil, false
+		}
+		if outer == wrapNone {
+			outer = kind
+		}
+		if ev, ok := a.parseLine(inner); ok {
+			if a.wrap.Load() == wrapNone {
+				a.wrap.Store(outer)
+			}
+			return ev, true
+		}
+		line = inner
+	}
+	return nil, false
+}
+
+func (a *Auto) parseLine(line string) (*model.Event, bool) {
 	msg, hdr, sys := StripSyslog(line)
 
 	locked := a.locked.Load()

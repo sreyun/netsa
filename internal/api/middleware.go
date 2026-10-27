@@ -3,10 +3,12 @@ package api
 import (
 	"bytes"
 	"compress/gzip"
+	"container/list"
 	"io"
 	"net/http"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -14,19 +16,59 @@ import (
 
 // respCache 对聚合类只读接口做短时缓存：多个大屏同时刷新时只计算一次，避免重复遍历全部画像并占用状态库读锁。
 // 同一个键的并发请求只有一个会真正计算，其余等待其结果（防止缓存击穿）。
+//
+// 容量用 LRU 控制：命中即前移，超限淘汰最久未使用的键。此前是「超过 1024 个键整体清空」，
+// 带查询参数的接口（不同筛选条件、分页）很容易把键数推高，周期性地把缓存全部丢光，
+// 大屏刷新会出现规律性的卡顿尖峰；LRU 只淘汰冷键，热键始终保留。
 type respCache struct {
-	mu      sync.Mutex
-	entries map[string]*cacheEntry
+	mu    sync.Mutex
+	order *list.List               // 队首为最近使用
+	items map[string]*list.Element // 键 → 链表节点
+	max   int
+	hits  atomic.Int64
+	miss  atomic.Int64
 }
 
 type cacheEntry struct {
+	key     string
 	mu      sync.Mutex
 	body    []byte
 	ctype   string
 	expires time.Time
 }
 
-func newRespCache() *respCache { return &respCache{entries: map[string]*cacheEntry{}} }
+func newRespCache() *respCache {
+	return &respCache{order: list.New(), items: map[string]*list.Element{}, max: 1024}
+}
+
+// entry 返回键对应的缓存条目（不存在则新建并淘汰最久未使用的键）。
+func (rc *respCache) entry(key string) *cacheEntry {
+	rc.mu.Lock()
+	defer rc.mu.Unlock()
+	if el, ok := rc.items[key]; ok {
+		rc.order.MoveToFront(el)
+		return el.Value.(*cacheEntry)
+	}
+	e := &cacheEntry{key: key}
+	rc.items[key] = rc.order.PushFront(e)
+	for rc.order.Len() > rc.max {
+		back := rc.order.Back()
+		if back == nil {
+			break
+		}
+		rc.order.Remove(back)
+		delete(rc.items, back.Value.(*cacheEntry).key)
+	}
+	return e
+}
+
+// stats 返回当前条目数与命中 / 未命中次数（未命中即重新计算）。
+func (rc *respCache) stats() (entries int, hits, misses int64) {
+	rc.mu.Lock()
+	entries = rc.order.Len()
+	rc.mu.Unlock()
+	return entries, rc.hits.Load(), rc.miss.Load()
+}
 
 type captureWriter struct {
 	header http.Header
@@ -41,20 +83,11 @@ func (c *captureWriter) WriteHeader(code int)        { c.code = code }
 // wrap 返回带缓存的处理器；只缓存 200 响应。
 func (rc *respCache) wrap(ttl time.Duration, h http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		key := r.URL.Path + "?" + r.URL.RawQuery
-		rc.mu.Lock()
-		e := rc.entries[key]
-		if e == nil {
-			if len(rc.entries) > 1024 { // 查询参数组合过多时整体清空，防止内存增长
-				rc.entries = map[string]*cacheEntry{}
-			}
-			e = &cacheEntry{}
-			rc.entries[key] = e
-		}
-		rc.mu.Unlock()
+		e := rc.entry(r.URL.Path + "?" + r.URL.RawQuery)
 
 		e.mu.Lock()
 		if time.Now().After(e.expires) {
+			rc.miss.Add(1)
 			cw := &captureWriter{header: http.Header{}, code: http.StatusOK}
 			h(cw, r)
 			if cw.code != http.StatusOK {
@@ -67,6 +100,8 @@ func (rc *respCache) wrap(ttl time.Duration, h http.HandlerFunc) http.HandlerFun
 				return
 			}
 			e.body, e.ctype, e.expires = cw.buf.Bytes(), cw.header.Get("Content-Type"), time.Now().Add(ttl)
+		} else {
+			rc.hits.Add(1)
 		}
 		body, ctype := e.body, e.ctype
 		e.mu.Unlock()

@@ -95,28 +95,36 @@ func TestAlertRingBuffer(t *testing.T) {
 	}
 }
 
-// 攻击源等级不低于其触发过的最高告警等级：告警事件中出现高危时，总览的“高危以上攻击源”必须包含该 IP。
+// 攻击源等级不低于其触发过的最高告警等级，同时体现严重级的准入边界：
+// 已拦截 / 未成功的利用尝试最高只到高危，只有成功利用或失陷迹象才达到严重。
 func TestLevelFollowsAlertSeverity(t *testing.T) {
 	s := newTestStore()
 	now := time.Now()
 	s.Record(&model.Event{Kind: model.KindWeb, SrcIP: "203.0.113.1", Method: "GET", URI: "/a", Status: 404, Time: now},
 		[]model.Hit{attackHit("rce-probe", "命令执行", model.SevHigh, model.ResultFailed)})
+	// 已拦截的 Log4j 探测：规则声明为严重，但未成功 → 高危
 	s.Record(&model.Event{Kind: model.KindWeb, SrcIP: "203.0.113.2", Method: "GET", URI: "/b", Status: 403, Time: now},
 		[]model.Hit{attackHit("log4shell", "表达式注入", model.SevCritical, model.ResultBlocked)})
 	s.Record(&model.Event{Kind: model.KindWeb, SrcIP: "203.0.113.3", Method: "GET", URI: "/c", Status: 404, Time: now},
 		[]model.Hit{attackHit("xss", "XSS", model.SevMedium, model.ResultPassed)})
-	for ip, want := range map[string]model.Severity{"203.0.113.1": model.SevHigh, "203.0.113.2": model.SevCritical, "203.0.113.3": model.SevMedium} {
+	// 未拦截且响应可判定成功：达到严重
+	s.Record(&model.Event{Kind: model.KindWeb, SrcIP: "203.0.113.4", Method: "GET", URI: "/d", Status: 200, Time: now},
+		[]model.Hit{attackHit("sqli", "SQL注入", model.SevHigh, model.ResultSuccess)})
+	for ip, want := range map[string]model.Severity{
+		"203.0.113.1": model.SevHigh, "203.0.113.2": model.SevHigh,
+		"203.0.113.3": model.SevMedium, "203.0.113.4": model.SevCritical,
+	} {
 		p := s.Profile(ip)
 		if p.Level != want || p.Score < levelFloor[want] {
 			t.Errorf("%s level=%s score=%.1f want %s", ip, p.Level, p.Score, want)
 		}
 	}
 	o := s.Overview()
-	if o.LevelCounts["high"] != 1 || o.LevelCounts["critical"] != 1 || o.SevCounts["high"] != 1 {
+	if o.LevelCounts["high"] != 2 || o.LevelCounts["critical"] != 1 || o.SevCounts["high"] != 2 || o.SevCounts["critical"] != 1 {
 		t.Fatalf("总览统计与告警等级不一致: levels=%v sev=%v", o.LevelCounts, o.SevCounts)
 	}
 	sum := s.AlertSummary()
-	if sum.Retained["high"] != 1 || sum.HitsTotal != 3 || sum.RetainedTotal != 3 {
+	if sum.Retained["high"] != 2 || sum.HitsTotal != 4 || sum.RetainedTotal != 4 {
 		t.Fatalf("告警汇总错误: %+v", sum)
 	}
 }
@@ -270,5 +278,45 @@ func TestOverviewDrillDown(t *testing.T) {
 	b, _ := s.Attackers(AttackerQuery{Limit: 2, Offset: 2})
 	if len(a) != 2 || len(b) != 1 || a[0].IP == b[0].IP || a[1].IP == b[0].IP {
 		t.Fatalf("分页: %v %v", a, b)
+	}
+}
+
+// 严重级需要佐证：单条「严重」告警若没有成功命中、也没有失陷迹象分类，攻击源只按高危封顶。
+func TestCriticalFloorRequiresEvidence(t *testing.T) {
+	s := newTestStore()
+	now := time.Now()
+	// 未拦截但无成功证据的设备告警：告警本身仍是严重，攻击源等级只到高危
+	s.Record(&model.Event{Kind: model.KindWeb, SrcIP: "203.0.113.10", Method: "GET", URI: "/a", Status: 200, Time: now},
+		[]model.Hit{attackHit("dev-1", "设备威胁告警", model.SevCritical, model.ResultPassed)})
+	if p := s.Profile("203.0.113.10"); p.MaxSev != model.SevCritical || p.Level != model.SevHigh {
+		t.Fatalf("单条无佐证的严重告警应封顶高危: max=%s level=%s", p.MaxSev, p.Level)
+	}
+	// 成功利用：攻击源达到严重
+	s.Record(&model.Event{Kind: model.KindWeb, SrcIP: "203.0.113.11", Method: "GET", URI: "/b", Status: 200, Time: now},
+		[]model.Hit{attackHit("sqli", "SQL注入", model.SevHigh, model.ResultSuccess)})
+	if p := s.Profile("203.0.113.11"); p.Level != model.SevCritical {
+		t.Fatalf("成功利用应达到严重: %s", p.Level)
+	}
+	// 失陷迹象（带外探测）：观察即证据，无需成功标记也达到严重
+	s.Record(&model.Event{Kind: model.KindDNS, SrcIP: "10.0.0.5", Host: "x.dnslog.cn", QType: "A", Time: now},
+		[]model.Hit{attackHit("dns-oob", "带外探测", model.SevCritical, model.ResultAllowed)})
+	if p := s.Profile("10.0.0.5"); p == nil || p.Level != model.SevCritical {
+		t.Fatalf("失陷迹象应达到严重: %+v", p)
+	}
+}
+
+// RuleHits 返回规则命中快照：用于识别长期未触发的规则，且修改返回值不影响内部统计。
+func TestRuleHits(t *testing.T) {
+	s := newTestStore()
+	now := time.Now()
+	s.Record(&model.Event{Kind: model.KindWeb, SrcIP: "203.0.113.30", Method: "GET", URI: "/a", Status: 403, Time: now},
+		[]model.Hit{attackHit("sqli-union", "SQL注入", model.SevHigh, model.ResultBlocked)})
+	hits := s.RuleHits()
+	if hits["sqli-union"] != 1 {
+		t.Fatalf("命中计数错误: %v", hits)
+	}
+	hits["sqli-union"] = 99
+	if got := s.RuleHits()["sqli-union"]; got != 1 {
+		t.Fatalf("返回的应当是副本，实际 %d", got)
 	}
 }

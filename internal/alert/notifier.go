@@ -85,7 +85,7 @@ type Notifier struct {
 	dedup   time.Duration
 	client  *http.Client
 	ctx     context.Context // Run 之后有效
-	seen    map[string]time.Time
+	seen    *seenSet
 	history []Record
 	want    atomic.Uint32 // 有启用中的机器人订阅的等级（按位）
 }
@@ -94,7 +94,7 @@ type Notifier struct {
 func New(cfg config.AlertConfig, path string) (*Notifier, error) {
 	n := &Notifier{
 		workers: map[string]*worker{}, path: path, baseURL: strings.TrimRight(cfg.BaseURL, "/"), dedup: cfg.DedupWindow,
-		client: &http.Client{Timeout: sendTO}, seen: map[string]time.Time{},
+		client: &http.Client{Timeout: sendTO}, seen: newSeenSet(),
 	}
 	if n.dedup <= 0 {
 		n.dedup = 10 * time.Minute
@@ -200,31 +200,82 @@ func (n *Notifier) Run(ctx context.Context) {
 	<-ctx.Done()
 }
 
+// seenSet 是带 TTL 的去重集合：map 负责判重，队列按过期时间先后淘汰。
+//
+// 旧实现用「超过 5 万条整体清空」兜底，清空瞬间所有去重键失效，同一批告警会被重复推送；
+// 改为按过期时间精确淘汰后，容量只与去重窗口内的告警数量相关，不需要也不应该整体清空。
+type seenSet struct {
+	mu   sync.Mutex
+	m    map[string]time.Time
+	q    []seenItem
+	head int
+}
+
+type seenItem struct {
+	key string
+	exp time.Time
+}
+
+func newSeenSet() *seenSet { return &seenSet{m: map[string]time.Time{}} }
+
+// Seen 记录 key 并返回它在窗口内是否已出现过；窗口从最后一次出现开始计算。
+func (s *seenSet) Seen(key string, now time.Time, window time.Duration) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.prune(now)
+	if exp, ok := s.m[key]; ok && now.Before(exp) {
+		return true
+	}
+	exp := now.Add(window)
+	s.m[key] = exp
+	s.q = append(s.q, seenItem{key: key, exp: exp})
+	return false
+}
+
+// prune 丢弃队首已过期的记录。同一 key 可能有多条队列项（窗口过后再次出现），
+// 只有当 map 中保存的过期时间与队列项一致时才删除，避免误删后写入的新记录。
+func (s *seenSet) prune(now time.Time) {
+	for s.head < len(s.q) && !now.Before(s.q[s.head].exp) {
+		it := s.q[s.head]
+		if cur, ok := s.m[it.key]; ok && cur.Equal(it.exp) {
+			delete(s.m, it.key)
+		}
+		s.head++
+	}
+	// 已出队的部分定期压缩，避免切片无限增长
+	if s.head > 4096 && s.head*2 >= len(s.q) {
+		s.q = append(s.q[:0], s.q[s.head:]...)
+		s.head = 0
+	}
+}
+
+// Len 返回当前有效的去重键数量。
+func (s *seenSet) Len() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return len(s.m)
+}
+
+// DedupSize 返回当前去重表中的键数量（监控用）。
+func (n *Notifier) DedupSize() int {
+	if n == nil {
+		return 0
+	}
+	return n.seen.Len()
+}
+
 // Notify 投递一个事件：同一去重键在 dedup_window 内只推送一次，再分发给订阅了该等级的机器人。
 // key 为空时不去重。
 func (n *Notifier) Notify(key string, ev Event) {
 	if !n.Wants(ev.Severity) {
 		return
 	}
-	now := time.Now()
+	// 去重放在推送器锁之外：去重表有自己的锁，避免与机器人分发争用同一把锁
+	if key != "" && n.seen.Seen(key, time.Now(), n.dedup) {
+		return
+	}
 	n.mu.Lock()
 	defer n.mu.Unlock()
-	if key != "" {
-		if t, ok := n.seen[key]; ok && now.Sub(t) < n.dedup {
-			return
-		}
-		if len(n.seen) >= 50000 {
-			for k, t := range n.seen {
-				if now.Sub(t) >= n.dedup {
-					delete(n.seen, k)
-				}
-			}
-			if len(n.seen) >= 50000 { // 仍然过多时整体清空，避免内存无限增长
-				n.seen = map[string]time.Time{}
-			}
-		}
-		n.seen[key] = now
-	}
 	for _, id := range n.order {
 		w := n.workers[id]
 		w.mu.Lock()

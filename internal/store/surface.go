@@ -129,6 +129,11 @@ var sensitiveRules = []sensitiveRule{
 		"禁止访问配置文件，检查是否泄露数据库连接串等敏感信息"},
 	{regexp.MustCompile(`/(phpinfo|php_info|info|test)\.php$|/server-(status|info)$|/nginx_status$|/actuator/(env|heapdump|threaddump|configprops|mappings|beans|trace|httptrace|logfile|jolokia|gateway/routes)|/heapdump$|/_profiler|/debug/pprof|/elmah\.axd$|/trace\.axd$|/druid/(index|sql|websession)\.html$`), "调试/监控接口暴露", model.SevHigh,
 		"关闭生产环境调试接口，或在反向代理上限制为内网/白名单访问"},
+	// 通用后台入口：路径本身即可判定为管理面（需要 2xx/3xx 才会进入本分类，见 observeWeb）。
+	// 与下面按产品名匹配的规则互补——「/admin/login」「/manage」「/dashboard」这类通用路径
+	// 同样属于对外暴露的运维入口，此前只能靠特征规则按低危背景扫描处理，会漏掉真正的暴露面。
+	{regexp.MustCompile(`^/(admin|manage|management|backend|dashboard|sysadmin|admincp|adminpanel)(/|$)`), "管理后台/运维入口对外暴露", model.SevMedium,
+		"管理后台应仅允许 VPN 或白名单访问，并启用强口令与多因素认证"},
 	{regexp.MustCompile(`/(phpmyadmin|pma|adminer[^/]*\.php|manager/html|host-manager|jmx-console|web-console|jenkins|kibana|grafana|nacos|xxl-job-admin|solr|swagger-ui(\.html)?|v2/api-docs|v3/api-docs|wp-login\.php|wp-admin|administrator|console)(/|$)`), "管理后台/运维入口对外暴露", model.SevMedium,
 		"管理后台应仅允许 VPN 或白名单访问，并启用强口令与多因素认证"},
 	{regexp.MustCompile(`/(logs?|storage/logs)/[^/]*\.(log|txt)$|/[^/]*(error|access|debug|laravel)[^/]*\.log$|/nohup\.out$`), "日志文件可公开访问", model.SevMedium,
@@ -341,8 +346,9 @@ func (sf *surface) observeWeb(ev *model.Event, hits []model.Hit, attacked bool) 
 	}
 }
 
-// observeFw 更新网络服务暴露面（调用方持锁）。
-func (sf *surface) observeFw(ev *model.Event) {
+// observeFw 更新网络服务暴露面（调用方持锁）。published 表示目标端口确实做过对外映射：
+// 未映射的端口即使被默认策略放行，也不存在可访问的服务，不能据此判定「对公网开放」。
+func (sf *surface) observeFw(ev *model.Event, published bool) {
 	if ev.DstPort <= 0 {
 		return
 	}
@@ -354,8 +360,9 @@ func (sf *surface) observeFw(ev *model.Event) {
 	key := ev.DstIP + ":" + strconv.Itoa(ev.DstPort) + "/" + ev.Proto
 	sv := sf.Services[key]
 	if sv == nil {
-		// 只有被放行的连接才能证明服务真实存在；被拒绝的探测只计入“被探测端口”统计
-		if ev.Action != model.ActionAllow || len(sf.Services) >= maxServices {
+		// 只有被放行、且端口确实对外发布（DNAT 映射）的连接才能证明服务真实存在；
+		// 被拒绝的探测、以及未映射端口上的放行日志只计入“被探测端口”统计。
+		if ev.Action != model.ActionAllow || !published || len(sf.Services) >= maxServices {
 			return
 		}
 		name, risk := serviceInfo(ev.DstPort)
@@ -365,7 +372,7 @@ func (sf *surface) observeFw(ev *model.Event) {
 	switch ev.Action {
 	case model.ActionAllow:
 		sv.Allowed++
-		if !geo.IsPrivate(ev.SrcIP) {
+		if published && !geo.IsPrivate(ev.SrcIP) {
 			sv.Exposed = true
 			if sv.Risk >= model.SevMedium {
 				sf.finding("svc:"+key, "高危服务对公网开放: "+sv.Name, "服务暴露", sv.Risk, key,

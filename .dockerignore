@@ -1,9 +1,13 @@
+# 构建上下文忽略项：只保留 Dockerfile 需要的目录（cmd / internal / web / configs / data / go.mod / go.sum）
 .git
+.github
+.workbuddy
 .claude
 bin
 demo-logs
 state
+tmp*
 *.exe
+*.md
 data/state.json*
 data/*.mmdb
-README.md

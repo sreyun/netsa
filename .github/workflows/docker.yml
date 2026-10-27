@@ -1,0 +1,212 @@
+name: Release · 镜像构建与推送（华为云 SWR）
+
+# 创建 v* tag 时自动构建多架构镜像并推送到华为云容器镜像服务（SWR）。
+# 登录凭证由 AK/SK 现场推导（与 sreyun/openaiops 的做法一致），无需在控制台生成长期登录密文。
+#
+# 需要在 仓库 Settings → Secrets and variables → Actions 配置：
+#   HW_ACCESS_KEY  =  华为云访问密钥 AK（对应 IAM 用户需具备 SWR 推送权限）
+#   HW_SECRET_KEY  =  华为云秘密密钥 SK
+# 可选 Variables（不配置则用下面的默认值）：
+#   SWR_REGISTRY   仓库域名，默认 swr.cn-east-3.myhuaweicloud.com
+#   SWR_NAMESPACE  组织名，默认 sreyun
+#   IMAGE_NAME     镜像名，默认 netsa
+#   GOPROXY        Go 模块代理，默认 https://goproxy.cn,direct
+#
+# 标签规则：v1.6.3 → 1.6.3 / 1.6 / 1 / latest / sha-xxxxxxx；
+#           预发布 v1.6.3-rc1 → 只打 1.6.3-rc1 / sha-xxxxxxx，不动 latest 与 1.6。
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: '要发布的 tag（如 v1.6.3，必须已存在）'
+        required: true
+      push_latest:
+        description: '同时更新 :latest 标签'
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: docker-${{ github.ref }}
+  cancel-in-progress: false # 发布过程不打断，避免推到一半被取消
+
+env:
+  SWR_REGISTRY: ${{ vars.SWR_REGISTRY || 'swr.cn-east-3.myhuaweicloud.com' }}
+  SWR_NAMESPACE: ${{ vars.SWR_NAMESPACE || 'sreyun' }}
+  IMAGE_NAME: ${{ vars.IMAGE_NAME || 'netsa' }}
+  GOPROXY: ${{ vars.GOPROXY || 'https://goproxy.cn,direct' }}
+  PLATFORMS: linux/amd64,linux/arm64
+
+jobs:
+  image:
+    name: image · buildx / 华为云 SWR
+    runs-on: ubuntu-latest
+    env:
+      HW_ACCESS_KEY: ${{ secrets.HW_ACCESS_KEY }}
+      HW_SECRET_KEY: ${{ secrets.HW_SECRET_KEY }}
+    steps:
+      # 手动触发时按输入的 tag 检出，保证镜像内容与标签严格对应（而不是分支 HEAD）
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+          fetch-depth: 0
+
+      - name: 解析版本与镜像标签
+        id: meta
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
+          INPUT_LATEST: ${{ inputs.push_latest }}
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            VERSION="$INPUT_TAG"
+            PUSH_LATEST="$INPUT_LATEST"
+          else
+            VERSION="${GITHUB_REF_NAME}"
+            PUSH_LATEST="true"
+          fi
+          if [ -z "$VERSION" ]; then
+            echo "::error::未解析到版本号（tag 为空）"
+            exit 1
+          fi
+          BIN_VERSION="${VERSION#v}"      # 注入二进制的版本：去掉前缀 v
+          CORE="${BIN_VERSION%%-*}"       # 1.6.3
+          MAJOR="${CORE%%.*}"             # 1
+          MINOR="${CORE#*.}"; MINOR="${MINOR%%.*}"
+          SHA="$(git rev-parse --short=7 HEAD)"
+          IMG="${SWR_REGISTRY}/${SWR_NAMESPACE}/${IMAGE_NAME}"
+
+          {
+            echo "version=${BIN_VERSION}"
+            echo "tags<<EOF"
+            echo "${IMG}:${BIN_VERSION}"
+            case "$VERSION" in
+              *-*) echo "预发布版本 ${VERSION}：仅打完整版本与 sha 标签" >&2 ;;
+              *)
+                echo "${IMG}:${MAJOR}.${MINOR}"
+                # 主版本为 0 时不打「0」标签（与 docker 官方镜像惯例一致）
+                if [ "$MAJOR" != "0" ]; then echo "${IMG}:${MAJOR}"; fi
+                if [ "$PUSH_LATEST" = "true" ]; then echo "${IMG}:latest"; fi
+                ;;
+            esac
+            echo "${IMG}:sha-${SHA}"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      # 防止「检出的提交不是目标 tag」导致镜像内容与版本号不符
+      - name: 校验 tag 与检出内容一致
+        env:
+          VERSION: ${{ steps.meta.outputs.version }}
+        run: |
+          ACTUAL=$(git describe --exact-match --tags HEAD 2>/dev/null || true)
+          if [ -z "$ACTUAL" ]; then
+            echo "::error::当前提交不是任何 tag，请在 Actions 页面选择 tag 后重试"
+            exit 1
+          fi
+          if [ "v${VERSION}" != "$ACTUAL" ] && [ "${VERSION}" != "$ACTUAL" ]; then
+            echo "::error::检出的 tag 为 $ACTUAL，与期望的 v${VERSION} 不一致"
+            exit 1
+          fi
+
+      - name: 校验 AK/SK
+        run: |
+          miss=""
+          [ -n "$HW_ACCESS_KEY" ] || miss="$miss HW_ACCESS_KEY"
+          [ -n "$HW_SECRET_KEY" ] || miss="$miss HW_SECRET_KEY"
+          if [ -n "$miss" ]; then
+            echo "::error::缺少 Secret:$miss"
+            echo "见 README「镜像构建与发布（华为云 SWR）」"
+            exit 1
+          fi
+
+      # SWR 登录凭证：用户名 {region}@AK，密码 = HMAC-SHA256(SK, AK) 的十六进制
+      - name: 生成 SWR 登录凭证
+        id: swr
+        run: |
+          REGION="${SWR_REGISTRY#swr.}"; REGION="${REGION%%.*}"
+          PASSWORD=$(printf '%s' "$HW_ACCESS_KEY" | openssl dgst -binary -sha256 -hmac "$HW_SECRET_KEY" | od -An -vtx1 | tr -d ' \n')
+          echo "username=${REGION}@${HW_ACCESS_KEY}" >> "$GITHUB_OUTPUT"
+          echo "password=${PASSWORD}" >> "$GITHUB_OUTPUT"
+
+      - name: 设置 QEMU（arm64 模拟）
+        uses: docker/setup-qemu-action@v3
+
+      - name: 设置 Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: 登录华为云 SWR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.SWR_REGISTRY }}
+          username: ${{ steps.swr.outputs.username }}
+          password: ${{ steps.swr.outputs.password }}
+
+      # 先单架构构建并载入本地做启动自检：镜像能跑起来才允许推送
+      - name: 构建（amd64，用于自检）
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64
+          load: true
+          tags: netsa:smoke
+          build-args: |
+            GOPROXY=${{ env.GOPROXY }}
+            VERSION=${{ steps.meta.outputs.version }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: 启动自检
+        env:
+          VERSION: ${{ steps.meta.outputs.version }}
+        run: |
+          docker run --rm netsa:smoke rules > /tmp/rules.txt
+          grep -q 'sqli-union' /tmp/rules.txt
+          total=$(grep -c '共 .* 条特征规则' /tmp/rules.txt || true)
+          if [ "$total" != "1" ]; then
+            echo "::error::镜像内规则加载异常"
+            cat /tmp/rules.txt
+            exit 1
+          fi
+          built=$(docker run --rm netsa:smoke version | awk '{print $2}')
+          if [ "$built" != "$VERSION" ]; then
+            echo "::error::镜像版本为 $built，与 tag 期望的 $VERSION 不一致"
+            exit 1
+          fi
+          echo "镜像可执行，规则加载正常，版本 ${built}"
+
+      - name: 构建并推送（多架构）
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: ${{ env.PLATFORMS }}
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          build-args: |
+            GOPROXY=${{ env.GOPROXY }}
+            VERSION=${{ steps.meta.outputs.version }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          # SWR 对 OCI 介质类型支持不完整：强制 Docker 介质 + 关闭证明/SBOM 附件，
+          # 否则镜像仓库里会出现 unknown/unknown 架构条目，拉取时选架构容易误判。
+          outputs: type=registry,oci-mediatypes=false
+          provenance: false
+          sbom: false
+
+      - name: Summary
+        run: |
+          {
+            echo "### 镜像已推送到华为云 SWR"
+            echo
+            echo '```'
+            echo "${{ steps.meta.outputs.tags }}"
+            echo '```'
+            echo
+            echo "架构：\`${PLATFORMS}\`　版本：\`${{ steps.meta.outputs.version }}\`"
+            echo
+            echo "拉取：\`docker pull ${SWR_REGISTRY}/${SWR_NAMESPACE}/${IMAGE_NAME}:${{ steps.meta.outputs.version }}\`"
+          } >> "$GITHUB_STEP_SUMMARY"

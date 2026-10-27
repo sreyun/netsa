@@ -5,6 +5,7 @@ import (
 	"context"
 	"net/netip"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -13,10 +14,12 @@ import (
 	"netsa/internal/alert"
 	"netsa/internal/assets"
 	"netsa/internal/detect"
+	"netsa/internal/exposure"
 	"netsa/internal/geo"
 	"netsa/internal/intel"
 	"netsa/internal/model"
 	"netsa/internal/rawlog"
+	"netsa/internal/risk"
 	"netsa/internal/safe"
 	"netsa/internal/store"
 	"netsa/internal/suppress"
@@ -41,6 +44,7 @@ type Pipeline struct {
 	Suppress    *suppress.Manager // 误报抑制规则（可为空）
 	Raw         *rawlog.Store     // 原始日志留存（可为空）
 	Assets      *assets.Manager   // 资产与漏洞（可为空）
+	Exposure    *exposure.Manager // 对外发布服务清单（DNAT 映射，可为空）
 
 	whitelist []netip.Prefix
 	processed atomic.Int64
@@ -153,7 +157,7 @@ func (p *Pipeline) inspect(ev *model.Event) item {
 	it := item{ev: ev}
 	if p.RealIP != nil {
 		if h := p.RealIP.Apply(ev); h != nil {
-			h.Result = detect.WebResult(ev, 1)
+			h.Result = p.Engine.Result(ev)
 			it.hits = append(it.hits, *h)
 		}
 	}
@@ -174,9 +178,21 @@ func (p *Pipeline) aggregate(items []item) {
 		if !it.whitelisted && p.Behavior != nil {
 			hits[i] = append(hits[i], p.Behavior.Observe(it.ev)...)
 		}
+		if it.ev.Kind == model.KindFirewall {
+			// 候选映射统计：外部来源访问公网地址端口且被放行，用于提示可能漏登记的 DNAT 映射。
+			// 只记录不生效，避免误判成「已发布」后真实攻击不再告警。
+			p.Exposure.Observe(it.ev.DstIP, it.ev.DstPort, it.ev.Proto, it.ev.SrcIP,
+				it.ev.Action == model.ActionAllow, it.ev.Time)
+		}
+		hits[i] = p.gateExposure(it.ev, hits[i])
 		hits[i] = p.Suppress.Filter(it.ev, hits[i])
 		if p.Assets != nil && len(hits[i]) > 0 {
 			hits[i] = p.enrichAssets(it.ev, hits[i])
+		}
+		// 资产与漏洞关联可能把命中抬到严重（目标确实存在未修复漏洞），必须再过一次等级裁决：
+		// 已拦截的仍然只到高危，未拦截且可判定成功的才维持严重。
+		for j := range hits[i] {
+			risk.Finalize(&hits[i][j])
 		}
 	}
 	p.Raw.Write(evs, hits)
@@ -217,6 +233,22 @@ func (p *Pipeline) aggregate(items []item) {
 	}
 }
 
+// internalTarget 在内网资产台账中使用 DNAT 映射后的私网地址匹配：
+// 防火墙日志记录的是公网侧的目标地址，直接用它查资产会永远匹配不到内网资产。
+// 仅当配置了精确映射（public_ip + public_port → private_ip）时生效，返回事件副本，不修改调用方数据。
+func (p *Pipeline) internalTarget(ev *model.Event) *model.Event {
+	m, ok := p.Exposure.Lookup(ev.DstIP, ev.DstPort, ev.Proto)
+	if !ok || m == nil || m.PrivateIP == "" || m.PrivateIP == ev.DstIP {
+		return ev
+	}
+	cp := *ev
+	cp.DstIP = m.PrivateIP
+	if m.PrivatePort > 0 {
+		cp.DstPort = m.PrivatePort
+	}
+	return &cp
+}
+
 // enrichAssets 为攻击事件标注目标资产，并关联目标上未修复的漏洞：
 // 攻击利用的 CVE 在目标上存在时提升为严重，未被拦截时判定为疑似成功；攻击类型 / 组件与目标上的高危漏洞一致时等级提升一级。
 // 需要修改命中时复制切片，不修改调用方的数据。
@@ -228,7 +260,7 @@ func (p *Pipeline) enrichAssets(ev *model.Event, hits []model.Hit) []model.Hit {
 	if !attack {
 		return hits
 	}
-	mt := p.Assets.Lookup(ev)
+	mt := p.Assets.Lookup(p.internalTarget(ev))
 	if mt == nil {
 		return hits
 	}
@@ -251,13 +283,17 @@ func (p *Pipeline) enrichAssets(ev *model.Event, hits []model.Hit) []model.Hit {
 		}
 		switch {
 		case exact:
-			h.Severity = model.SevCritical
-			if h.Result == model.ResultPassed || h.Result == model.ResultUnknown || h.Result == model.ResultError || h.Result == model.ResultAllowed || h.Result == "" {
+			// 精确命中：目标确实存在该漏洞。是否达到「严重」交由统一策略判断——
+			// 已拦截的探测只到高危，未拦截且分类可判定成功的才升为严重。
+			if h.Result != model.ResultBlocked {
 				h.Result = model.ResultSuccess
 			}
+			if h.Severity < model.SevHigh {
+				h.Severity = model.SevHigh
+			}
 			h.Evidence = truncEvidence(h.Evidence + "；目标存在该漏洞且未修复")
-		case v.Severity >= model.SevHigh && h.Severity < model.SevCritical:
-			h.Severity++
+		case v.Severity >= model.SevHigh && h.Severity < model.SevHigh:
+			h.Severity = model.SevHigh
 			h.Evidence = truncEvidence(h.Evidence + "；目标存在同类未修复漏洞")
 		}
 	}
@@ -299,6 +335,55 @@ func maxHitSev(hits []model.Hit) model.Severity {
 		}
 	}
 	return m
+}
+
+// gateExposure 过滤「目标端口并未对外发布」的探测类命中。
+//
+// 互联网背景扫描会持续探测 1433 / 6379 / 3389 等端口，防火墙通常只是按默认策略记录并放行；
+// 如果该端口没有 DNAT 映射，探测不可能到达任何服务，把它记成一条高危告警只会淹没有效信号。
+// 这类命中降级为仅打标签（不生成告警、不计入威胁评分与攻击统计），仍然保留在画像标签与
+// 攻击面的被探测端口统计中，便于事后回溯。
+func (p *Pipeline) gateExposure(ev *model.Event, hits []model.Hit) []model.Hit {
+	if !p.Exposure.Enforcing() || ev.Kind != model.KindFirewall || len(hits) == 0 {
+		return hits
+	}
+	// 目标是内网地址：说明已经过 DNAT，或本身就是东西向流量，按真实暴露处理
+	if ev.DstIP == "" || geo.IsPrivate(ev.DstIP) {
+		return hits
+	}
+	if _, ok := p.Exposure.Lookup(ev.DstIP, ev.DstPort, ev.Proto); ok {
+		return hits
+	}
+	var out []model.Hit
+	for i := range hits {
+		if !exposureFilterable(hits[i]) {
+			continue
+		}
+		if out == nil {
+			out = append([]model.Hit(nil), hits...) // 不修改调用方的切片
+		}
+		h := &out[i]
+		h.TagOnly = true
+		h.Severity = model.SevInfo
+		h.Evidence = truncEvidence(h.Evidence + "；目标 " + ev.DstIP + ":" + strconv.Itoa(ev.DstPort) +
+			" 未配置对外映射（DNAT），该端口没有对外服务，不计入攻击统计")
+	}
+	if out == nil {
+		return hits
+	}
+	p.Exposure.AddMuted()
+	return out
+}
+
+// exposureFilterable 判断命中是否依赖「目标端口确有服务」这一前提：只有端口探测与端口级
+// 暴力破解会被未发布端口过滤；设备（IPS/IDS/WAF）明确判定的威胁、端口扫描、主机探测与
+// 流量洪泛仍然告警——它们反映的是攻击者行为，与目标是否开放无关。
+func exposureFilterable(h model.Hit) bool {
+	switch h.Category {
+	case detect.CatRiskService, detect.CatIoT:
+		return true
+	}
+	return h.RuleID == "bhv-fwbrute"
 }
 
 // OnGeoUpdate 在在线溯源 / rDNS 完成后更新画像，并根据 rDNS 识别测绘机构与搜索引擎。
