@@ -413,7 +413,9 @@ func TestStreamOutlivesServerTimeouts(t *testing.T) {
 			}
 		}
 	}()
-	deadline := time.After(time.Second)
+	// 3 秒 / 5 次：心跳间隔 40ms，理论约 75 次；放宽窗口避免慢环境（race）下调度抖动造成误判，
+	// 用例真正要验证的是「长连接不会因读写超时被断开」。
+	deadline := time.After(3 * time.Second)
 	got := 0
 	for {
 		select {
@@ -423,8 +425,8 @@ func TestStreamOutlivesServerTimeouts(t *testing.T) {
 			}
 			got++
 		case <-deadline:
-			if got < 10 {
-				t.Fatalf("1 秒内只收到 %d 次心跳", got)
+			if got < 5 {
+				t.Fatalf("3 秒内只收到 %d 次心跳", got)
 			}
 			return
 		}

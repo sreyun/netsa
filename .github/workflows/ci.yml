@@ -36,8 +36,14 @@ jobs:
       - name: go vet
         run: go vet ./...
 
+      # race 检测会让用例慢 5~10 倍，用 -short 走降级规模（如畸形日志 60000→5000 条），
+      # 否则按耗时预算断言的性能用例会被慢环境误判为失败。
       - name: go test (race)
-        run: go test -race -count=1 ./...
+        run: go test -race -count=1 -short -timeout 20m ./...
+
+      # 不带 race 再跑一遍完整规模：保留「性能退化」类断言的原始灵敏度（race 下只看并发正确性）。
+      - name: go test (full)
+        run: go test -count=1 -timeout 20m ./...
 
       - name: build
         run: CGO_ENABLED=0 go build -trimpath -o /tmp/netsa ./cmd/netsa
