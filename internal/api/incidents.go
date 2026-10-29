@@ -97,6 +97,9 @@ func (s *Server) incidentUpdate(w http.ResponseWriter, r *http.Request) {
 		writeError(w, code, err.Error())
 		return
 	}
+	if f.Status != "" {
+		s.learnFeedback(list, user)
+	}
 	writeJSON(w, map[string]any{"incidents": list})
 }
 

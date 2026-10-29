@@ -42,6 +42,7 @@
       <div class="nav-menu nav-menu-end" role="menu">
         <button data-tab="sources" data-label="数据源" role="menuitem"><b>数据源</b><span>日志接入、Syslog 发送端与断流</span></button>
         <button data-tab="notify" data-label="告警推送" role="menuitem"><b>告警推送</b><span>钉钉 / 企业微信 / 飞书机器人</span></button>
+        <button data-tab="learn" data-label="自学习" role="menuitem" class="need-analyst"><b>自学习</b><span>研判反馈学习、平台行为基线与合规自检</span></button>
         <button data-tab="system" data-label="系统管理" role="menuitem" id="tabSystem" hidden><b>系统管理</b><span>账号、API 令牌与操作审计</span></button>
       </div>
     </div>
@@ -288,6 +289,22 @@
     </div>
   </section>
 
+  <!-- 自学习 -->
+  <section id="tab-learn" class="tab">
+    <div class="kpis ln-kpis" id="lnKpis"></div>
+    <div class="grid-2">
+      <div class="panel"><h3>待确认的建议 <small>反复被研判为误报的模式；采纳后创建误报抑制，需人工确认</small></h3><div id="lnSugs" class="scroll"></div></div>
+      <div class="panel"><h3>平台安全异常 <small>学习账号的常用登录网段与时段，发现异常登录、批量导出与高危变更</small></h3><div id="lnAnoms" class="scroll"></div></div>
+    </div>
+    <div class="panel"><h3>规则准确率与自动校准 <small>只从分析员的处置结论学习：已处置 = 确认攻击，误报 = 误报；准确率持续偏低的规则自动下调一级，可锁定恢复</small></h3>
+      <div class="scroll"><table class="table" id="lnRules"></table></div></div>
+    <div class="grid-2">
+      <div class="panel"><h3>合规自检 <small>每小时自动执行等保合规检查，测评项下降时告警；每天校验审计链</small></h3><div id="lnComp"></div></div>
+      <div class="panel"><h3>外部模型 <small>可选，OpenAI 兼容接口；结论仅供参考，不参与自学习</small></h3><div id="lnAI"></div></div>
+    </div>
+    <div class="panel"><h3>进化日志 <small>每一次自动校准、撤销与人工确认都记入审计链</small></h3><div class="scroll"><table class="table" id="lnLog"></table></div></div>
+  </section>
+
   <!-- 原始日志检索 -->
   <section id="tab-rawlog" class="tab">
     <form class="panel hs-form" id="rlForm" autocomplete="off" novalidate>
@@ -465,10 +482,12 @@
   <div class="modal wide" role="dialog" aria-modal="true" aria-labelledby="incTitle">
     <div class="modal-head"><b id="incTitle">安全事件</b><button type="button" class="close" data-close="incModal" aria-label="关闭">✕</button></div>
     <div class="modal-body" id="incBody"></div>
+    <div class="ai-box" id="incAIBox" hidden></div>
     <div class="modal-foot need-analyst" id="incFoot">
       <select id="incSetStatus"><option value="">状态不变</option><option value="investigating">处置中</option><option value="resolved">已处置</option><option value="false_positive">误报</option><option value="ignored">忽略</option><option value="open">重新打开</option></select>
       <select id="incSetAssignee"><option value="__keep">负责人不变</option></select>
       <input id="incNote" maxlength="1000" placeholder="处置说明（关闭事件时必填，如：已封禁来源 IP、确认为业务误报）">
+      <button type="button" class="btn" id="incAI" hidden title="把事件摘要（默认脱敏）发送给配置的外部模型，结论写入处置记录，仅供参考">AI 研判</button>
       <button type="button" class="btn primary" id="incSave">提交</button>
     </div>
     <div class="form-msg err" id="incMsg" role="status" style="padding:0 16px 10px"></div>

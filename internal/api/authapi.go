@@ -53,12 +53,14 @@ func requiredRole(r *http.Request) string {
 	if !strings.HasPrefix(p, "/api/") {
 		return auth.RoleViewer
 	}
-	if strings.HasPrefix(p, "/api/auth/users") || p == "/api/auth/audit" || strings.HasPrefix(p, "/api/audit") || strings.HasPrefix(p, "/api/auth/tokens") || strings.HasPrefix(p, "/api/compliance") {
+	// 锁定 / 解锁自学习校准会改变检测等级：只允许管理员
+	if strings.HasPrefix(p, "/api/auth/users") || p == "/api/auth/audit" || strings.HasPrefix(p, "/api/audit") || strings.HasPrefix(p, "/api/auth/tokens") ||
+		strings.HasPrefix(p, "/api/compliance") || strings.HasPrefix(p, "/api/learn/rules") {
 		return auth.RoleAdmin
 	}
 	// 原始日志可能包含 Cookie、令牌、个人信息等敏感内容：检索与导出需要运营分析员权限
-	// 可指派账号列表（平台用户名与角色）只提供给能处置事件的角色
-	if strings.HasPrefix(p, "/api/rawlog/search") || strings.HasPrefix(p, "/api/rawlog/export") || p == "/api/incidents/assignees" {
+	// 可指派账号列表（平台用户名与角色）只提供给能处置事件的角色；自学习包含平台账号的登录异常与研判记录
+	if strings.HasPrefix(p, "/api/rawlog/search") || strings.HasPrefix(p, "/api/rawlog/export") || p == "/api/incidents/assignees" || strings.HasPrefix(p, "/api/learn") {
 		return auth.RoleAnalyst
 	}
 	if r.Method == http.MethodGet || r.Method == http.MethodHead {
@@ -67,7 +69,7 @@ func requiredRole(r *http.Request) string {
 	if selfService[p] {
 		return ""
 	}
-	if strings.HasPrefix(p, "/api/incidents") || strings.HasPrefix(p, "/api/suppressions") || r.Method == http.MethodPut && strings.HasPrefix(p, "/api/vulns/") {
+	if strings.HasPrefix(p, "/api/incidents") || strings.HasPrefix(p, "/api/suppressions") || strings.HasPrefix(p, "/api/learn/suggestions") || r.Method == http.MethodPut && strings.HasPrefix(p, "/api/vulns/") {
 		return auth.RoleAnalyst
 	}
 	return auth.RoleAdmin

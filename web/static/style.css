@@ -643,3 +643,11 @@ pre.cmd { background: #050b18; border: 1px solid var(--border); padding: 8px 10p
   .tabs::-webkit-scrollbar, .subnav::-webkit-scrollbar { display: none; }
   .subnav button, .subnav-title { flex: none; white-space: nowrap; }
 }
+
+/* 自学习与 AI 研判 */
+.ln-kpis { grid-template-columns: repeat(5, minmax(0, 1fr)); }
+.ln-spark { width: 100%; height: 60px; color: var(--accent, #36cfc9); display: block; margin-bottom: 6px; }
+.ai-box { margin: 0 16px 10px; padding: 10px 12px; border: 1px solid var(--border); border-left: 3px solid var(--accent, #36cfc9); border-radius: 4px; font-size: 13px; }
+.ai-box ul { margin: 2px 0 6px 18px; padding: 0; }
+.ai-verdict { margin: 4px 0 6px; }
+@media (max-width: 900px) { .ln-kpis { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
