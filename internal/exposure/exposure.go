@@ -36,6 +36,15 @@ type Manager struct {
 	suggest config.ExposureSuggest
 	candMu  sync.Mutex
 	cands   map[string]*candidate
+
+	// 按会话证据判断探测是否到达服务（见 reach.go），与 enabled 无关
+	reach     bool
+	unreached atomic.Int64
+	polMu     sync.Mutex
+	policies  map[string]*policyStat
+	// 有会话证据的对外服务（自动识别，等同于已登记的映射）
+	learnMu sync.RWMutex
+	learned map[string]*learnedSvc
 }
 
 func key(ip string, port int, proto string) string {
@@ -72,6 +81,7 @@ func Load(cfg config.ExposureConfig) (*Manager, error) {
 		ports:   map[int]struct{}{},
 		allowed: map[int]struct{}{},
 		suggest: cfg.Suggest, cands: map[string]*candidate{},
+		reach: cfg.ReachOn(), policies: map[string]*policyStat{}, learned: map[string]*learnedSvc{},
 	}
 	for _, p := range cfg.AllowedPorts {
 		if p > 0 && p <= 65535 {
@@ -146,6 +156,9 @@ func (m *Manager) match(ip string, port int, proto string) (*config.ExposureServ
 		return nil, true
 	}
 	if _, ok := m.allowed[port]; ok {
+		return nil, true
+	}
+	if m.isLearned(ip, port, proto) {
 		return nil, true
 	}
 	return nil, false

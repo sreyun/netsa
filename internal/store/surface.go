@@ -96,6 +96,52 @@ type surface struct {
 	// 漏洞利用类攻击的结果统计，用于评估 WAF 防护有效性
 	ExploitBlocked int64 `json:"exploit_blocked"`
 	ExploitPassed  int64 `json:"exploit_passed"`
+	// soft 记录各站点敏感路径 / WebShell 探测返回 200 时的响应大小 → 路径（有上限），用于识别兜底页（不持久化，运行中重新学习）
+	soft map[string]map[int64]map[string]struct{}
+}
+
+const (
+	maxSoftHosts = 2000
+	maxSoftSizes = 64
+	softSamePath = 3 // 不同探测路径返回完全相同大小的次数达到该值即判定为兜底页
+)
+
+// catchAll 判断一个 200 响应是否其实是站点的兜底页面：单页应用把所有路径都返回 index.html、统一错误页返回 200 时，
+// 扫描器探测 /.env、/.git/config、webshell 路径都会得到 200，但拿到的只是首页。判断依据（自动学习，无需配置）：
+//   - 响应大小与该站点首页的正常响应一致；
+//   - 或已有 3 个以上不同的探测路径返回了完全相同的大小（真实存在的不同敏感文件几乎不可能大小完全一致）。
+func (sf *surface) catchAll(host, path string, bytes int64) bool {
+	if bytes <= 0 {
+		return false
+	}
+	if path != "/" {
+		if ep := sf.Endpoints[host+" /"]; ep != nil && ep.baselineMatches(bytes) {
+			return true
+		}
+	}
+	if sf.soft == nil {
+		sf.soft = map[string]map[int64]map[string]struct{}{}
+	}
+	sizes := sf.soft[host]
+	if sizes == nil {
+		if len(sf.soft) >= maxSoftHosts {
+			return false
+		}
+		sizes = map[int64]map[string]struct{}{}
+		sf.soft[host] = sizes
+	}
+	paths := sizes[bytes]
+	if paths == nil {
+		if len(sizes) >= maxSoftSizes {
+			return false
+		}
+		paths = map[string]struct{}{}
+		sizes[bytes] = paths
+	}
+	if len(paths) < softSamePath {
+		paths[path] = struct{}{}
+	}
+	return len(paths) >= softSamePath
 }
 
 func newSurface() *surface {
@@ -279,9 +325,14 @@ func (sf *surface) observeWeb(ev *model.Event, hits []model.Hit, attacked bool) 
 			}
 		}
 	}
+	// 敏感路径返回的 200 其实是兜底页面（单页应用、统一错误页）：资源并不存在，不登记、不报暴露
+	fake := sens != nil && ev.Status == 200 && ep == nil && sf.catchAll(host, path, ev.Bytes)
+	if fake {
+		sens = nil
+	}
 	// 攻击请求只在命中敏感资源时才登记为新入口：对所有路径都返回 200 的站点（SPA 兜底路由），
 	// 扫描器的随机路径不会污染资产清单；已有入口上的攻击仍会被统计。
-	if ep == nil && exists && (!attacked || sens != nil) && len(sf.Endpoints) < maxEndpoints {
+	if ep == nil && exists && !fake && (!attacked || sens != nil) && len(sf.Endpoints) < maxEndpoints {
 		ep = &Endpoint{Host: host, Path: path, Methods: map[string]int{}, Status: map[int]int{}, FirstSeen: ev.Time,
 			atk: map[string]struct{}{}, sens: sens, classified: true}
 		for _, t := range techRules {
@@ -320,8 +371,8 @@ func (sf *surface) observeWeb(ev *model.Event, hits []model.Hit, attacked bool) 
 	if host == "-" {
 		asset = path
 	}
-	// 敏感资源被成功访问
-	if ev.Status == 200 && ev.Bytes > 0 && sens != nil {
+	// 敏感资源被成功访问（兜底页面返回的 200 已在上面排除；已登记的入口再次核对首页基线）
+	if ev.Status == 200 && ev.Bytes > 0 && sens != nil && !sf.catchAll(host, path, ev.Bytes) {
 		sf.finding("sens:"+key, sens.title, "敏感资源暴露", sens.sev, asset,
 			ev.SrcIP+" 访问返回 200，响应 "+strconv.FormatInt(ev.Bytes, 10)+" 字节", sens.remediation, ev.SrcIP, ev.Time)
 	}

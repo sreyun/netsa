@@ -127,7 +127,13 @@ type RealIPConfig struct {
 	TrustedPresets []string `yaml:"trusted_presets"`
 	// CDNOnly 表示站点只应通过 CDN/负载均衡访问：来自非可信代理的公网直连会被标记为“绕过 CDN 直连源站”
 	CDNOnly bool `yaml:"cdn_only"`
+	// AutoLearn 自动识别反向代理（默认开启）：内网 / 本机地址持续携带 X-Forwarded-For 且其中出现大量不同的公网客户端时，
+	// 按可信代理还原真实客户端；公网地址只提示（可能是未配置的 CDN 节点），不自动信任。
+	AutoLearn *bool `yaml:"auto_learn"`
 }
+
+// AutoOn 返回是否自动识别反向代理（未配置时默认开启）。
+func (c RealIPConfig) AutoOn() bool { return c.AutoLearn == nil || *c.AutoLearn }
 
 type GeoConfig struct {
 	IP2RegionV4 string       `yaml:"ip2region_v4"`
@@ -174,7 +180,14 @@ type ExposureConfig struct {
 	// Suggest 候选映射建议：从防火墙日志中「外部来源访问公网地址端口且被放行」的连接反推
 	// 可能已发布的服务。只生成建议，不改变任何检测行为；确认后手工写入 services 才生效。
 	Suggest ExposureSuggest `yaml:"suggest"`
+	// ReachCheck 按防火墙日志自身记录的会话证据（安全域、DNAT 后地址、应答包数）判断放行的探测是否真的到达了服务：
+	// 证据表明没有到达（例如 untrust → untrust 被出站策略放行、会话结束时目标无应答）的端口探测只打标签。
+	// 不依赖手工清单，默认开启；设为 false 恢复为只按 enabled / services 判断。
+	ReachCheck *bool `yaml:"reach_check"`
 }
+
+// ReachOn 返回是否按会话证据判断探测是否到达服务（未配置时默认开启）。
+func (c ExposureConfig) ReachOn() bool { return c.ReachCheck == nil || *c.ReachCheck }
 
 // ExposureSuggest 是候选映射的统计口径。
 type ExposureSuggest struct {

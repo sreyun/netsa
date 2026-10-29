@@ -40,7 +40,8 @@ type webWin struct {
 	reqs, n404, login, n401 int
 	n5xx                    int
 	paths                   map[string]struct{}
-	loginStatus             map[int]int // 窗口内登录提交的响应码分布
+	loginStatus             map[int]int    // 窗口内登录提交的响应码分布
+	loginPaths              map[string]int // 各登录接口的提交次数（疑似成功须出现在被反复提交的同一接口上）
 	fired                   int
 }
 
@@ -71,9 +72,11 @@ type enumWin struct {
 }
 
 type enumState struct {
-	n     int
-	ids   map[uint64]struct{}
-	fired bool
+	n      int
+	ids    map[uint64]struct{}
+	fired  bool
+	size   int64 // 首个响应的大小
+	varied bool  // 不同 ID 的响应大小是否不同：完全相同说明返回的是同一个页面（单页应用兜底、统一的无权限提示），并没有拿到数据
 }
 
 const enumLazy = 20
@@ -99,6 +102,7 @@ type Behavior struct {
 	beacons   map[string]*beacon   // 内网主机>外部地址:端口 → 连接时间
 	auth      map[string]*authWin  // 认证来源 → 登录失败窗口
 	dns       map[string]*dnsWin   // 内网主机 → DNS 查询窗口
+	errs      map[string]*hostErr  // 站点 → 返回 5xx 的不同来源（区分服务故障与攻击）
 	latest    time.Time            // 已处理事件的最新时间（排除未来时间的异常日志），作为窗口过期的基准
 	lastPrune time.Time            // 上次清理的系统时间
 }
@@ -108,7 +112,7 @@ const maxWindows = 300000
 
 func NewBehavior(th config.Thresholds) *Behavior {
 	return &Behavior{th: th, web: map[string]*webWin{}, fw: map[string]*fwWin{}, logins: map[string]*loginWin{},
-		enum: map[string]*enumWin{}, beacons: map[string]*beacon{}, auth: map[string]*authWin{}, dns: map[string]*dnsWin{}}
+		enum: map[string]*enumWin{}, beacons: map[string]*beacon{}, auth: map[string]*authWin{}, dns: map[string]*dnsWin{}, errs: map[string]*hostErr{}}
 }
 
 // Observe 处理一个事件并返回触发的行为告警。
@@ -174,6 +178,7 @@ func (b *Behavior) observeWeb(ev *model.Event) []model.Hit {
 		w.n401++
 	case ev.Status >= 500:
 		w.n5xx++
+		b.noteErr(ev)
 	}
 	// 只在出现 404 时记录路径：正常访客不分配集合，扫描器的集合达到阈值后不再增长
 	if ev.Status == 404 && len(w.paths) < b.th.ScanPaths {
@@ -186,7 +191,13 @@ func (b *Behavior) observeWeb(ev *model.Event) []model.Hit {
 	// 判断“疑似破解成功”需要基于本次之前的响应码分布
 	bruteOK := false
 	if isLogin {
-		bruteOK = w.fired&bitBrute != 0 && looksLikeLoginSuccess(w.loginStatus, ev.Status)
+		bruteOK = w.fired&bitBrute != 0 && w.loginPaths[path] >= 3 && looksLikeLoginSuccess(w.loginStatus, ev.Status)
+		if w.loginPaths == nil {
+			w.loginPaths = map[string]int{}
+		}
+		if _, ok := w.loginPaths[path]; ok || len(w.loginPaths) < 8 {
+			w.loginPaths[path]++
+		}
 		w.login++
 		if w.loginStatus == nil {
 			w.loginStatus = map[int]int{}
@@ -224,7 +235,7 @@ func (b *Behavior) observeWeb(ev *model.Event) []model.Hit {
 			Phase: model.PhaseCredential, Result: model.ResultSuccess,
 			Evidence: fmt.Sprintf("连续 %d 次登录失败后 %s 返回与失败时不同的响应码 %d", w.login-1, Printable(path, 80), ev.Status)}
 	})
-	fire(bit5xx, w.n5xx >= b.th.Server5xx, func() model.Hit {
+	fire(bit5xx, w.n5xx >= b.th.Server5xx && !b.outage(ev.Host), func() model.Hit {
 		return model.Hit{RuleID: "bhv-5xx", Name: "异常请求引发大量服务端错误", Category: CatProtocol,
 			Severity: model.SevMedium, Phase: model.PhaseExploit, Evidence: fmt.Sprintf("%s内 5xx 响应 %d 次", win, w.n5xx)}
 	})
@@ -387,6 +398,11 @@ func (b *Behavior) enumerate(ev *model.Event) (model.Hit, bool) {
 		ew.keys[k] = st
 	}
 	st.n++
+	if st.n == 1 {
+		st.size = ev.Bytes
+	} else if ev.Bytes != st.size {
+		st.varied = true
+	}
 	if st.fired || st.n < enumLazy {
 		return model.Hit{}, false
 	}
@@ -403,6 +419,9 @@ func (b *Behavior) enumerate(ev *model.Event) (model.Hit, bool) {
 	}
 	st.fired = true
 	if reSearchBot.MatchString(ev.UA) { // 搜索引擎爬虫只在即将告警时判断，避免每个请求都执行正则
+		return model.Hit{}, false
+	}
+	if !st.varied && st.size > 0 { // 所有 ID 返回的响应大小完全相同：同一个兜底页面 / 无权限提示，并没有取到数据
 		return model.Hit{}, false
 	}
 	key, _ := enumKey(ev.URI)
@@ -566,10 +585,12 @@ func (b *Behavior) observeFw(ev *model.Event) []model.Hit {
 }
 
 func fwResult(ev *model.Event) string {
-	switch ev.Action {
-	case model.ActionDeny:
+	switch {
+	case ev.Action == model.ActionDeny:
 		return model.ResultBlocked
-	case model.ActionAllow:
+	case ev.Action == model.ActionAllow && ev.Reply == model.ReplyNone:
+		return model.ResultFailed // 会话结束时对端没有应答：连接未建立
+	case ev.Action == model.ActionAllow:
 		return model.ResultAllowed
 	}
 	return model.ResultUnknown
@@ -618,6 +639,11 @@ func (b *Behavior) prune(now time.Time) {
 			delete(b.dns, ip)
 		}
 	}
+	for h, e := range b.errs {
+		if outside(now, e.start, 2*b.th.WebWindow) {
+			delete(b.errs, h)
+		}
+	}
 }
 
 func fmtDur(d time.Duration) string {
@@ -631,4 +657,33 @@ func fmtDur(d time.Duration) string {
 func outside(t, start time.Time, win time.Duration) bool {
 	d := t.Sub(start)
 	return d > win || d < -win
+}
+
+// hostErr 是一个站点在窗口内收到 5xx 响应的不同来源。
+type hostErr struct {
+	start time.Time
+	ips   map[string]struct{}
+}
+
+// outageSources 是同一站点在窗口内收到 5xx 的不同来源数阈值：达到即视为服务故障（后端宕机、发布、过载），
+// 此时某个来源收到大量 5xx 只是正常访问碰上故障，不判定为「异常请求引发服务端错误」。
+const outageSources = 10
+
+func (b *Behavior) noteErr(ev *model.Event) {
+	e := b.errs[ev.Host]
+	if e == nil || outside(ev.Time, e.start, b.th.WebWindow) {
+		if e == nil && len(b.errs) >= 5000 {
+			return
+		}
+		e = &hostErr{start: ev.Time, ips: map[string]struct{}{}}
+		b.errs[ev.Host] = e
+	}
+	if len(e.ips) < outageSources {
+		e.ips[ev.SrcIP] = struct{}{}
+	}
+}
+
+func (b *Behavior) outage(host string) bool {
+	e := b.errs[host]
+	return e != nil && len(e.ips) >= outageSources
 }

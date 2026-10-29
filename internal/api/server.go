@@ -317,7 +317,9 @@ func (s *Server) meta(w http.ResponseWriter, r *http.Request) {
 		"intranet":   geo.ExtraInternalNetworks(),
 		"exposure":   s.Exposure.Enforcing(), "exposure_rules": s.Exposure.Count(), "exposure_muted": s.Exposure.Muted(),
 		"exposure_candidates": s.Exposure.CandidateCount(),
-		"require_2fa":         s.Cfg.Server.Require2FA, "rawlog": s.RawLog != nil, "assets": s.Assets != nil, "audit": s.Trail != nil,
+		"proxies":             s.proxyPeers(),
+		"exposure_reach":      s.Exposure.ReachCheck(), "exposure_unreached": s.Exposure.Unreached(), "exposure_learned": s.Exposure.LearnedCount(), "exposure_policies": topPolicies(s.Exposure.Policies(), 5),
+		"require_2fa": s.Cfg.Server.Require2FA, "rawlog": s.RawLog != nil, "assets": s.Assets != nil, "audit": s.Trail != nil,
 		"syslog": s.Cfg.Syslog.Enabled, "suppress": s.Suppress != nil, "auth": s.Auth != nil,
 	})
 }

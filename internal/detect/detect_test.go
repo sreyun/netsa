@@ -375,3 +375,42 @@ func TestEnumKeyParams(t *testing.T) {
 		}
 	}
 }
+
+// 疑似破解成功必须出现在被反复提交的同一登录接口上：攻击 A 接口后正常登录 B 接口不算。
+func TestBruteSuccessSamePath(t *testing.T) {
+	b := NewBehavior(config.Default().Detect.Thresholds)
+	now := time.Now()
+	for i := 0; i < 20; i++ {
+		b.Observe(&model.Event{Kind: model.KindWeb, SrcIP: "198.51.100.11", Method: "POST", URI: "/wp-login.php", Status: 200, Time: now})
+	}
+	for _, h := range b.Observe(&model.Event{Kind: model.KindWeb, SrcIP: "198.51.100.11", Method: "POST", URI: "/api/user/login", Status: 302, Time: now}) {
+		if h.RuleID == "bhv-webbrute-ok" {
+			t.Fatal("其他登录接口的响应不应判定为破解成功")
+		}
+	}
+}
+
+// 接口遍历：所有 ID 返回完全相同大小的响应（单页应用兜底、统一的无权限提示）并没有取到数据，不告警；大小各异才是真实数据。
+func TestEnumerationSameSize(t *testing.T) {
+	th := config.Default().Detect.Thresholds
+	now := time.Now()
+	run := func(size func(i int) int64) int {
+		b := NewBehavior(th)
+		n := 0
+		for i := 0; i < th.EnumIDs+20; i++ {
+			for _, h := range b.Observe(&model.Event{Kind: model.KindWeb, SrcIP: "198.51.100.17", Method: "GET",
+				URI: fmt.Sprintf("/api/v1/order/%d", 50000+i), Status: 200, Bytes: size(i), Time: now.Add(time.Duration(i) * time.Second)}) {
+				if h.RuleID == "bhv-enum" {
+					n++
+				}
+			}
+		}
+		return n
+	}
+	if n := run(func(int) int64 { return 1834 }); n != 0 {
+		t.Fatalf("响应大小完全相同不应判定为批量爬取: %d", n)
+	}
+	if n := run(func(i int) int64 { return int64(300 + i%17*11) }); n != 1 {
+		t.Fatalf("返回不同数据的遍历应告警: %d", n)
+	}
+}

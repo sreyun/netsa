@@ -117,6 +117,25 @@ const (
 	ResultUnknown = "unknown"
 )
 
+// Reply 是防火墙会话日志记录的应答情况。只有会话结束时输出的日志才有收发包计数，会话建立时的日志与策略匹配日志没有。
+type Reply uint8
+
+const (
+	ReplyUnknown Reply = iota // 日志未记录收发包计数
+	ReplyNone                 // 会话结束时目标方向没有任何应答（0 个包）
+	ReplyYes                  // 目标有应答
+)
+
+// Reach 是根据防火墙会话证据（安全域、DNAT 后地址、应答包数）对一次放行的外部访问是否到达服务的判断，由流水线填写。
+type Reach uint8
+
+const (
+	ReachUnknown Reach = iota // 日志没有可用的证据
+	ReachNo                   // 证据表明没有到达任何服务
+	ReachDevice               // 目标是防火墙自身（local 安全域）
+	ReachYes                  // 证据表明到达了内部服务
+)
+
 // Event 是解析后的统一日志事件，Web 与防火墙日志共用。
 type Event struct {
 	Time    time.Time
@@ -133,6 +152,14 @@ type Event struct {
 	Flags   string // TCP 标志位
 	// Outbound 表示出站流量（本机/内网主动发起），不作为攻击来源统计。
 	Outbound bool
+	// 防火墙记录的会话信息（日志中有时填充）：源 / 目的安全域、命中的安全策略、DNAT 后的目的地址、应答情况。
+	// 用于判断一次探测是否真的到达了服务（见 exposure.Reach）。
+	SrcZone  string
+	DstZone  string
+	Policy   string
+	NatDstIP string
+	Reply    Reply
+	Reach    Reach // 流水线按上述证据判断的到达情况（攻击面、安全评估据此判断服务是否真实对外开放）
 
 	// 安全设备（IPS/IDS/WAF/下一代防火墙）自身识别出的威胁，例如 Suricata 签名、FortiGate IPS 攻击名。
 	Threat         string // 威胁/签名名称

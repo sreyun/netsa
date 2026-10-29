@@ -1,9 +1,16 @@
 package pipeline
 
 import (
+	"hash/fnv"
+	"log"
+	"math/bits"
 	"net"
 	"net/netip"
+	"sort"
 	"strings"
+	"sync"
+	"sync/atomic"
+	"time"
 
 	"netsa/internal/config"
 	"netsa/internal/geo"
@@ -35,11 +42,109 @@ type RealIP struct {
 	headers []string
 	trusted []netip.Prefix
 	cdnOnly bool
+
+	// 反向代理自动识别（见 learnPeer）
+	auto   bool
+	peers  sync.Map // netip.Addr → *peerStat
+	npeers atomic.Int64
+}
+
+// 反向代理自动识别的阈值：携带 X-Forwarded-For 的请求数与其中不同公网客户端数（按 64 位哈希位图近似计数）。
+const (
+	proxyMinRequests = 20
+	proxyMinClients  = 8
+	maxPeerStats     = 4096
+)
+
+type peerStat struct {
+	xff      atomic.Int64
+	clients  atomic.Uint64 // 客户端地址哈希的位图，置位数近似为不同客户端数
+	proxy    atomic.Bool
+	internal bool // 内网 / 本机地址：识别后自动信任；公网地址只提示
+	first    time.Time
+	sample   atomic.Pointer[string] // 最近一个客户端地址（展示用）
+}
+
+// ProxyPeer 是自动识别出的反向代理 / 负载均衡 / CDN 节点。
+type ProxyPeer struct {
+	IP       string    `json:"ip"`
+	Trusted  bool      `json:"trusted"`  // 已自动信任（内网 / 本机地址）；false 表示公网节点，需人工确认后加入 trusted_proxies
+	Clients  int       `json:"clients"`  // 近似的不同客户端数（上限 64）
+	Requests int64     `json:"requests"` // 携带 X-Forwarded-For 的请求数
+	Sample   string    `json:"sample,omitempty"`
+	First    time.Time `json:"first_seen"`
+}
+
+// learnPeer 统计未配置为可信代理的直连对端：持续携带 X-Forwarded-For、且其中出现大量不同的公网客户端时判定为反向代理。
+// 返回是否按可信代理处理（只有内网 / 本机地址会被自动信任）。
+func (r *RealIP) learnPeer(peer netip.Addr, ev *model.Event) bool {
+	v, ok := r.peers.Load(peer)
+	if !ok {
+		if ev.XFF == "" || r.npeers.Load() >= maxPeerStats {
+			return false
+		}
+		var loaded bool
+		v, loaded = r.peers.LoadOrStore(peer, &peerStat{internal: peer.IsLoopback() || geo.IsInternal(peer), first: ev.Time})
+		if !loaded {
+			r.npeers.Add(1)
+		}
+	}
+	st := v.(*peerStat)
+	if st.proxy.Load() {
+		if ev.XFF != "" {
+			st.xff.Add(1) // 继续计数，界面展示的请求数随实际流量增长
+		}
+		return st.internal
+	}
+	if ev.XFF == "" {
+		return false
+	}
+	client, ok := r.fromChain(strings.Split(ev.XFF, ","))
+	if !ok || client == peer || !geo.IsPublic(client) {
+		return false
+	}
+	n := st.xff.Add(1)
+	h := fnv.New64a()
+	h.Write(client.AsSlice())
+	st.clients.Or(1 << (h.Sum64() & 63))
+	s := client.String()
+	st.sample.Store(&s)
+	if n >= proxyMinRequests && bits.OnesCount64(st.clients.Load()) >= proxyMinClients && st.proxy.CompareAndSwap(false, true) {
+		if st.internal {
+			log.Printf("[real_ip] 自动识别反向代理 %s（携带 X-Forwarded-For，含多个公网客户端），已按可信代理还原真实客户端地址", peer)
+		} else {
+			log.Printf("[real_ip] 公网地址 %s 疑似未配置的 CDN / 代理节点（携带 X-Forwarded-For，含多个公网客户端），确认后请加入 real_ip.trusted_proxies", peer)
+		}
+		return st.internal
+	}
+	return false
+}
+
+// Proxies 返回自动识别出的反向代理（内网，已自动信任）与疑似未配置的 CDN / 代理节点（公网，需人工确认）。
+func (r *RealIP) Proxies() []ProxyPeer {
+	out := []ProxyPeer{}
+	if r == nil {
+		return out
+	}
+	r.peers.Range(func(k, v any) bool {
+		st := v.(*peerStat)
+		if st.proxy.Load() {
+			p := ProxyPeer{IP: k.(netip.Addr).String(), Trusted: st.internal, Clients: bits.OnesCount64(st.clients.Load()),
+				Requests: st.xff.Load(), First: st.first}
+			if s := st.sample.Load(); s != nil {
+				p.Sample = *s
+			}
+			out = append(out, p)
+		}
+		return true
+	})
+	sort.Slice(out, func(i, j int) bool { return out[i].Requests > out[j].Requests })
+	return out
 }
 
 // NewRealIP 根据配置创建还原器。
 func NewRealIP(cfg config.RealIPConfig) *RealIP {
-	r := &RealIP{cdnOnly: cfg.CDNOnly}
+	r := &RealIP{cdnOnly: cfg.CDNOnly, auto: cfg.AutoOn()}
 	for _, h := range cfg.Headers {
 		r.headers = append(r.headers, strings.ToLower(strings.ReplaceAll(strings.TrimSpace(h), "-", "_")))
 	}
@@ -139,7 +244,7 @@ func (r *RealIP) Apply(ev *model.Event) *model.Hit {
 	if err != nil {
 		return nil
 	}
-	if !r.isTrusted(peer) {
+	if !r.isTrusted(peer) && !(r.auto && r.learnPeer(peer, ev)) {
 		switch {
 		case containsLoopback(ev.XFF) || containsLoopback(ev.XRealIP):
 			return &model.Hit{RuleID: "spoof-xff", Name: "伪造来源地址头(绕过IP限制)", Category: "IP伪造",

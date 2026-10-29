@@ -104,6 +104,9 @@ real_ip:
     - ::1/128
     - fc00::/7
     # 使用 CDN 时在此加入 CDN 回源网段（如阿里云 CDN、腾讯云 CDN 的回源 IP 段）
+  # 自动识别反向代理（默认开启）：未列入上面网段的内网 / 本机地址持续携带 X-Forwarded-For 且客户端分散时，自动按可信代理还原；
+  # 公网地址只在“数据源 → 溯源与检测能力”中提示疑似未配置的 CDN 节点，不自动信任（公网来源可伪造请求头）
+  auto_learn: true
   # 内置的可信代理网段：cloudflare（使用 Cloudflare 时开启，无需手工维护其回源网段）
   trusted_presets: []
   # 按优先级依次尝试的客户端地址头（设置后覆盖 header）。仅当请求来自可信代理时才采信这些头：
@@ -207,6 +210,10 @@ detect:
 # 1433 / 6379 / 3389 等未映射端口时不断产生高危告警；设备（IPS/IDS/WAF）明确判定的威胁、
 # 端口扫描、主机探测与流量洪泛仍然照常告警。
 exposure:
+  # 会话证据研判（默认开启，与 enabled 无关）：防火墙放行、但日志自身表明没有到达服务的端口探测只打标签——
+  # 目的安全域仍为外网（如华为 source-zone=untrust, destination-zone=untrust，常见于出站策略源安全域配置过宽），
+  # 或会话结束时目标没有任何应答（华为会话日志 RcvPkts=0、FortiGate rcvdpkt=0）。经 DNAT 转发到内网的保持告警。
+  reach_check: true
   enabled: false
   # 兜底端口白名单：拿不到精确 NAT 表时（例如由云负载均衡、上级防火墙转发），这些端口视为已发布。
   allowed_ports: []

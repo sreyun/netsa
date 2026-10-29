@@ -52,15 +52,15 @@ docker compose logs -f netsa
 
 | 触发 | 行为 |
 |---|---|
-| 创建 tag `v1.6.5` | 构建 + 启动自检 + 推送：`1.6.5`、`1.6`、`1`、`latest`、`sha-xxxxxxx` |
-| 创建预发布 tag `v1.6.5-rc1` | 只推 `1.6.5-rc1`、`sha-xxxxxxx`，不动 `latest` / `1.6` / `1` |
+| 创建 tag `v1.6.6` | 构建 + 启动自检 + 推送：`1.6.6`、`1.6`、`1`、`latest`、`sha-xxxxxxx` |
+| 创建预发布 tag `v1.6.6-rc1` | 只推 `1.6.6-rc1`、`sha-xxxxxxx`，不动 `latest` / `1.6` / `1` |
 | 推送 `master` / Pull Request | 不构建镜像（质量门禁由 `ci` 工作流负责） |
 | 手动触发（workflow_dispatch） | 填写要发布的 tag 与是否更新 `latest`；按该 tag 检出源码，版本与内容严格对应 |
 
 发布流程：
 
 ```bash
-git tag v1.6.5 && git push origin v1.6.5
+git tag v1.6.6 && git push origin v1.6.6
 ```
 
 需要在仓库 **Settings → Secrets and variables → Actions** 配置两个 Secret：
@@ -86,9 +86,9 @@ printf '%s' "$AK" | openssl dgst -binary -sha256 -hmac "$SK" | od -An -vtx1 | tr
 | `GOPROXY` | `https://goproxy.cn,direct` | 构建时的 Go 模块代理 |
 
 ```bash
-docker pull swr.cn-east-3.myhuaweicloud.com/sreyun/netsa:1.6.5
+docker pull swr.cn-east-3.myhuaweicloud.com/sreyun/netsa:1.6.6
 docker run -d --name netsa -p 8080:8080 -p 5514:5514/udp -v netsa-state:/app/state \
-  swr.cn-east-3.myhuaweicloud.com/sreyun/netsa:1.6.5
+  swr.cn-east-3.myhuaweicloud.com/sreyun/netsa:1.6.6
 ```
 
 - **版本随 tag 注入**：构建时通过 `-ldflags "-X main.version=<tag>"` 写入二进制，`netsa version` 与 `/api/meta` 显示的就是发布版本；本地 `docker compose build` 不传该参数，仍使用源码中的默认版本。
@@ -193,6 +193,13 @@ access_log /var/log/nginx/access.json netsa_json;
 | Filebeat、Logstash、Vector 等 | `{"message":"<原始日志>", "host":{…}, …}`（最多拆两层，如采集器转发的 Docker 日志） |
 | containerd / CRI-O（Kubernetes） | `2026-10-26T10:00:00.123456789+08:00 stdout F <原始日志>` |
 
+**反向代理自动识别（默认开启）**：站点放在负载均衡 / 反向代理之后、但没有配置 `real_ip.trusted_proxies` 时，所有攻击都会记到负载均衡上。netsa 会统计直连地址：
+
+- **内网或本机地址**：持续携带 `X-Forwarded-For`，且其中出现 8 个以上不同的公网客户端时，自动按可信代理还原真实攻击源。
+- **公网地址**：只提示“疑似未配置的 CDN / 代理节点”，确认后再加入 `trusted_proxies`。公网来源可以任意伪造请求头，不会自动信任。
+
+识别结果显示在 **数据源 → 溯源与检测能力**。关闭：`real_ip.auto_learn: false`。平台自身登录接口的来源判断不受影响，仍只信任配置的可信代理。
+
 使用 Cloudflare 等 CDN 时，可额外记录 CDN 提供的客户端地址头（如 `"$http_cf_connecting_ip"`，JSON 格式字段名为 `http_cf_connecting_ip`），并配置：
 
 ```yaml
@@ -255,6 +262,22 @@ exposure:
 - 候选只作提示，**不会自动生效**：误判为已发布会让真实攻击不再告警，必须人工确认。
 - `GET /api/exposure` 的 `candidates` 字段给出放行次数、来源数，以及可直接粘贴到 `exposure.services` 的 YAML（内网地址留作注释，按实际 DNAT 填写）。
 - 新发现候选时启动日志之外的维护周期会打印一条摘要（仅数量增加时打印，不重复刷屏）；大屏能力面板显示「发现 N 个疑似对外映射」。
+
+**会话证据研判（默认开启，无需维护清单）**：防火墙“放行”不等于探测到达了服务。netsa 读取防火墙日志自身记录的会话证据，判断一次放行的外部访问是否真正建立了通信。即使 `exposure.enabled: false` 也生效：
+
+| 日志中的证据 | 判断 | 处理 |
+|---|---|---|
+| 源 / 目的安全域相同或目的为外网域（华为 `source-zone=untrust, destination-zone=untrust`） | 报文没有转发到任何内部安全域 | 端口探测只打标签，不告警 |
+| 会话结束时目标无应答（华为会话日志 `RcvPkts=0`、FortiGate `rcvdpkt=0`、Palo Alto end 日志收包数为 0） | 没有建立通信 | 只打标签，不告警 |
+| DNAT 后为内网地址（FortiGate `trandisp=dnat tranip`、华为 `DestinationNatIP`、Palo Alto NAT 目的地址等），或转发到内部安全域（`destination-zone=dmz`） | 确实到达了内部服务 | 保持告警并注明证据，不再按手工清单过滤；DNAT 后地址直接用于关联资产台账 |
+| 目的安全域为 `local` | 打到防火墙自身 | 保持告警，提示确认设备管理服务未对公网开放 |
+| 日志没有上述字段 | 无法判断 | 按 `exposure.enabled` / `services` 判断 |
+
+- **可疑放行策略**：被放行却没到达任何服务的外部流量会按“策略 + 安全域”汇总，显示在 **数据源 → 溯源与检测能力** 和 `GET /api/exposure` 的 `policies` 中。例如外部探测命中出站策略「允许本地上外网」（untrust → untrust），通常是该策略的源安全域或源地址配得过宽，建议限定为内网安全域。
+- 这类放行不计入候选映射，避免把打到防火墙上的背景扫描误报成“疑似对外映射”。
+- 为什么不主动连接探测端口：netsa 位于内网，探测自己的公网地址依赖回流 NAT；而且很多端口只对特定来源开放，内部测得的结果和攻击者看到的不一致。一旦误判为“不通”，真实攻击就不会再告警。用防火墙自身记录的会话证据更可靠，也不会对生产网络产生额外流量。
+- 华为建议同时开启会话日志（会话结束时输出收发包计数）。策略匹配日志（`POLICYPERMIT`）只有安全域，没有应答计数。
+- 关闭：`exposure.reach_check: false`。指标 `netsa_exposure_unreached_total`。
 
 ## 攻击源溯源定位
 
@@ -370,6 +393,24 @@ IP 详情页的“同源关联分析”在全部攻击源中查找与当前 IP �
 - **设备告警**：按设备自身等级映射；无法识别时按高危（设备已判定为威胁），已拦截的封顶高危。
 - **可观测**：`netsa_severity_adjusted_total{from,to}` 统计等级被自动调整的次数——持续出现 `critical→high` 说明规则把未成功的利用写成了严重；`GET /api/rules/stats` 给出每条规则的命中次数，长期 0 命中的规则需核对是否误配（分类拼写错误时启动日志也会列出）。
 - **暴露面与探测分级解耦**：后台/端口「探测」按低危记录，是否真正暴露由响应状态判定——`2xx/3xx` 的 `/admin`、`/manage`、`/dashboard` 等通用后台入口会作为「管理后台/运维入口对外暴露」进入安全评估（中危），不会因为降低探测等级而漏掉真实暴露面。
+
+### 研判复核：用证据排除“表面成功”
+
+“放行”“返回 200”“失败后登录成功”只是表象，不能直接等同于攻击到达或得手。下列复核自动进行，无需配置：
+
+| 场景 | 只看表象的误判 | 复核依据 | 处理 |
+|---|---|---|---|
+| 防火墙放行的端口探测 | 未映射端口被宽泛策略放行（如 untrust → untrust）也记中危 | 会话证据：安全域、DNAT 后地址、应答包数（见[会话证据研判](#未做-dnat-映射的端口探测)） | 未到达服务的只打标签 |
+| 攻击面 “高危服务对公网开放” | 同上，未映射端口被登记为对外服务并扣分 | 同一份会话证据 | 不登记、不扣分；有证据到达的即使未登记映射也计入 |
+| 外连威胁情报地址 | 放行即判“已失陷” | 会话结束时对端是否应答 | 无应答：连接未建立，高危（与被拦截同级）；有应答：严重，注明连接已建立 |
+| 威胁情报来源 | 情报命中即高危 | 首次流量是否被拦截 / 未到达服务 | 拦截或未到达时按中危，后续真实攻击照常抬升 |
+| 认证日志 “暴力破解成功” | 失败 5 次后任一账号登录成功即严重（用户自己输错、NAT 出口多人共用都会触发） | 是否已构成暴力破解 / 喷洒，成功的账号是否被尝试过 | 两者都满足才判定 |
+| 认证暴力破解 / 密码喷洒 | 办公出口 NAT、跳板机后多人各输错几次即凑够阈值 | 同一来源有 3 个以上账号正常登录 | 降为中危并注明“疑似共享出口” |
+| Web 登录 “疑似破解成功” | 攻击 A 接口后，正常登录 B 接口被当成破解成功 | 成功响应是否出现在被反复提交的同一接口 | 不同接口不判定 |
+| 敏感文件 / WebShell 返回 200 | 单页应用、统一错误页对任何路径都返回首页 | 响应大小与首页正常响应一致，或 3 个以上不同探测路径大小完全相同（自动学习） | 判定为兜底页面，不报敏感资源暴露，不判定成功 |
+| 接口遍历 / 批量爬取 | 兜底页、统一的“无权限”提示返回 200 | 不同 ID 的响应大小是否各不相同 | 完全相同时不告警 |
+| 大量 5xx（异常请求引发服务端错误） | 后端故障时每个访问多的用户都被告警 | 同一站点是否有 10 个以上来源同时收到 5xx | 视为服务故障，不告警 |
+| 资产存在被利用的 CVE | 利用请求返回 404 也升为“疑似成功 / 严重” | 响应是否表明失败 | 失败的请求不改判为成功 |
 
 ## 威胁评分模型
 
@@ -564,6 +605,7 @@ docker compose --profile archive up -d
 | `detect.whitelist` | 自有监控、扫描器等白名单，只统计流量不检测 |
 | `detect.rules_file` | 自定义规则；与内置规则 ID 相同时覆盖内置规则，`disable` 可禁用内置规则，`methods` 可限定 HTTP 方法 |
 | `real_ip.trusted_proxies` / `trusted_presets` | 可信代理网段；`trusted_presets: [cloudflare]` 使用内置的 Cloudflare 回源网段 |
+| `real_ip.auto_learn` | 反向代理自动识别（默认开启）：内网 / 本机地址持续携带 X-Forwarded-For 且客户端分散时自动按可信代理还原；公网节点只提示 |
 | `real_ip.headers` | 按优先级尝试的客户端地址头：`cf_connecting_ip`、`true_client_ip`、`ali_cdn_real_ip`、`x_client_ip`、`x_real_ip`、`x_forwarded_for`、`forwarded` |
 | `real_ip.cdn_only` | 源站只应经 CDN 访问时开启，公网直连标记为“绕过 CDN 直连源站” |
 | `geo.online.enabled` | 在线溯源开关（会把攻击 IP 发送到 ip-api.com） |
@@ -573,6 +615,7 @@ docker compose --profile archive up -d
 | `geo.detect_local_networks` | 启动时自动把本机网卡网段并入内网（默认 `true`）；主机本身位于公网段时建议关闭 |
 | `exposure.enabled` | 开启“未做 DNAT 映射的端口探测”过滤（默认关闭）；开启后未发布端口上的探测与端口级暴力破解只打标签 |
 | `exposure.services` / `allowed_ports` | DNAT 精确映射（公网 IP:端口 → 内网 IP:端口）/ 兜底端口白名单 |
+| `exposure.reach_check` | 会话证据研判（默认开启）：防火墙放行但日志表明未到达服务（目的安全域仍为外网、会话结束时目标无应答）的端口探测只打标签 |
 | `exposure.suggest` | 候选映射统计（`min_allows` / `min_sources`）：从放行连接反推可能漏登记的映射，只提示不生效 |
 | `geo.reload_interval` | 定位库与自定义网段的热更新检查周期，`0` 关闭 |
 | `storage.snapshot` | 状态快照路径（`.gz` 结尾自动压缩） |

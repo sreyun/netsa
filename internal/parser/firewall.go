@@ -237,7 +237,55 @@ var (
 	kvProto = []string{"proto", "protocol", "ipprotocol", "transport"}
 	kvAct   = []string{"action", "act", "policyaction", "disposition", "result", "policy_action", "fwaction"}
 	kvTime  = []string{"devtime", "eventtime", "timestamp", "logtime", "time", "rt"}
+
+	// 会话信息：华为 source-zone / destination-zone / rule-name、H3C SrcZoneName / DstZoneName、
+	// FortiGate srcintfrole / dstintfrole / policyname、ECS observer.ingress.zone / observer.egress.zone / rule.name 等
+	kvSrcZone = []string{"sourcezone", "srczone", "srczonename", "sourcezonename", "fromzone", "observeringresszone", "srcintfrole"}
+	kvDstZone = []string{"destinationzone", "dstzone", "dstzonename", "destinationzonename", "destzone", "tozone", "observeregresszone", "dstintfrole"}
+	kvPolicy  = []string{"rulename", "policyname", "securitypolicy", "policy", "policyid"}
+	kvNatDst  = []string{"destinationnatip", "dstnatip", "natdstipaddr", "natdstip", "destnatip", "natdestinationip", "xlatedst", "postnatdestinationip"}
+	// 应答方向（目标 → 发起方）的包数 / 字节数：华为会话日志 RcvPkts / RcvBytes、FortiGate rcvdpkt / rcvdbyte、ECS destination.packets
+	kvRcvPkts  = []string{"rcvpkts", "rcvdpkt", "receivedpkts", "recvpkts", "rcvpackets", "packetsreceived", "destinationpackets"}
+	kvRcvBytes = []string{"rcvbytes", "rcvdbyte", "receivedbytes", "recvbytes", "bytesreceived", "destinationbytes"}
 )
+
+// fillSession 提取防火墙记录的会话信息，用于判断探测是否真的到达了服务。
+// 收发包计数只采信会话结束时的日志：会话建立时（FortiGate action=start）计数恒为 0，不代表目标没有应答。
+func fillSession(ev *model.Event, kv map[string]string, act string) {
+	zone := func(keys []string) string {
+		z := strings.Trim(pick(kv, keys...), `"' `)
+		if strings.EqualFold(z, "undefined") || z == "-" {
+			return ""
+		}
+		return z
+	}
+	ev.SrcZone, ev.DstZone = zone(kvSrcZone), zone(kvDstZone)
+	ev.Policy = strings.TrimRight(strings.Trim(pick(kv, kvPolicy...), `"' `), ".") // 华为日志以句号结尾
+	if ev.Policy == "-" || ev.Policy == "---" {
+		ev.Policy = ""
+	}
+	nat := pick(kv, kvNatDst...)
+	if nat == "" && strings.Contains(strings.ToLower(kv["trandisp"]), "dnat") {
+		nat = kv["tranip"] // FortiGate 虚拟 IP（DNAT）
+	}
+	if isIP(nat) && nat != "0.0.0.0" {
+		ev.NatDstIP = nat
+	}
+	if strings.EqualFold(strings.Trim(act, `"' `), "start") {
+		return
+	}
+	for _, keys := range [][]string{kvRcvPkts, kvRcvBytes} {
+		if v := pick(kv, keys...); v != "" {
+			if n, err := strconv.ParseInt(strings.Trim(v, `"`), 10, 64); err == nil {
+				ev.Reply = model.ReplyYes
+				if n == 0 {
+					ev.Reply = model.ReplyNone
+				}
+				return
+			}
+		}
+	}
+}
 
 // KVFirewall 解析键值对风格的防火墙日志，键名大小写与下划线不敏感。
 type KVFirewall struct{}
@@ -279,11 +327,12 @@ func kvEvent(kv map[string]string, format, line string) (*model.Event, bool) {
 		switch {
 		case containsAny(up, "DENY", "DROP", "BLOCK", "REJECT"):
 			act = "deny"
-		case containsAny(up, "PERMIT", "ACCEPT", "ALLOW"):
+		case containsAny(up, "PERMIT", "ACCEPT", "ALLOW"), strings.Contains(up, "SESSION_TEARDOWN"): // 会话日志只记录已放行建立的会话
 			act = "allow"
 		}
 	}
 	ev.Action = normAction(act)
+	fillSession(ev, kv, act)
 	if d, t := kv["date"], kv["time"]; d != "" && t != "" {
 		ev.Time = ParseTime(d + " " + t)
 	} else {
@@ -372,7 +421,25 @@ func kvPairs(line string, fn func(key, val string)) {
 		for k < n && line[k] != ' ' && line[k] != '\t' && line[k] != ',' && line[k] != ';' {
 			k++
 		}
+		// 华为 time=2026/10/29 08:49:59：日期与时间之间有空格，按一个值处理
+		if isDate(line[j:k]) && k+9 <= n && line[k] == ' ' && isClock(line[k+1:k+9]) {
+			k += 9
+		}
 		fn(key, line[j:k])
 		i = k
 	}
+}
+
+func isDigit(c byte) bool { return c >= '0' && c <= '9' }
+
+// isDate 判断是否为 2026/10/29 或 2026-10-29 形式的日期。
+func isDate(s string) bool {
+	return len(s) == 10 && (s[4] == '/' || s[4] == '-') && s[7] == s[4] &&
+		isDigit(s[0]) && isDigit(s[1]) && isDigit(s[2]) && isDigit(s[3]) && isDigit(s[5]) && isDigit(s[6]) && isDigit(s[8]) && isDigit(s[9])
+}
+
+// isClock 判断是否为 08:49:59 形式的时间。
+func isClock(s string) bool {
+	return len(s) == 8 && s[2] == ':' && s[5] == ':' &&
+		isDigit(s[0]) && isDigit(s[1]) && isDigit(s[3]) && isDigit(s[4]) && isDigit(s[6]) && isDigit(s[7])
 }

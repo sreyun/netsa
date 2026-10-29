@@ -21,9 +21,15 @@ func (s *Store) c2Hit(ev *model.Event) *model.Hit {
 	if len(names) == 0 {
 		return nil
 	}
-	sev, res := model.SevCritical, model.ResultAllowed
-	if ev.Action == model.ActionDeny {
-		sev, res = model.SevHigh, model.ResultBlocked
+	// 会话日志记录了应答包数时据此区分：对端没有应答说明连接未建立（主机仍在尝试回连，与被拦截同级）
+	sev, res, act := model.SevCritical, model.ResultAllowed, "已放行"
+	switch {
+	case ev.Action == model.ActionDeny:
+		sev, res, act = model.SevHigh, model.ResultBlocked, "已拦截"
+	case ev.Reply == model.ReplyNone:
+		sev, res, act = model.SevHigh, model.ResultFailed, "已放行但对端无应答，连接未建立"
+	case ev.Reply == model.ReplyYes:
+		act = "已放行且对端有应答，连接已建立"
 	}
 	if len(names) == 1 && names[0] == "Tor出口节点" {
 		sev = min(sev, model.SevMedium)
@@ -34,10 +40,6 @@ func (s *Store) c2Hit(ev *model.Event) *model.Hit {
 	}
 	if ev.Proto != "" {
 		dst += "/" + ev.Proto
-	}
-	act := "已放行"
-	if res == model.ResultBlocked {
-		act = "已拦截"
 	}
 	return &model.Hit{RuleID: "c2-egress", Name: "外连威胁情报地址（疑似失陷）", Category: CatC2, Severity: sev, Phase: model.PhasePersistence,
 		Result: res, Evidence: ev.SrcIP + " → " + dst + "（" + act + "），命中 " + strings.Join(names, "、")}
@@ -158,8 +160,25 @@ func (s *Store) verifySuccess(ev *model.Event, hits []model.Hit) []model.Hit {
 	looked := false
 	var out []model.Hit
 	for i, h := range hits {
-		if h.Result != model.ResultSuccess || h.Category == "敏感文件探测" || h.Category == "WebShell后门" {
-			continue // 敏感文件与 WebShell 以资源存在 / 交互成功为准，不按页面大小复核
+		if h.Result != model.ResultSuccess {
+			continue
+		}
+		if h.Category == "敏感文件探测" || h.Category == "WebShell后门" {
+			// 敏感文件与 WebShell 以资源存在 / 交互成功为准，不按接口基线复核；但兜底页返回的 200（单页应用、统一错误页）不算
+			host := ev.Host
+			if host == "" {
+				host = "-"
+			}
+			if !s.surf.catchAll(host, normPath(ev.URI), ev.Bytes) {
+				continue
+			}
+			if out == nil {
+				out = append([]model.Hit(nil), hits...)
+			}
+			out[i].Result = model.ResultPassed
+			out[i].Severity = min(out[i].Severity, model.SevMedium)
+			out[i].Evidence += "（响应与站点首页或其他探测路径的大小相同，是兜底页面返回的 200，判定为未取到内容）"
+			continue
 		}
 		if !looked {
 			looked = true

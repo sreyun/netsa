@@ -392,8 +392,17 @@ func (s *Store) recordLocked(ev *model.Event, hits []model.Hit) RecordResult {
 		res.NewIP = true
 		s.agg.add(p) // 威胁情报命中时创建即为攻击源；普通访客由首次攻击时补登记
 		if len(p.Intel) > 0 {
-			hits = append(hits, model.Hit{RuleID: "intel", Name: "威胁情报命中", Category: "威胁情报", Severity: model.SevHigh,
-				Phase: model.PhaseRecon, Evidence: strings.Join(p.Intel, ", "), Result: model.ResultUnknown})
+			// 情报只说明来源的信誉：流量已被拦截、或会话证据表明没有到达任何服务时按中危记录，
+			// 其余情况（可能已到达服务）按高危；后续真实的攻击命中会照常抬升等级。
+			sev, res, note := model.SevHigh, model.ResultUnknown, ""
+			switch {
+			case ev.Kind == model.KindFirewall && ev.Action == model.ActionDeny:
+				sev, res, note = model.SevMedium, model.ResultBlocked, "（流量已被防火墙拦截）"
+			case ev.Reach == model.ReachNo:
+				sev, res, note = model.SevMedium, model.ResultFailed, "（防火墙会话证据表明未到达任何服务）"
+			}
+			hits = append(hits, model.Hit{RuleID: "intel", Name: "威胁情报命中", Category: "威胁情报", Severity: sev,
+				Phase: model.PhaseRecon, Evidence: strings.Join(p.Intel, ", ") + note, Result: res})
 		}
 	}
 	oldLevel, oldSeen, oldFirst := p.Level, p.LastSeen, p.FirstSeen
@@ -697,7 +706,14 @@ func (s *Store) Maintain() {
 }
 
 // published 判断防火墙事件的目标端口是否真实对外开放；内网目标视为已发布（已过 DNAT 或东西向流量）。
+// 防火墙日志带有会话证据时以证据为准：放行但没有转发到内部服务（如 untrust → untrust）的端口不是对外服务。
 func (s *Store) published(ev *model.Event) bool {
+	switch ev.Reach {
+	case model.ReachNo:
+		return false
+	case model.ReachYes, model.ReachDevice:
+		return true
+	}
 	if s.PortPublished == nil || ev.DstIP == "" || geo.IsPrivate(ev.DstIP) {
 		return true
 	}
