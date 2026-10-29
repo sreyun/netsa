@@ -7,7 +7,7 @@
 | 模块 | 能力 |
 | --- | --- |
 | 日志采集 | 实时跟踪文件（通配符、自动发现新文件、logrotate 重命名与 copytruncate 轮转、超长行截断）、批量分析（支持 `.gz`）、Syslog UDP/TCP 接收（RFC3164/5424/6587）、**Syslog over TLS（RFC 5425，可双向认证）**；**syslog 发送端识别、登记、分组、白名单 / 阻止与限速**；数据源与发送端**断流告警** |
-| 格式自动识别 | **Web**：nginx/Apache combined、main（带 XFF）、vhost_combined、JSON（nginx `escape=json`、Caddy、Traefik）、IIS W3C（按 `#Fields` 指令解析）、任意自定义 `log_format`（可直接粘贴 nginx.conf 中的多行写法）<br>**防火墙**：iptables/UFW/firewalld/nftables 内核日志、pfSense/OPNsense filterlog、Windows 防火墙、Cisco ASA/FTD、Palo Alto（TRAFFIC/THREAT CSV）、FortiGate/华为 USG/H3C/深信服/山石等 key=value、JSON 防火墙日志<br>**IDS/IPS**：Suricata EVE JSON、Snort fast alert，以及 FortiGate IPS/UTM 等设备威胁日志（攻击名称映射到攻击分类与等级）<br>**主机 / VPN 认证**：Linux auth.log / secure、Windows 安全事件（NXLog / Winlogbeat / Snare）、FortiGate / Cisco / OpenVPN VPN 登录、SQL Server 登录<br>**DNS**：BIND、dnsmasq、CoreDNS、Windows DNS、Zeek、Suricata DNS |
+| 格式自动识别 | **Web**：nginx/Apache combined、main（带 XFF）、vhost_combined、JSON（nginx，含未加 `escape=json` 的 `\xHH` 转义；Caddy、Traefik、Elastic ECS）、IIS W3C（按 `#Fields` 指令解析）、任意自定义 `log_format`（可直接粘贴 nginx.conf 中的多行写法）<br>**防火墙**：iptables/UFW/firewalld/nftables 内核日志、pfSense/OPNsense filterlog、Windows 防火墙、Cisco ASA/FTD、Palo Alto（TRAFFIC/THREAT CSV）、FortiGate/华为 USG/H3C/深信服/山石等 key=value、JSON 防火墙日志<br>**IDS/IPS**：Suricata EVE JSON、Snort fast alert，以及 FortiGate IPS/UTM 等设备威胁日志（攻击名称映射到攻击分类与等级）<br>**主机 / VPN 认证**：Linux auth.log / secure、Windows 安全事件（NXLog / Winlogbeat / Snare）、FortiGate / Cisco / OpenVPN VPN 登录、SQL Server 登录<br>**DNS**：BIND、dnsmasq、CoreDNS、Windows DNS、Zeek、Suricata DNS<br>**容器与采集器**：Docker json-file、Fluent Bit / Fluentd（`log` 字段）、Filebeat / Logstash / Vector（`message` 字段）、containerd / CRI-O 前缀，自动拆开后识别原始日志 |
 | 攻击检测 | 69 条特征规则（SQL 注入、XSS、目录穿越/文件包含、命令/代码执行、Log4Shell/OGNL/SpEL/SSTI、SSRF、XXE、反序列化、WebShell、ThinkPHP/WebLogic/Confluence/Exchange/F5/GPON/海康等已知漏洞、国产 OA、敏感文件探测、扫描器/测绘引擎指纹……）+ 行为检测（CC、目录枚举、Web/SSH/RDP 暴力破解及**破解成功研判**、**分布式暴力破解 / 撞库**（大量来源各尝试少量几次）、**接口遍历 / 批量爬取**（按 ID 遍历用户、订单等对象）、端口扫描、主机横向探测、流量洪泛）<br>**主机与 DNS**：SSH / RDP / VPN 暴力破解、密码喷洒、**破解成功（账号失陷）**、日志被清除、新建账号 / 提权、服务与计划任务持久化；DNSLog 带外回连、DNS 隧道、DGA 与 NXDOMAIN 风暴、矿池与动态域名<br>多轮 URL 解码、`%u` 编码、HTML 实体、SQL 注释混淆归一化，抵抗常见绕过；Aho-Corasick 多模式预筛 + 由正则语法树推导的必要关键词条件，正常请求无需执行正则 |
 | 结果研判 | 依据响应码/响应体大小判断 **已拦截 / 失败 / 服务异常 / 疑似成功 / 未拦截**；仅对 SQL 注入、命令执行、敏感文件等能由响应判断成功的攻击给出“疑似成功”并升级风险 |
 | 攻击源溯源 | **真实 IP 还原**：可信代理（含 Cloudflare 内置网段）+ 多种客户端地址头（CF-Connecting-IP、True-Client-IP、Ali-CDN-Real-IP、X-Real-IP、X-Forwarded-For、RFC 7239 Forwarded）右向左解析，识别 XFF 伪造与**绕过 CDN 直连源站**<br>**多源定位**：ip2region（国内到城市+运营商）、MaxMind GeoLite2（经纬度+精度半径+ASN）、ip-api 在线库（经纬度、代理/IDC/移动网络标记）、反向 DNS、**区划地名库**（离线换算城市/省/国家中心坐标）、**自定义网段**（内网办公区/分支机构/VPN 地址池定位到具体地点）；**交叉比对给出置信度**；定位库**热更新**；按需 **RDAP/WHOIS** 查询网段归属与滥用投诉邮箱；识别 IDC/云主机、代理/VPN、Tor、网络空间测绘机构 |
@@ -52,15 +52,15 @@ docker compose logs -f netsa
 
 | 触发 | 行为 |
 |---|---|
-| 创建 tag `v1.6.4` | 构建 + 启动自检 + 推送：`1.6.4`、`1.6`、`1`、`latest`、`sha-xxxxxxx` |
-| 创建预发布 tag `v1.6.4-rc1` | 只推 `1.6.4-rc1`、`sha-xxxxxxx`，不动 `latest` / `1.6` / `1` |
+| 创建 tag `v1.6.5` | 构建 + 启动自检 + 推送：`1.6.5`、`1.6`、`1`、`latest`、`sha-xxxxxxx` |
+| 创建预发布 tag `v1.6.5-rc1` | 只推 `1.6.5-rc1`、`sha-xxxxxxx`，不动 `latest` / `1.6` / `1` |
 | 推送 `master` / Pull Request | 不构建镜像（质量门禁由 `ci` 工作流负责） |
 | 手动触发（workflow_dispatch） | 填写要发布的 tag 与是否更新 `latest`；按该 tag 检出源码，版本与内容严格对应 |
 
 发布流程：
 
 ```bash
-git tag v1.6.4 && git push origin v1.6.4
+git tag v1.6.5 && git push origin v1.6.5
 ```
 
 需要在仓库 **Settings → Secrets and variables → Actions** 配置两个 Secret：
@@ -86,9 +86,9 @@ printf '%s' "$AK" | openssl dgst -binary -sha256 -hmac "$SK" | od -An -vtx1 | tr
 | `GOPROXY` | `https://goproxy.cn,direct` | 构建时的 Go 模块代理 |
 
 ```bash
-docker pull swr.cn-east-3.myhuaweicloud.com/sreyun/netsa:1.6.4
+docker pull swr.cn-east-3.myhuaweicloud.com/sreyun/netsa:1.6.5
 docker run -d --name netsa -p 8080:8080 -p 5514:5514/udp -v netsa-state:/app/state \
-  swr.cn-east-3.myhuaweicloud.com/sreyun/netsa:1.6.4
+  swr.cn-east-3.myhuaweicloud.com/sreyun/netsa:1.6.5
 ```
 
 - **版本随 tag 注入**：构建时通过 `-ldflags "-X main.version=<tag>"` 写入二进制，`netsa version` 与 `/api/meta` 显示的就是发布版本；本地 `docker compose build` 不传该参数，仍使用源码中的默认版本。
@@ -171,7 +171,27 @@ log_format netsa '$remote_addr - $remote_user [$time_local] "$request" $status $
 access_log /var/log/nginx/access.log netsa;
 ```
 
-自定义格式时把上面的 `log_format` 原样（可多行）粘贴到数据源的 `log_format` 字段；JSON 格式（`escape=json`）自动识别。远程 nginx 也可直接发送 syslog：`access_log syslog:server=netsa服务器IP:5514,tag=nginx netsa;`
+自定义格式时把上面的 `log_format` 原样（可多行）粘贴到数据源的 `log_format` 字段；JSON 格式自动识别。远程 nginx 也可直接发送 syslog：`access_log syslog:server=netsa服务器IP:5514,tag=nginx netsa;`
+
+**JSON 格式**：字段名不限顺序、不区分大小写，嵌套对象自动展开，常见写法均可识别（来源 `remote_addr` / `client_ip`，请求 `request` 整行或 `request_method` + `request_uri` + `args`，状态码字符串或数字，时间 `time_iso8601` / `time_local` / `@timestamp` / `msec`）。推荐加上 `escape=json`：
+
+```nginx
+log_format netsa_json escape=json '{"time_iso8601":"$time_iso8601","remote_addr":"$remote_addr","request":"$request",'
+  '"status":"$status","body_bytes_sent":"$body_bytes_sent","http_referer":"$http_referer","http_user_agent":"$http_user_agent",'
+  '"http_x_forwarded_for":"$http_x_forwarded_for","request_time":"$request_time","host":"$host"}';
+access_log /var/log/nginx/access.json netsa_json;
+```
+
+- 未加 `escape=json` 时，nginx 会把值中的引号、反斜杠、中文写成 `\x22`、`\x5C`、`\xE4…`，整行不是合法 JSON。netsa 会先还原再解析，带引号、尖括号、中文的请求（往往正是 XSS、注入）不会被当成解析失败丢弃。
+- **Elastic ECS 字段**（`source.ip`、`url.original`、`user_agent.original`、`http.response.status_code` 等）按完整路径取值。`url.original` 与 `user_agent.original` 这类末级同名的字段不会互相覆盖。
+
+**容器与采集器转发**：日志被容器运行时或采集器再包一层时自动拆开，按里面的原始日志识别格式（文本与 JSON 均可）。原始日志留存保存的是包装内的原文，数据源 / 发送端列表中显示为“nginx（log 字段包装）”等：
+
+| 包装 | 示例 |
+|---|---|
+| Docker json-file、Fluent Bit、Fluentd | `{"log":"<原始日志>\n","stream":"stdout","time":"…"}` |
+| Filebeat、Logstash、Vector 等 | `{"message":"<原始日志>", "host":{…}, …}`（最多拆两层，如采集器转发的 Docker 日志） |
+| containerd / CRI-O（Kubernetes） | `2026-10-26T10:00:00.123456789+08:00 stdout F <原始日志>` |
 
 使用 Cloudflare 等 CDN 时，可额外记录 CDN 提供的客户端地址头（如 `"$http_cf_connecting_ip"`，JSON 格式字段名为 `http_cf_connecting_ip`），并配置：
 
