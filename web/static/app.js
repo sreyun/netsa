@@ -1180,7 +1180,17 @@ async function loadSources() {
     <div class="k">内网网段</div><div>${(meta.intranet || []).length ? (meta.intranet || []).map((n) => `<span class="chip">${esc(n)}</span>`).join('') + ' <span class="muted">（按内网呈现，不查询定位库；RFC1918 内置生效）</span>' : '<span class="muted">仅内置 RFC1918 / 回环 / 链路本地 / CGNAT</span>'}</div>
     <div class="k">对外发布服务</div><div>${meta.exposure
       ? `已启用 · ${num(meta.exposure_rules || 0)} 条映射${meta.exposure_muted ? ` · 已过滤 ${num(meta.exposure_muted)} 次未发布端口探测` : ''}${meta.exposure_candidates ? ` · <span class="lv-medium">发现 ${num(meta.exposure_candidates)} 个疑似对外映射</span>（候选 YAML 见 /api/exposure）` : ''} <span class="muted">（目标端口未映射的探测只打标签，不产生告警）</span>`
-      : '未启用 <span class="muted">（配置 exposure.enabled 后，未做 DNAT 映射的端口探测不再告警）</span>'}</div>
+      : '未启用 <span class="muted">（带安全域 / DNAT / 回包计数的防火墙日志已由下方“会话证据研判”自动处理；只有不含这些字段的日志才需要配置 exposure.enabled 并登记映射）</span>'}</div>
+    <div class="k">反向代理识别</div><div>${(meta.proxies || []).length
+      ? (meta.proxies || []).map((p) => p.trusted
+        ? `<div><span class="nt-on">已自动信任</span> <span class="mono">${esc(p.ip)}</span> <span class="muted">（内网反向代理 / 负载均衡：${num(p.requests)} 次请求携带 X-Forwarded-For，约 ${num(p.clients)} 个不同客户端，按其还原真实攻击源）</span></div>`
+        : `<div><span class="lv-medium">待确认</span> <span class="mono">${esc(p.ip)}</span> <span class="muted">（公网地址携带 X-Forwarded-For 且客户端分散，疑似未配置的 CDN / 代理节点：确认后加入 real_ip.trusted_proxies，否则攻击会记在该节点上）</span></div>`).join('')
+      : '<span class="muted">未发现未配置的反向代理（内网地址持续携带 X-Forwarded-For 且客户端分散时自动识别并信任）</span>'}</div>
+    <div class="k">会话证据研判</div><div>${meta.exposure_reach
+      ? `已开启${meta.exposure_unreached ? ` · 已过滤 ${num(meta.exposure_unreached)} 次未到达服务的端口探测` : ''}${meta.exposure_learned ? ` · <span class="nt-on">自动识别 ${num(meta.exposure_learned)} 个对外服务</span>（清单见 /api/exposure 的 learned，无需手工登记）` : ''} <span class="muted">（防火墙放行但目的安全域仍为外网、或会话结束时目标无应答的探测只打标签；经 DNAT 转发到内网的保持告警）</span>`
+        + (meta.exposure_policies || []).map((p) => `<div class="exp-pol"><span class="lv-medium">可疑放行策略</span> 「${esc(p.policy || '未记录策略名')}」 ${esc(p.src_zone || '?')} → ${esc(p.dst_zone || '?')} 放行 ${num(p.permits)} 次 · ${num(p.sources)} 个外部来源 · 端口 ${esc((p.top_ports || []).join('、'))} · 例 <span class="mono">${esc(p.example)}</span>
+          <div class="muted">外部流量命中该策略被放行，但没有转发到任何内部服务：通常是出站策略的源安全域 / 源地址配置过宽，建议限定为内网安全域</div></div>`).join('')
+      : '未开启 <span class="muted">（exposure.reach_check: false）</span>'}</div>
     <div class="k">告警归档</div><div>${meta.archive ? 'PostgreSQL（历史告警可在“告警事件 → 历史告警”中查询与导出）' : '未启用 <span class="muted">（配置 archive.dsn 后可长期留存与检索历史告警）</span>'}</div>
     <div class="k">支持的日志格式</div><div>nginx/Apache combined、main(XFF)、vhost、JSON、自定义 log_format；iptables/UFW/firewalld、pfSense/OPNsense、Windows 防火墙、Cisco ASA、FortiGate/华为/H3C/深信服等 key=value、JSON 防火墙日志；DNS（BIND / dnsmasq / CoreDNS / Windows DNS / Zeek / Suricata）；认证（Linux auth.log、Windows 安全事件、FortiGate / Cisco / OpenVPN VPN 登录、SQL Server 登录）</div>
     <div class="k">日志时区</div><div>${esc(meta.timezone || '系统时区')}</div>

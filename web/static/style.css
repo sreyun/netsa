@@ -550,6 +550,8 @@ pre.cmd { background: #050b18; border: 1px solid var(--border); padding: 8px 10p
 .comp-banner { margin-top: 6px; padding: 6px 10px; border-radius: 4px; font-size: 13px; color: #fff; background: rgba(255,77,79,.18); border: 1px solid rgba(255,77,79,.6); }
 /* 窄屏：说明中的标签允许换行，避免撑出横向滚动 */
 .kv .chip { white-space: normal; }
+.exp-pol { margin-top: 6px; padding: 6px 8px; border-left: 2px solid var(--medium, #f0a020); background: rgba(240, 160, 32, 0.06); border-radius: 4px; }
+.exp-pol .muted { font-size: 12px; margin-top: 2px; }
 .kv > div { min-width: 0; overflow-wrap: anywhere; }
 @media (max-width: 560px) {
   .kv { grid-template-columns: minmax(0, 1fr); gap: 0 12px; }

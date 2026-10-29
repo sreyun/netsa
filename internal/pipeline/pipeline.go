@@ -178,13 +178,22 @@ func (p *Pipeline) aggregate(items []item) {
 		if !it.whitelisted && p.Behavior != nil {
 			hits[i] = append(hits[i], p.Behavior.Observe(it.ev)...)
 		}
+		reach, why := exposure.ReachUnknown, ""
 		if it.ev.Kind == model.KindFirewall {
+			reach, why = p.reachOf(it.ev)
+			it.ev.Reach = reach // 攻击面按同一证据判断服务是否真实对外开放
+			if reach == exposure.ReachYes {
+				p.Exposure.Learn(it.ev, why) // 有会话证据的对外服务自动识别，免手工登记
+			}
+			if reach == exposure.ReachNo {
+				p.Exposure.RecordUnreached(it.ev) // 按策略汇总，提示源安全域配置过宽的放行策略
+			}
 			// 候选映射统计：外部来源访问公网地址端口且被放行，用于提示可能漏登记的 DNAT 映射。
-			// 只记录不生效，避免误判成「已发布」后真实攻击不再告警。
+			// 只记录不生效，避免误判成「已发布」后真实攻击不再告警；会话证据表明没有到达服务、或打到防火墙自身的放行不计入。
 			p.Exposure.Observe(it.ev.DstIP, it.ev.DstPort, it.ev.Proto, it.ev.SrcIP,
-				it.ev.Action == model.ActionAllow, it.ev.Time)
+				it.ev.Action == model.ActionAllow && reach != exposure.ReachNo && reach != exposure.ReachDevice, it.ev.Time)
 		}
-		hits[i] = p.gateExposure(it.ev, hits[i])
+		hits[i] = p.gateExposure(it.ev, hits[i], reach, why)
 		hits[i] = p.Suppress.Filter(it.ev, hits[i])
 		if p.Assets != nil && len(hits[i]) > 0 {
 			hits[i] = p.enrichAssets(it.ev, hits[i])
@@ -237,6 +246,12 @@ func (p *Pipeline) aggregate(items []item) {
 // 防火墙日志记录的是公网侧的目标地址，直接用它查资产会永远匹配不到内网资产。
 // 仅当配置了精确映射（public_ip + public_port → private_ip）时生效，返回事件副本，不修改调用方数据。
 func (p *Pipeline) internalTarget(ev *model.Event) *model.Event {
+	// 防火墙日志记录了 DNAT 后的地址时直接使用（无需手工登记映射）
+	if ev.NatDstIP != "" && ev.NatDstIP != ev.DstIP && geo.IsPrivate(ev.NatDstIP) {
+		cp := *ev
+		cp.DstIP = ev.NatDstIP
+		return &cp
+	}
 	m, ok := p.Exposure.Lookup(ev.DstIP, ev.DstPort, ev.Proto)
 	if !ok || m == nil || m.PrivateIP == "" || m.PrivateIP == ev.DstIP {
 		return ev
@@ -285,7 +300,8 @@ func (p *Pipeline) enrichAssets(ev *model.Event, hits []model.Hit) []model.Hit {
 		case exact:
 			// 精确命中：目标确实存在该漏洞。是否达到「严重」交由统一策略判断——
 			// 已拦截的探测只到高危，未拦截且分类可判定成功的才升为严重。
-			if h.Result != model.ResultBlocked {
+			// 已拦截、或响应表明请求失败（如 404：利用的路径不存在、防火墙会话无应答）的不改判为成功
+			if h.Result != model.ResultBlocked && h.Result != model.ResultFailed {
 				h.Result = model.ResultSuccess
 			}
 			if h.Severity < model.SevHigh {
@@ -343,8 +359,38 @@ func maxHitSev(hits []model.Hit) model.Severity {
 // 如果该端口没有 DNAT 映射，探测不可能到达任何服务，把它记成一条高危告警只会淹没有效信号。
 // 这类命中降级为仅打标签（不生成告警、不计入威胁评分与攻击统计），仍然保留在画像标签与
 // 攻击面的被探测端口统计中，便于事后回溯。
-func (p *Pipeline) gateExposure(ev *model.Event, hits []model.Hit) []model.Hit {
-	if !p.Exposure.Enforcing() || ev.Kind != model.KindFirewall || len(hits) == 0 {
+//
+// 判断依据分两层：
+//  1. 防火墙日志自身记录的会话证据（安全域、DNAT 后地址、应答包数，见 exposure.Reach）：
+//     表明没有到达服务的降级为仅打标签；表明到达了服务（或打到防火墙自身）的保持告警，不再按清单过滤。
+//  2. 没有会话证据时，按手工登记的 DNAT 清单（exposure.enabled）判断。
+func (p *Pipeline) gateExposure(ev *model.Event, hits []model.Hit, reach exposure.Verdict, why string) []model.Hit {
+	if ev.Kind != model.KindFirewall || len(hits) == 0 {
+		return hits
+	}
+	switch reach {
+	case exposure.ReachNo:
+		out := rewriteProbes(hits, func(h *model.Hit) {
+			h.TagOnly = true
+			h.Severity = model.SevInfo
+			h.Evidence = truncEvidence(h.Evidence + "；防火墙放行" + policyText(ev) + "，但" + why + "，不计入攻击统计")
+		})
+		if out != nil {
+			p.Exposure.AddUnreached()
+			return out
+		}
+		return hits
+	case exposure.ReachYes, exposure.ReachDevice:
+		suffix := "；会话证据：" + why
+		if reach == exposure.ReachDevice {
+			suffix += "，请确认设备的管理 / 业务服务未对公网开放"
+		}
+		if out := rewriteProbes(hits, func(h *model.Hit) { h.Evidence = truncEvidence(h.Evidence + suffix) }); out != nil {
+			return out
+		}
+		return hits
+	}
+	if !p.Exposure.Enforcing() {
 		return hits
 	}
 	// 目标是内网地址：说明已经过 DNAT，或本身就是东西向流量，按真实暴露处理
@@ -354,25 +400,49 @@ func (p *Pipeline) gateExposure(ev *model.Event, hits []model.Hit) []model.Hit {
 	if _, ok := p.Exposure.Lookup(ev.DstIP, ev.DstPort, ev.Proto); ok {
 		return hits
 	}
+	out := rewriteProbes(hits, func(h *model.Hit) {
+		h.TagOnly = true
+		h.Severity = model.SevInfo
+		h.Evidence = truncEvidence(h.Evidence + "；目标 " + ev.DstIP + ":" + strconv.Itoa(ev.DstPort) +
+			" 未配置对外映射（DNAT），该端口没有对外服务，不计入攻击统计")
+	})
+	if out == nil {
+		return hits
+	}
+	p.Exposure.AddMuted()
+	return out
+}
+
+// reachOf 按会话证据判断一次放行的外部访问是否到达了服务。只看外部来源被放行的访问：
+// 被拦截的访问已按拦截处理，内网来源属于东西向流量。
+func (p *Pipeline) reachOf(ev *model.Event) (exposure.Verdict, string) {
+	if !p.Exposure.ReachCheck() || ev.Action != model.ActionAllow || ev.SrcIP == "" || geo.IsPrivate(ev.SrcIP) {
+		return exposure.ReachUnknown, ""
+	}
+	return exposure.Reach(ev)
+}
+
+// rewriteProbes 复制命中切片（不修改调用方的数据），对依赖「目标端口确有服务」的命中执行 fn；没有这类命中时返回 nil。
+func rewriteProbes(hits []model.Hit, fn func(h *model.Hit)) []model.Hit {
 	var out []model.Hit
 	for i := range hits {
 		if !exposureFilterable(hits[i]) {
 			continue
 		}
 		if out == nil {
-			out = append([]model.Hit(nil), hits...) // 不修改调用方的切片
+			out = append([]model.Hit(nil), hits...)
 		}
-		h := &out[i]
-		h.TagOnly = true
-		h.Severity = model.SevInfo
-		h.Evidence = truncEvidence(h.Evidence + "；目标 " + ev.DstIP + ":" + strconv.Itoa(ev.DstPort) +
-			" 未配置对外映射（DNAT），该端口没有对外服务，不计入攻击统计")
+		fn(&out[i])
 	}
-	if out == nil {
-		return hits
-	}
-	p.Exposure.AddMuted()
 	return out
+}
+
+// policyText 返回防火墙日志中命中的策略描述，例如「（策略：允许本地上外网）」。
+func policyText(ev *model.Event) string {
+	if ev.Policy == "" {
+		return ""
+	}
+	return "（策略：" + ev.Policy + "）"
 }
 
 // exposureFilterable 判断命中是否依赖「目标端口确有服务」这一前提：只有端口探测与端口级

@@ -32,6 +32,19 @@ func (PaloAlto) Parse(line string) (*model.Event, bool) {
 		Action: normAction(f[30]), Iface: f[18], Time: ParseTime(f[6])}
 	ev.SrcPort, _ = strconv.Atoi(f[24])
 	ev.DstPort, _ = strconv.Atoi(f[25])
+	// 会话信息：10 NAT 目的地址、11 规则名、16 / 17 源 / 目的安全域；流量日志 45 为应答方向包数（只采信会话结束的 end 日志）
+	if isIP(f[10]) && f[10] != "0.0.0.0" {
+		ev.NatDstIP = f[10]
+	}
+	ev.Policy, ev.SrcZone, ev.DstZone = f[11], f[16], f[17]
+	if f[3] == "TRAFFIC" && f[4] == "end" && len(f) > 45 {
+		if n, err := strconv.ParseInt(f[45], 10, 64); err == nil {
+			ev.Reply = model.ReplyYes
+			if n == 0 {
+				ev.Reply = model.ReplyNone
+			}
+		}
+	}
 	if f[3] == "THREAT" && len(f) > 34 {
 		switch f[4] { // 子类型：url / file / data 为内容过滤，不视为攻击
 		case "url", "file", "data":

@@ -14,6 +14,7 @@ type authWin struct {
 	start time.Time
 	fails int
 	users map[string]struct{} // 尝试过的账号（有上限）
+	ok    map[string]struct{} // 登录成功的账号（有上限）：多个账号正常登录说明是共享出口（办公 NAT、跳板机）
 	svc   string
 	host  string
 	fired int
@@ -51,6 +52,15 @@ func (b *Behavior) maybePrune(ev *model.Event) {
 		b.prune(b.latest)
 		b.lastPrune = now
 	}
+}
+
+// triedUser 判断登录成功的账号是否在本窗口被尝试过（日志未记录账号、或尝试过的账号已达统计上限时无法判断，按是处理）。
+func triedUser(w *authWin, user string) bool {
+	if user == "" || len(w.users) >= 50 {
+		return true
+	}
+	_, ok := w.users[Printable(user, 40)]
+	return ok
 }
 
 func listUsers(m map[string]struct{}, n int) string {
@@ -96,19 +106,27 @@ func (b *Behavior) observeAuth(ev *model.Event) []model.Hit {
 		}
 		if w.fails >= b.th.AuthFailures && w.fired&firedAuthBrute == 0 {
 			w.fired |= firedAuthBrute
-			hits = append(hits, model.Hit{RuleID: "auth-brute", Name: w.svc + " 暴力破解", Category: CatBruteForce, Severity: model.SevHigh,
+			hits = append(hits, model.Hit{RuleID: "auth-brute", Name: w.svc + " 暴力破解", Category: CatBruteForce, Severity: sharedSev(w),
 				Phase: model.PhaseCredential, Result: model.ResultFailed,
-				Evidence: fmtDur(b.th.FwWindow) + "内对 " + target + " 登录失败 " + strconv.Itoa(w.fails) + " 次，账号 " + listUsers(w.users, 5)})
+				Evidence: fmtDur(b.th.FwWindow) + "内对 " + target + " 登录失败 " + strconv.Itoa(w.fails) + " 次，账号 " + listUsers(w.users, 5) + sharedNote(w)})
 		}
 		if len(w.users) >= b.th.AuthUsers && w.fired&firedAuthSpray == 0 {
 			w.fired |= firedAuthSpray
-			hits = append(hits, model.Hit{RuleID: "auth-spray", Name: w.svc + " 密码喷洒 / 账号枚举", Category: CatBruteForce, Severity: model.SevHigh,
+			hits = append(hits, model.Hit{RuleID: "auth-spray", Name: w.svc + " 密码喷洒 / 账号枚举", Category: CatBruteForce, Severity: sharedSev(w),
 				Phase: model.PhaseCredential, Result: model.ResultFailed,
-				Evidence: fmtDur(b.th.FwWindow) + "内对 " + target + " 尝试 " + strconv.Itoa(len(w.users)) + " 个不同账号：" + listUsers(w.users, 8)})
+				Evidence: fmtDur(b.th.FwWindow) + "内对 " + target + " 尝试 " + strconv.Itoa(len(w.users)) + " 个不同账号：" + listUsers(w.users, 8) + sharedNote(w)})
 		}
 		return hits
 	}
-	if ev.Action == model.ActionAllow && w.fails >= 5 && w.fired&firedAuthOK == 0 {
+	if ev.Action == model.ActionAllow && ev.User != "" && len(w.ok) < 20 {
+		if w.ok == nil {
+			w.ok = map[string]struct{}{}
+		}
+		w.ok[Printable(ev.User, 40)] = struct{}{}
+	}
+	// 暴力破解成功：已达到暴力破解 / 密码喷洒的阈值，且成功登录的正是被尝试过的账号。
+	// 只看「失败若干次后有登录成功」会误报：用户自己输错几次密码、办公出口 NAT 后多人共用一个来源地址。
+	if ev.Action == model.ActionAllow && w.fired&(firedAuthBrute|firedAuthSpray) != 0 && w.fired&firedAuthOK == 0 && triedUser(w, ev.User) {
 		w.fired |= firedAuthOK
 		return []model.Hit{{RuleID: "auth-brute-ok", Name: w.svc + " 暴力破解成功（疑似账号失陷）", Category: CatBruteForce, Severity: model.SevCritical,
 			Phase: model.PhaseCredential, Result: model.ResultSuccess,
@@ -201,4 +219,22 @@ func (b *Behavior) observeDNS(ev *model.Event, f *dnsFacts) []model.Hit {
 			Evidence: fmtDur(b.th.FwWindow) + "内向 " + Printable(f.reg, 80) + " 查询 " + strconv.Itoa(len(set)) + " 个不同子域名，例如 " + Printable(name, 100)})
 	}
 	return hits
+}
+
+// sharedEgressUsers 是同一来源在窗口内正常登录成功的不同账号数阈值：达到即视为共享出口（办公 NAT、跳板机、堡垒机），
+// 多人各输错几次密码就会凑够暴力破解 / 密码喷洒的阈值，等级降为中危并注明原因。
+const sharedEgressUsers = 3
+
+func sharedSev(w *authWin) model.Severity {
+	if len(w.ok) >= sharedEgressUsers {
+		return model.SevMedium
+	}
+	return model.SevHigh
+}
+
+func sharedNote(w *authWin) string {
+	if len(w.ok) >= sharedEgressUsers {
+		return "；该来源同时有 " + strconv.Itoa(len(w.ok)) + " 个账号正常登录成功，疑似办公出口 NAT / 跳板机，请结合账号核实"
+	}
+	return ""
 }

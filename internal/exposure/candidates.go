@@ -108,7 +108,7 @@ func (m *Manager) Candidates() []Candidate {
 	m.candMu.Lock()
 	out := make([]Candidate, 0, len(m.cands))
 	for _, c := range m.cands {
-		if c.allows < int64(minAllows) || len(c.sources) < minSources {
+		if c.allows < int64(minAllows) || len(c.sources) < minSources || m.isLearned(c.publicIP, c.port, c.proto) { // 已由会话证据自动识别
 			continue
 		}
 		out = append(out, Candidate{
@@ -146,7 +146,7 @@ func (m *Manager) CandidateCount() int {
 	defer m.candMu.Unlock()
 	n := 0
 	for _, c := range m.cands {
-		if c.allows >= int64(minAllows) && len(c.sources) >= minSources {
+		if c.allows >= int64(minAllows) && len(c.sources) >= minSources && !m.isLearned(c.publicIP, c.port, c.proto) {
 			n++
 		}
 	}

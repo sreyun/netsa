@@ -106,6 +106,8 @@ func (s *Server) metrics(w http.ResponseWriter, r *http.Request) {
 		p.metric("netsa_exposure_enabled", "gauge", "是否启用对外发布服务清单（DNAT 映射）", b2f(s.Exposure.Enforcing()))
 		p.metric("netsa_exposure_mappings", "gauge", "对外发布服务映射条数", float64(s.Exposure.Count()))
 		p.metric("netsa_exposure_muted_total", "counter", "因端口未对外发布而降级为仅打标签的探测数", float64(s.Exposure.Muted()))
+		p.metric("netsa_exposure_unreached_total", "counter", "防火墙放行但会话证据表明未到达服务、降级为仅打标签的探测数", float64(s.Exposure.Unreached()))
+		p.metric("netsa_exposure_learned", "gauge", "根据会话证据自动识别的对外服务数", float64(s.Exposure.LearnedCount()))
 	}
 
 	// 等级裁决：规则声明与最终判定不一致的次数（按 原等级→最终等级 统计）。

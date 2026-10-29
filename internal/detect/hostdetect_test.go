@@ -2,6 +2,8 @@ package detect
 
 import (
 	"fmt"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -196,5 +198,86 @@ func BenchmarkAuthFail(b *testing.B) {
 	for i := 0; i < b.N; i++ {
 		e.Inspect(ev)
 		bh.Observe(ev)
+	}
+}
+
+// 认证日志的「暴力破解成功」：未达到暴力破解阈值（用户自己输错几次）、或成功登录的不是被尝试的账号（出口 NAT 后多人共用地址）都不告警。
+func TestAuthBruteOKNeedsEvidence(t *testing.T) {
+	now := time.Now()
+	ev := func(i int, user, act string) *model.Event {
+		return &model.Event{Kind: model.KindAuth, SrcIP: "198.51.100.8", User: user, Service: "VPN", Action: act, Time: now.Add(time.Duration(i) * time.Second)}
+	}
+	// 用户自己输错 6 次后登录成功
+	b := NewBehavior(config.Default().Detect.Thresholds)
+	for i := 0; i < 6; i++ {
+		b.Observe(ev(i, "zhangsan", model.ActionDeny))
+	}
+	if h := b.Observe(ev(7, "zhangsan", model.ActionAllow)); len(h) != 0 {
+		t.Fatalf("未达到暴力破解阈值不应判定为破解成功: %+v", h)
+	}
+	// 同一出口地址：对 root 暴力破解，另一位员工正常登录
+	b = NewBehavior(config.Default().Detect.Thresholds)
+	for i := 0; i < 12; i++ {
+		b.Observe(ev(i, "root", model.ActionDeny))
+	}
+	if h := b.Observe(ev(13, "lisi", model.ActionAllow)); len(h) != 0 {
+		t.Fatalf("成功登录的账号未被尝试过，不应判定为破解成功: %+v", h)
+	}
+	if h := b.Observe(ev(14, "root", model.ActionAllow)); len(h) != 1 || h[0].RuleID != "auth-brute-ok" {
+		t.Fatalf("被暴力破解的账号登录成功应告警: %+v", h)
+	}
+}
+
+// 共享出口（办公 NAT、跳板机）：同一来源有多个账号正常登录，多人输错密码凑够阈值时降为中危并注明原因。
+func TestAuthSharedEgress(t *testing.T) {
+	b := NewBehavior(config.Default().Detect.Thresholds)
+	now := time.Now()
+	ev := func(i int, user, act string) *model.Event {
+		return &model.Event{Kind: model.KindAuth, SrcIP: "198.51.100.88", User: user, Service: "VPN", Action: act, Time: now.Add(time.Duration(i) * time.Second)}
+	}
+	for i, u := range []string{"wang", "zhao", "sun"} {
+		b.Observe(ev(i, u, model.ActionAllow))
+	}
+	var got []model.Hit
+	for i := 0; i < 12; i++ {
+		got = append(got, b.Observe(ev(10+i, "user"+strconv.Itoa(i%6), model.ActionDeny))...)
+	}
+	if len(got) == 0 {
+		t.Fatal("仍应记录暴力破解 / 密码喷洒")
+	}
+	for _, h := range got {
+		if h.Severity != model.SevMedium || !strings.Contains(h.Evidence, "办公出口") {
+			t.Fatalf("共享出口应降为中危并注明: %+v", h)
+		}
+	}
+}
+
+// 服务故障：大量来源同时收到 5xx 时，单个来源的 5xx 不判定为攻击。
+func TestServer5xxOutage(t *testing.T) {
+	th := config.Default().Detect.Thresholds
+	now := time.Now()
+	count := func(outage bool) int {
+		b := NewBehavior(th)
+		n := 0
+		if outage {
+			for i := 0; i < 12; i++ {
+				b.Observe(&model.Event{Kind: model.KindWeb, SrcIP: "203.0.113." + strconv.Itoa(i+1), Host: "shop.example.com", Method: "GET", URI: "/", Status: 502, Time: now})
+			}
+		}
+		for i := 0; i < th.Server5xx+5; i++ {
+			for _, h := range b.Observe(&model.Event{Kind: model.KindWeb, SrcIP: "198.51.100.99", Host: "shop.example.com", Method: "GET",
+				URI: "/item?id=" + strconv.Itoa(i), Status: 500, Time: now}) {
+				if h.RuleID == "bhv-5xx" {
+					n++
+				}
+			}
+		}
+		return n
+	}
+	if count(false) != 1 {
+		t.Fatal("单个来源引发大量 5xx 应告警")
+	}
+	if count(true) != 0 {
+		t.Fatal("服务故障期间不应判定为攻击")
 	}
 }
