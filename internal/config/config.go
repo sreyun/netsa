@@ -35,6 +35,8 @@ type Config struct {
 	RawLog         RawLogConfig   `yaml:"rawlog"`
 	Audit          AuditConfig    `yaml:"audit"`
 	Report         ReportConfig   `yaml:"report"`
+	Learn          LearnConfig    `yaml:"learn"`
+	AI             AIConfig       `yaml:"ai"`
 	Storage        StorageConfig  `yaml:"storage"`
 }
 
@@ -454,6 +456,12 @@ func (c *Config) Validate() error {
 	case "", "auto", "off":
 	default:
 		return fmt.Errorf("time_correction 只能为 auto 或 off: %q", c.TimeCorrection)
+	}
+	if err := c.Learn.validate(); err != nil {
+		return err
+	}
+	if err := c.AI.validate(); err != nil {
+		return err
 	}
 	for i, cl := range c.Geo.Custom {
 		if _, err := netip.ParsePrefix(strings.TrimSpace(cl.CIDR)); err != nil {

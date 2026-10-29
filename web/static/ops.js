@@ -208,8 +208,33 @@ async function openIncident(id) {
   $$('#incSetStatus option[value="open"]').forEach((o) => { o.hidden = d.status === 'open' || d.status === 'investigating'; });
   $('#incNote').value = '';
   setMsg('#incMsg', '');
+  $('#incAI').hidden = !(meta.ai && meta.ai.enabled && canOperate());
+  $('#incAIBox').hidden = true;
   openModal('incModal');
 }
+// AI 研判：结论写入处置记录并在对话框中展示（模型输出按纯文本展示）
+const AI_VERDICT = { attack: ['真实攻击', 'lv-high'], false_positive: ['疑似误报', 'nt-on'], uncertain: ['无法判断', 'muted'] };
+$('#incAI').addEventListener('click', () => {
+  const d = inc.cur;
+  if (!d) return;
+  ntBusy($('#incAI'), async () => {
+    setMsg('#incMsg', '');
+    try {
+      const r = await api('/api/incidents/' + d.id + '/ai', 'POST', {});
+      const v = r.verdict;
+      const [label, cls] = AI_VERDICT[v.verdict] || AI_VERDICT.uncertain;
+      await openIncident(d.id);
+      const list = (xs) => (xs || []).map((x) => `<li>${esc(x)}</li>`).join('');
+      $('#incAIBox').innerHTML = `<div><b>AI 研判</b> <span class="muted">${esc(v.model)} · 仅供参考，已写入处置记录</span></div>
+        <div class="ai-verdict"><b class="${cls}">${esc(label)}</b> 置信度 ${num(v.confidence)}% · ${esc(v.summary)}</div>
+        ${(v.reasons || []).length ? `<div class="muted">依据</div><ul>${list(v.reasons)}</ul>` : ''}
+        ${(v.actions || []).length ? `<div class="muted">处置建议</div><ul>${list(v.actions)}</ul>` : ''}
+        ${v.false_positive_hint ? `<div class="muted">抑制建议：${esc(v.false_positive_hint)}</div>` : ''}
+        ${v.raw ? `<pre class="cmd">${esc(v.raw)}</pre>` : ''}`;
+      $('#incAIBox').hidden = false;
+    } catch (err) { setMsg('#incMsg', 'AI 研判失败：' + err.message); }
+  });
+});
 $('#incBody').addEventListener('click', (e) => {
   const b = e.target.closest('button[data-ia]');
   if (!b || !inc.cur) return;
@@ -912,8 +937,71 @@ $('#auVerify').addEventListener('click', () => ntBusy($('#auVerify'), async () =
   } catch (err) { $('#auVerifyMsg').textContent = err.message; }
 }));
 
+// ---------------- 自学习 ----------------
+const LN_CHANGE = { calibrate: '自动下调', restore: '恢复', pin: '锁定', unpin: '解锁', apply: '采纳建议', dismiss: '忽略建议' };
+const LN_ANOM = { new_net: '新地址登录', odd_hour: '非常用时段', login_fail: '登录失败暴增', bulk_export: '批量导出', sensitive: '高危变更' };
+async function loadLearn() {
+  const { enabled, report: r } = await api('/api/learn');
+  const lastComp = (r.compliance || []).slice(-1)[0];
+  $('#lnKpis').innerHTML = [
+    ['研判样本', num(r.cases), `确认攻击 ${num(r.tp)} · 误报 ${num(r.fp)}`],
+    ['自动校准', num(r.calibrated), r.options.calibrate ? `准确率 ≤ ${Math.round(r.options.max_precision * 100)}% 且样本 ≥ ${r.options.min_verdicts} 时下调一级` : '已关闭'],
+    ['待确认建议', num(r.suggestions.length), '采纳后创建误报抑制'],
+    ['平台安全异常', num(r.anomalies.length), r.options.sentinel ? '最近 100 条' : '已关闭'],
+    ['合规符合率', lastComp ? Math.round(lastComp.rate * 100) + '%' : '-', lastComp ? `不符合 ${num(lastComp.fail)} 项 · ${esc(fmtShort(lastComp.time))}` : (r.options.compliance ? '启动后约 2 分钟首次自检' : '已关闭')],
+  ].map(([l, v, s]) => `<div class="kpi"><span class="label">${l}</span><span class="value">${v}</span><span class="sub">${s}</span></div>`).join('');
+  const incLinks = (ids) => (ids || []).slice(0, 6).map((id) => `<a href="#tab=incidents&incident=${id}">#${id}</a>`).join(' ');
+  $('#lnSugs').innerHTML = r.suggestions.length
+    ? `<table class="table"><thead><tr><th>条件</th><th>误报</th><th>相关事件</th><th></th></tr></thead><tbody>${r.suggestions.map((s) => `<tr>
+        <td>${s.kind === 'source' ? `来源 <span class="mono">${esc(s.ip)}</span> <span class="muted">（疑似授权扫描 / 内部测试）</span>` : `规则 <span class="mono">${esc(s.rule_id)}</span><div class="mono muted">${esc(s.target)}</div>`}</td>
+        <td>${num(s.fp)} 次</td><td class="nowrap">${incLinks(s.incidents)}</td>
+        <td class="nowrap">${canOperate() ? `<button type="button" class="btn" data-ln="apply" data-id="${esc(s.id)}">采纳</button> <button type="button" class="btn" data-ln="dismiss" data-id="${esc(s.id)}">忽略</button>` : ''}</td></tr>`).join('')}</tbody></table>`
+    : '<div class="muted">暂无建议。分析员把事件处置为“误报”后，同一规则在同一目标上反复误报、或同一来源多次被整体判为误报时，会在这里提示。</div>';
+  $('#lnAnoms').innerHTML = r.anomalies.length
+    ? `<table class="table"><tbody>${r.anomalies.map((a) => `<tr><td class="nowrap muted">${esc(fmtShort(a.time))}</td><td class="nowrap">${badge(a.severity)} ${esc(LN_ANOM[a.kind] || a.kind)}</td>
+        <td><b>${esc(a.title)}</b><div class="muted">${esc(a.detail)}</div></td></tr>`).join('')}</tbody></table>`
+    : `<div class="muted">${r.options.sentinel ? '未发现异常。账号登录满 5 次后开始按“新地址”判断，满 20 次后按“非常用时段”判断。' : '已关闭（learn.sentinel: false）'}</div>`;
+  const pct = (s) => (s.precision < 0 ? '-' : Math.round(s.precision * 100) + '%');
+  $('#lnRules').innerHTML = `<thead><tr><th>规则</th><th>确认攻击</th><th>误报</th><th>准确率</th><th>状态</th><th></th></tr></thead><tbody>${r.rules.map((s) => `<tr>
+      <td class="mono">${esc(s.rule)}</td><td>${num(s.tp)}</td><td>${num(s.fp)}</td><td>${pct(s)}</td>
+      <td>${s.pinned ? '<span class="chip">已锁定</span>' : s.calibrated ? '<span class="lv-medium">已自动下调一级</span>' : '<span class="muted">正常</span>'}</td>
+      <td>${isAdmin() ? `<button type="button" class="btn" data-ln="${s.pinned ? 'unpin' : 'pin'}" data-rule="${esc(s.rule)}">${s.pinned ? '解锁' : '锁定'}</button>` : ''}</td></tr>`).join('') || empty(6, '暂无研判样本：在“事件处置”中把事件处置为已处置或误报后开始学习')}</tbody>`;
+  const pts = (r.compliance || []).slice(-168);
+  if (pts.length > 1) {
+    const w = 320, h = 60;
+    const xy = pts.map((p, i) => `${Math.round((i / (pts.length - 1)) * w)},${Math.round(h - p.rate * h)}`).join(' ');
+    $('#lnComp').innerHTML = `<svg viewBox="0 0 ${w} ${h}" class="ln-spark" preserveAspectRatio="none" role="img" aria-label="合规符合率趋势"><polyline points="${xy}" fill="none" stroke="currentColor" stroke-width="2"/></svg>
+      <div class="muted">近 ${pts.length} 次自检：最低 ${Math.round(Math.min(...pts.map((p) => p.rate)) * 100)}%，最新 ${Math.round(pts[pts.length - 1].rate * 100)}%</div>`;
+  } else {
+    $('#lnComp').innerHTML = `<div class="muted">${r.options.compliance ? (pts.length ? `已完成首次自检（符合率 ${Math.round(pts[0].rate * 100)}%），之后每小时一次` : '启动后约 2 分钟执行首次自检') : '已关闭（learn.compliance: false）'}</div>`;
+  }
+  const a = meta.ai || {};
+  $('#lnAI').innerHTML = a.enabled
+    ? `<div class="kv"><div class="k">模型</div><div class="mono">${esc(a.model)} <span class="muted">${esc(a.endpoint)}</span></div>
+        <div class="k">密钥</div><div>${a.key_set ? '已从环境变量读取' : '<span class="muted">未设置（按无密钥方式调用，适用于内网模型）</span>'}</div>
+        <div class="k">脱敏</div><div>${a.desensitize ? '<span class="nt-on">发送前脱敏</span>（内网地址、口令 / 令牌、手机号、证件号、邮箱）' : '<span class="lv-medium">未脱敏</span>（只适用于完全在内网部署的模型）'}</div>
+        <div class="k">自动研判</div><div>${a.auto_triage ? '新出现的高危及以上事件自动研判' : '关闭（在事件详情中手动研判）'}</div>
+        <div class="k">调用</div><div>近 1 小时 ${num(a.used_hour)} / ${num(a.max_per_hour)} 次 · 累计 ${num(a.total)} 次${a.failed ? ` · <span class="lv-high">失败 ${num(a.failed)} 次</span>` : ''}${a.last_error ? `<div class="arc-err">${esc(a.last_error)}</div>` : ''}</div></div>`
+    : '<div class="muted">未启用。配置 ai.enabled、ai.base_url、ai.model，并通过环境变量 NETSA_AI_API_KEY 提供密钥后，可在事件详情中使用“AI 研判”。支持 DeepSeek、通义千问、智谱、Kimi 等 OpenAI 兼容接口，以及内网部署的 vLLM / Ollama。</div>';
+  $('#lnLog').innerHTML = `<thead><tr><th>时间</th><th>类型</th><th>操作人</th><th>说明</th></tr></thead><tbody>${r.changes.map((c) => `<tr><td class="nowrap muted">${esc(fmtShort(c.time))}</td>
+      <td class="nowrap">${esc(LN_CHANGE[c.kind] || c.kind)}</td><td class="nowrap">${esc(c.user)}</td><td>${esc(c.detail)}</td></tr>`).join('') || empty(4, '暂无记录')}</tbody>`;
+}
+$('#tab-learn').addEventListener('click', (e) => {
+  const b = e.target.closest('button[data-ln]');
+  if (!b) return;
+  const act = b.dataset.ln;
+  if (act === 'apply' && !confirm('采纳后将创建一条误报抑制规则，之后符合条件的命中不再告警。确定采纳？')) return;
+  if (act === 'pin' && !confirm('锁定后该规则不参与自动校准（已下调的立即恢复原等级）。确定锁定？')) return;
+  const url = b.dataset.id ? `/api/learn/suggestions/${encodeURIComponent(b.dataset.id)}/${act}` : `/api/learn/rules/${encodeURIComponent(b.dataset.rule)}/${act}`;
+  ntBusy(b, async () => {
+    try { await api(url, 'POST', {}); } catch (err) { alert(err.message); }
+    loadLearn().catch(console.error);
+  });
+});
+
 // ---------------- 调度 ----------------
 Object.assign(loaders, {
+  learn: () => loadLearn().catch(console.error),
   incidents: () => Promise.all([loadIncidents(), loadSuppressions()]).catch(console.error),
   assets: () => loadAssets().catch(console.error),
   reports: () => loadReports().catch(console.error),

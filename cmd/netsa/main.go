@@ -23,6 +23,7 @@ import (
 	"time"
 	_ "time/tzdata" // 内嵌时区数据，精简容器镜像中也能使用 timezone 配置
 
+	"netsa/internal/ai"
 	"netsa/internal/alert"
 	"netsa/internal/api"
 	"netsa/internal/archive"
@@ -36,6 +37,7 @@ import (
 	"netsa/internal/geo"
 	"netsa/internal/ingest"
 	"netsa/internal/intel"
+	"netsa/internal/learn"
 	"netsa/internal/model"
 	"netsa/internal/parser"
 	"netsa/internal/pipeline"
@@ -47,7 +49,7 @@ import (
 
 // version 是构建版本号。默认值用于本地构建；镜像构建通过
 // -ldflags "-X main.version=<tag>" 注入，`netsa version` 与 /api/meta 都会显示注入后的值。
-var version = "1.6.6"
+var version = "1.6.7"
 
 func usage() {
 	fmt.Fprintf(os.Stderr, `netsa %s —— 网络安全态势感知与攻击面分析系统
@@ -113,6 +115,7 @@ type app struct {
 	raw      *rawlog.Store     // 原始日志留存
 	assets   *assets.Manager   // 资产与漏洞
 	exposure *exposure.Manager // 对外发布服务清单（DNAT 映射）
+	learn    *learn.Learner    // 自学习（研判反馈、平台行为基线、合规自检）
 	api      *api.Server
 }
 
@@ -198,6 +201,10 @@ func build(cfg *config.Config) (*app, error) {
 		return nil, err
 	}
 	a.store.PortPublished = a.exposure.Published
+	if a.learn, err = learn.Load(learn.Options{Path: dataFile(cfg, "", "learn.json"), Calibrate: cfg.Learn.CalibrateOn(),
+		MinVerdicts: cfg.Learn.MinVerdicts, MaxPrecision: cfg.Learn.MaxPrecision, Sentinel: cfg.Learn.SentinelOn(), Compliance: cfg.Learn.ComplianceOn()}); err != nil {
+		return nil, err
+	}
 	if a.exposure.Enforcing() {
 		log.Printf("[exposure] 对外发布服务清单已启用：%d 条映射、%d 个兜底端口；未发布端口上的端口探测与暴力破解只打标签，不产生告警",
 			a.exposure.Count(), len(cfg.Exposure.AllowedPorts))
@@ -207,7 +214,7 @@ func build(cfg *config.Config) (*app, error) {
 		Engine: a.engine, Behavior: detect.NewBehavior(cfg.Detect.Thresholds), Store: a.store, Geo: a.geo,
 		RealIP: pipeline.NewRealIP(cfg.RealIP), Notifier: a.notifier,
 		EnrichLevel: model.ParseSeverity(cfg.Geo.EnrichLevel), OnAlert: a.onAlert, Suppress: a.suppress, Assets: a.assets,
-		Exposure: a.exposure,
+		Exposure: a.exposure, Learn: a.learn,
 	}
 	a.pipe.SetWhitelist(cfg.Detect.Whitelist)
 	a.geo.OnUpdate = a.pipe.OnGeoUpdate
@@ -250,7 +257,13 @@ func (a *app) server(listen string) (*http.Server, error) {
 	s := &api.Server{
 		Cfg: a.cfg, Store: a.store, Ingest: a.ingest, Pipeline: a.pipe, Geo: a.geo, Engine: a.engine,
 		RDAP: a.rdap, Static: staticFS(a.cfg), Version: version, Broker: a.broker, Notifier: a.notifier,
-		Archive: a.archive, Suppress: a.suppress, RawLog: a.raw, Assets: a.assets, Exposure: a.exposure,
+		Archive: a.archive, Suppress: a.suppress, RawLog: a.raw, Assets: a.assets, Exposure: a.exposure, Learn: a.learn, AI: ai.New(a.cfg.AI, os.Getenv),
+	}
+	if st := s.AI.Status(); st.Enabled {
+		log.Printf("[ai] 已接入外部模型 %s（%s）：发送前脱敏 %v，自动研判高危事件 %v，每小时最多 %d 次；模型结论仅供参考，不参与自学习", st.Model, st.Endpoint, st.Desensitize, st.AutoTriage, st.MaxPerHour)
+		if !st.KeySet {
+			log.Printf("[ai] 提示：未设置环境变量 %s，按无密钥方式调用（适用于内网部署的模型）", a.cfg.AI.KeyEnv())
+		}
 	}
 	a.api = s
 	dir := dataFile(a.cfg, a.cfg.Audit.Dir, "audit")
@@ -262,9 +275,13 @@ func (a *app) server(listen string) (*http.Server, error) {
 		return nil, err
 	}
 	s.Trail = trail
+	// 自学习：进化日志写入审计链
+	a.learn.OnChange = func(c learn.Change) {
+		trail.AppendAudit(auth.Record{Time: c.Time, User: c.User, Action: "自学习", Detail: c.Detail, OK: true})
+	}
 	if a.cfg.Server.AuthEnabled() {
 		m, initial, err := auth.New(auth.Options{
-			Audit:      trail,
+			Audit:      trail, // 自学习的审计包装在 api.Server.Handler 中安装
 			ConfigUser: a.cfg.Server.Username, ConfigPassword: a.cfg.Server.Password, File: usersFile(a.cfg),
 			TTL: a.cfg.Server.SessionTTL, InitialAdmin: os.Getenv("NETSA_ADMIN_PASSWORD"), Require2FA: a.cfg.Server.Require2FA,
 		})
@@ -432,6 +449,9 @@ func cmdServe(args []string) error {
 			a.archive.Close(10 * time.Second) // 写完归档队列中剩余的告警
 			a.raw.Close(10 * time.Second)
 			a.suppress.Flush()
+			if err := a.learn.Save(); err != nil {
+				log.Printf("[learn] 保存学习状态失败: %v", err)
+			}
 			a.ingest.Senders.Flush()
 			if err := a.store.Save(cfg.Storage.Snapshot); err != nil {
 				log.Printf("[store] 保存快照失败: %v", err)

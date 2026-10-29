@@ -139,6 +139,8 @@ func (s *Server) RunBackground(ctx context.Context) {
 			s.pushSenderNotices()
 			s.pushSourceNotices()
 			s.scheduleReports(now)
+			s.learnTick(now)
+			s.aiTick(ctx)
 			if time.Since(lastScore) >= time.Hour-time.Minute {
 				lastScore = time.Now()
 				s.Store.RecordScore(s.Store.Assess(s.visibility(nil)))

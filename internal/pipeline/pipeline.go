@@ -17,6 +17,7 @@ import (
 	"netsa/internal/exposure"
 	"netsa/internal/geo"
 	"netsa/internal/intel"
+	"netsa/internal/learn"
 	"netsa/internal/model"
 	"netsa/internal/rawlog"
 	"netsa/internal/risk"
@@ -45,6 +46,7 @@ type Pipeline struct {
 	Raw         *rawlog.Store     // 原始日志留存（可为空）
 	Assets      *assets.Manager   // 资产与漏洞（可为空）
 	Exposure    *exposure.Manager // 对外发布服务清单（DNAT 映射，可为空）
+	Learn       *learn.Learner    // 自学习：按研判准确率校准规则等级（可为空）
 
 	whitelist []netip.Prefix
 	processed atomic.Int64
@@ -195,6 +197,7 @@ func (p *Pipeline) aggregate(items []item) {
 		}
 		hits[i] = p.gateExposure(it.ev, hits[i], reach, why)
 		hits[i] = p.Suppress.Filter(it.ev, hits[i])
+		hits[i] = p.Learn.Calibrate(hits[i]) // 资产漏洞关联之前：有漏洞证据的升级不受校准影响
 		if p.Assets != nil && len(hits[i]) > 0 {
 			hits[i] = p.enrichAssets(it.ev, hits[i])
 		}

@@ -52,15 +52,15 @@ docker compose logs -f netsa
 
 | 触发 | 行为 |
 |---|---|
-| 创建 tag `v1.6.6` | 构建 + 启动自检 + 推送：`1.6.6`、`1.6`、`1`、`latest`、`sha-xxxxxxx` |
-| 创建预发布 tag `v1.6.6-rc1` | 只推 `1.6.6-rc1`、`sha-xxxxxxx`，不动 `latest` / `1.6` / `1` |
+| 创建 tag `v1.6.7` | 构建 + 启动自检 + 推送：`1.6.7`、`1.6`、`1`、`latest`、`sha-xxxxxxx` |
+| 创建预发布 tag `v1.6.7-rc1` | 只推 `1.6.7-rc1`、`sha-xxxxxxx`，不动 `latest` / `1.6` / `1` |
 | 推送 `master` / Pull Request | 不构建镜像（质量门禁由 `ci` 工作流负责） |
 | 手动触发（workflow_dispatch） | 填写要发布的 tag 与是否更新 `latest`；按该 tag 检出源码，版本与内容严格对应 |
 
 发布流程：
 
 ```bash
-git tag v1.6.6 && git push origin v1.6.6
+git tag v1.6.7 && git push origin v1.6.7
 ```
 
 需要在仓库 **Settings → Secrets and variables → Actions** 配置两个 Secret：
@@ -86,9 +86,9 @@ printf '%s' "$AK" | openssl dgst -binary -sha256 -hmac "$SK" | od -An -vtx1 | tr
 | `GOPROXY` | `https://goproxy.cn,direct` | 构建时的 Go 模块代理 |
 
 ```bash
-docker pull swr.cn-east-3.myhuaweicloud.com/sreyun/netsa:1.6.6
+docker pull swr.cn-east-3.myhuaweicloud.com/sreyun/netsa:1.6.7
 docker run -d --name netsa -p 8080:8080 -p 5514:5514/udp -v netsa-state:/app/state \
-  swr.cn-east-3.myhuaweicloud.com/sreyun/netsa:1.6.6
+  swr.cn-east-3.myhuaweicloud.com/sreyun/netsa:1.6.7
 ```
 
 - **版本随 tag 注入**：构建时通过 `-ldflags "-X main.version=<tag>"` 写入二进制，`netsa version` 与 `/api/meta` 显示的就是发布版本；本地 `docker compose build` 不传该参数，仍使用源码中的默认版本。
@@ -411,6 +411,26 @@ IP 详情页的“同源关联分析”在全部攻击源中查找与当前 IP �
 | 接口遍历 / 批量爬取 | 兜底页、统一的“无权限”提示返回 200 | 不同 ID 的响应大小是否各不相同 | 完全相同时不告警 |
 | 大量 5xx（异常请求引发服务端错误） | 后端故障时每个访问多的用户都被告警 | 同一站点是否有 10 个以上来源同时收到 5xx | 视为服务故障，不告警 |
 | 资产存在被利用的 CVE | 利用请求返回 404 也升为“疑似成功 / 严重” | 响应是否表明失败 | 失败的请求不改判为成功 |
+
+## 自学习与外部模型
+
+“系统配置 → 自学习”页面集中展示以下能力，配置项见 `learn:` 与 `ai:`。
+
+- **研判反馈学习**：只从分析员的处置结论中学习，已处置计为确认攻击，误报计为误报。
+  - 研判样本不少于 5 个、且准确率不高于 20% 的规则，等级自动下调一级。只降不升，不越过分类底线；管理员可锁定规则，立即恢复原等级。
+  - 同一规则在同一目标上多次误报，或同一来源多次被整体判为误报（疑似授权扫描），会生成抑制建议，由人工采纳。
+  - 每次自动调整都写入进化日志和审计链。
+- **平台行为基线**：学习每个账号的常用登录网段与时段，以下情况会推送告警并写入审计链：
+  - 从新地址登录；在非常用时段登录；
+  - 登录失败暴增；1 小时内导出 5 次以上；
+  - 关闭双因素认证、新增或提升管理员、创建管理员令牌、添加范围过宽的误报抑制、关闭 syslog 发送端白名单。
+- **持续合规自检**：每小时自动执行一次等保检查，任何一项结果下降都会告警，并保留 30 天的符合率趋势。每天凌晨自动校验审计链完整性。
+- **外部大模型（可选，默认关闭）**：使用 OpenAI 兼容接口，支持 DeepSeek、通义千问、智谱、Kimi，以及内网部署的 vLLM / Ollama。
+  - 在事件详情中点击“AI 研判”触发；`auto_triage` 开启后，新出现的高危及以上事件会自动研判。
+  - 密钥只从环境变量读取。连接公网的模型服务必须使用 HTTPS。
+  - 发送前默认脱敏：内网地址、口令和令牌、手机号、证件号、邮箱。
+  - 每小时有调用次数上限，每次调用都写入审计链。
+  - 结论写入事件的处置记录，仅供参考，不参与自学习，也不会自动处置。
 
 ## 威胁评分模型
 

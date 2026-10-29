@@ -306,3 +306,25 @@ report:
     password: ""        # 也可通过环境变量 NETSA_SMTP_PASSWORD 提供
     from: ""            # 例如 "netsa <soc@example.com>"
     tls: ""             # ssl / starttls / none；为空时 465 端口为 ssl，其余为 starttls
+
+# 自学习（均默认开启）：只从分析员的处置结论与平台自身的审计记录中学习。
+# 自动调整只降不升、每次最多一级、不越过攻击分类的等级底线，可在“系统配置 → 自学习”中锁定恢复；
+# 会隐藏告警的误报抑制只生成建议，由人确认采纳。学习状态保存在 storage.snapshot 所在目录的 learn.json。
+learn:
+  calibrate: true       # 研判样本 ≥ min_verdicts 且准确率 ≤ max_precision 的规则自动下调一级
+  min_verdicts: 5
+  max_precision: 0.2
+  sentinel: true        # 学习平台账号的常用登录网段与时段：异常登录、登录失败暴增、批量导出、高危配置变更时告警
+  compliance: true      # 每小时自动执行等保合规自检，测评项下降时告警；每天凌晨校验审计链
+
+# 外部大模型（可选，默认关闭）：OpenAI 兼容的 /chat/completions 接口，例如 DeepSeek、通义千问、智谱、Kimi，
+# 或内网部署的 vLLM / Ollama / Xinference。用于事件的 AI 研判，结论写入处置记录、仅供参考，不参与自学习、不自动处置。
+ai:
+  enabled: false
+  base_url: ""                  # 例如 https://api.deepseek.com/v1、http://10.0.0.20:8000/v1（公网地址必须使用 https）
+  model: ""                     # 例如 deepseek-chat、qwen-max、glm-4
+  api_key_env: NETSA_AI_API_KEY # 密钥只从环境变量读取，不写入配置文件；内网模型不需要密钥时可不设置
+  timeout: 90s
+  max_per_hour: 30              # 每小时最多调用次数
+  desensitize: true             # 发送前脱敏：内网地址、口令 / 令牌类参数与认证头、手机号、身份证号、邮箱；攻击来源公网地址保留
+  auto_triage: false            # 新出现的高危及以上事件自动研判

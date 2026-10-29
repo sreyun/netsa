@@ -15,8 +15,10 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
+	"netsa/internal/ai"
 	"netsa/internal/alert"
 	"netsa/internal/archive"
 	"netsa/internal/assets"
@@ -27,6 +29,7 @@ import (
 	"netsa/internal/exposure"
 	"netsa/internal/geo"
 	"netsa/internal/ingest"
+	"netsa/internal/learn"
 	"netsa/internal/model"
 	"netsa/internal/pipeline"
 	"netsa/internal/rawlog"
@@ -71,12 +74,18 @@ type Server struct {
 	RawLog   *rawlog.Store     // 原始日志留存，为 nil 表示未启用
 	Assets   *assets.Manager   // 资产与漏洞
 	Exposure *exposure.Manager // 对外发布服务清单（DNAT 映射），为 nil 表示未启用
+	Learn    *learn.Learner    // 自学习（研判反馈、平台行为基线、合规自检），可为空
+	AI       *ai.Client        // 可选的外部大模型（研判参考），未启用时为 nil
 	Trail    *audit.Trail      // 防篡改审计链
 
 	started    time.Time
 	rdapSem    chan struct{}
 	cache      *respCache
-	hashSem    chan struct{} // 限制同时进行的密码哈希计算
+	hashSem    chan struct{}   // 限制同时进行的密码哈希计算
+	lastComp   time.Time       // 上次合规自检（只在后台任务中访问）
+	lastVerify string          // 上次审计链自检的日期
+	aiBusy     atomic.Bool     // 自动研判进行中
+	aiDone     map[uint64]bool // 已自动研判的事件（只在后台任务中访问）
 	archHealth archiveHealth
 	sched      reportSchedule
 }
@@ -87,7 +96,12 @@ func (s *Server) Handler() http.Handler {
 	s.cache = newRespCache()
 	s.hashSem = make(chan struct{}, 4)
 	if s.Auth != nil && s.Trail != nil {
-		s.Auth.SetAuditSink(s.Trail)
+		// 审计链外包一层自学习：学习平台账号的行为基线，发现异常登录、批量导出与高危变更时告警
+		var sink auth.AuditSink = s.Trail
+		if s.Learn != nil {
+			sink = &learn.Sink{Next: s.Trail, L: s.Learn, Notify: s.PlatformAnomaly}
+		}
+		s.Auth.SetAuditSink(sink)
 	}
 	if s.Notifier == nil {
 		s.Notifier, _ = alert.New(config.AlertConfig{}, "")
@@ -118,6 +132,9 @@ func (s *Server) Handler() http.Handler {
 		writeJSON(w, map[string]any{"total": total, "hit": hit, "hits": hits})
 	})
 	mux.HandleFunc("GET /api/exposure", s.exposureInfo)
+	mux.HandleFunc("GET /api/learn", s.learnReport)
+	mux.HandleFunc("POST /api/learn/suggestions/{id}/{action}", s.learnSuggestion)
+	mux.HandleFunc("POST /api/learn/rules/{rule}/{action}", s.learnPin)
 	mux.HandleFunc("GET /api/stream", func(w http.ResponseWriter, r *http.Request) { s.Broker.Serve(w, r, s.sessionAlive(r)) })
 	mux.HandleFunc("GET /api/export/blocklist", s.blocklist)
 	mux.HandleFunc("GET /api/report", s.report)
@@ -149,6 +166,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/incidents/{id}", s.incident)
 	mux.HandleFunc("POST /api/incidents/bulk", s.incidentUpdate)
 	mux.HandleFunc("POST /api/incidents/{id}", s.incidentUpdate)
+	mux.HandleFunc("POST /api/incidents/{id}/ai", s.incidentAI)
 	mux.HandleFunc("GET /metrics", s.cache.wrap(5*time.Second, s.metrics))
 	mux.HandleFunc("GET /api/assets", s.assetList)
 	mux.HandleFunc("GET /api/assets/template", s.assetTemplate)
@@ -318,7 +336,7 @@ func (s *Server) meta(w http.ResponseWriter, r *http.Request) {
 		"exposure":   s.Exposure.Enforcing(), "exposure_rules": s.Exposure.Count(), "exposure_muted": s.Exposure.Muted(),
 		"exposure_candidates": s.Exposure.CandidateCount(),
 		"proxies":             s.proxyPeers(),
-		"exposure_reach":      s.Exposure.ReachCheck(), "exposure_unreached": s.Exposure.Unreached(), "exposure_learned": s.Exposure.LearnedCount(), "exposure_policies": topPolicies(s.Exposure.Policies(), 5),
+		"exposure_reach":      s.Exposure.ReachCheck(), "exposure_unreached": s.Exposure.Unreached(), "exposure_learned": s.Exposure.LearnedCount(), "learn": s.Learn != nil, "ai": s.AI.Status(), "exposure_policies": topPolicies(s.Exposure.Policies(), 5),
 		"require_2fa": s.Cfg.Server.Require2FA, "rawlog": s.RawLog != nil, "assets": s.Assets != nil, "audit": s.Trail != nil,
 		"syslog": s.Cfg.Syslog.Enabled, "suppress": s.Suppress != nil, "auth": s.Auth != nil,
 	})
