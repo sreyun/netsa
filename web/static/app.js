@@ -1187,9 +1187,11 @@ async function loadSources() {
         : `<div><span class="lv-medium">待确认</span> <span class="mono">${esc(p.ip)}</span> <span class="muted">（公网地址携带 X-Forwarded-For 且客户端分散，疑似未配置的 CDN / 代理节点：确认后加入 real_ip.trusted_proxies，否则攻击会记在该节点上）</span></div>`).join('')
       : '<span class="muted">未发现未配置的反向代理（内网地址持续携带 X-Forwarded-For 且客户端分散时自动识别并信任）</span>'}</div>
     <div class="k">会话证据研判</div><div>${meta.exposure_reach
-      ? `已开启${meta.exposure_unreached ? ` · 已过滤 ${num(meta.exposure_unreached)} 次未到达服务的端口探测` : ''}${meta.exposure_learned ? ` · <span class="nt-on">自动识别 ${num(meta.exposure_learned)} 个对外服务</span>（清单见 /api/exposure 的 learned，无需手工登记）` : ''} <span class="muted">（防火墙放行但目的安全域仍为外网、或会话结束时目标无应答的探测只打标签；经 DNAT 转发到内网的保持告警）</span>`
+      ? `已开启${meta.exposure_unreached ? ` · 已过滤 ${num(meta.exposure_unreached)} 次未到达服务的端口探测` : ''}${meta.exposure_learned ? ` · <span class="nt-on">自动识别 ${num(meta.exposure_learned)} 个对外服务</span>（清单见 /api/exposure 的 learned，无需手工登记）` : ''} <span class="muted">（防火墙放行但目的安全域仍为外网、打到防火墙自身（local）的探测，或会话结束时目标无应答的探测只打标签；防火墙管理服务对公网放行记为攻击面风险；经 DNAT 转发到内网的保持告警）</span>`
         + (meta.exposure_policies || []).map((p) => `<div class="exp-pol"><span class="lv-medium">可疑放行策略</span> 「${esc(p.policy || '未记录策略名')}」 ${esc(p.src_zone || '?')} → ${esc(p.dst_zone || '?')} 放行 ${num(p.permits)} 次 · ${num(p.sources)} 个外部来源 · 端口 ${esc((p.top_ports || []).join('、'))} · 例 <span class="mono">${esc(p.example)}</span>
-          <div class="muted">外部流量命中该策略被放行，但没有转发到任何内部服务：通常是出站策略的源安全域 / 源地址配置过宽，建议限定为内网安全域</div></div>`).join('')
+          <div class="muted">${String(p.dst_zone).toLowerCase() === 'local'
+            ? '外部流量打到防火墙自身未提供服务的端口也被放行：local 安全域策略过宽，建议只放行必要的管理 / VPN 端口并限制来源'
+            : '外部流量命中该策略被放行，但没有转发到任何内部服务：通常是出站策略的源安全域 / 源地址配置过宽，建议限定为内网安全域'}</div></div>`).join('')
       : '未开启 <span class="muted">（exposure.reach_check: false）</span>'}</div>
     <div class="k">告警归档</div><div>${meta.archive ? 'PostgreSQL（历史告警可在“告警事件 → 历史告警”中查询与导出）' : '未启用 <span class="muted">（配置 archive.dsn 后可长期留存与检索历史告警）</span>'}</div>
     <div class="k">支持的日志格式</div><div>nginx/Apache combined、main(XFF)、vhost、JSON、自定义 log_format；iptables/UFW/firewalld、pfSense/OPNsense、Windows 防火墙、Cisco ASA、FortiGate/华为/H3C/深信服等 key=value、JSON 防火墙日志；DNS（BIND / dnsmasq / CoreDNS / Windows DNS / Zeek / Suricata）；认证（Linux auth.log、Windows 安全事件、FortiGate / Cisco / OpenVPN VPN 登录、SQL Server 登录）</div>

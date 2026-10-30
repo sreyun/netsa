@@ -40,8 +40,41 @@ func externalZone(z string) bool {
 	return false
 }
 
-// Reach 根据防火墙日志记录的会话证据判断一次放行的入站访问是否到达了服务，并给出理由。
-func Reach(ev *model.Event) (Verdict, string) {
+// 防火墙自身常见的管理 / VPN / 路由服务端口。打到防火墙自身（local 安全域）的其他端口上不会有任何服务：
+// 互联网扫描 37215、2323、5432 等端口时被 local 安全域策略放行，探测同样没有到达服务。
+var deviceTCP = map[int]string{22: "SSH", 23: "Telnet", 80: "HTTP 管理", 443: "HTTPS 管理 / SSL VPN", 830: "NETCONF", 4443: "SSL VPN",
+	8080: "HTTP 管理", 8443: "HTTPS 管理", 10443: "SSL VPN", 179: "BGP", 1723: "PPTP VPN"}
+var deviceUDP = map[int]string{161: "SNMP", 500: "IKE", 4500: "IPsec NAT-T", 1701: "L2TP"}
+
+// DeviceService 返回端口在防火墙自身上对应的服务名（不是设备服务端口时返回空）。extra 为配置追加的端口。
+func DeviceService(port int, proto string, extra map[int]bool) string {
+	if extra[port] {
+		return "自定义服务（exposure.device_ports）"
+	}
+	switch strings.ToLower(proto) {
+	case "tcp":
+		return deviceTCP[port]
+	case "udp":
+		return deviceUDP[port]
+	}
+	if s := deviceTCP[port]; s != "" {
+		return s
+	}
+	return deviceUDP[port]
+}
+
+// Reach 根据防火墙日志记录的会话证据判断一次放行的入站访问是否到达了服务，并给出理由（使用内置的设备服务端口）。
+func Reach(ev *model.Event) (Verdict, string) { return reach(ev, nil) }
+
+// Reach 按配置追加的设备服务端口（exposure.device_ports）判断，见包级函数 Reach。
+func (m *Manager) Reach(ev *model.Event) (Verdict, string) {
+	if m == nil {
+		return reach(ev, nil)
+	}
+	return reach(ev, m.devicePorts)
+}
+
+func reach(ev *model.Event, extra map[int]bool) (Verdict, string) {
 	if ev.Reply == model.ReplyNone {
 		return ReachNo, "会话结束时目标没有任何应答（应答方向 0 个包），未建立通信"
 	}
@@ -51,7 +84,10 @@ func Reach(ev *model.Event) (Verdict, string) {
 	src, dst := strings.ToLower(ev.SrcZone), strings.ToLower(ev.DstZone)
 	switch {
 	case dst == "local":
-		return ReachDevice, "目标为防火墙自身（local 安全域）"
+		if svc := DeviceService(ev.DstPort, ev.Proto, extra); svc != "" {
+			return ReachDevice, "目标为防火墙自身的 " + svc + " 服务（local 安全域）"
+		}
+		return ReachNo, "目标为防火墙自身（local 安全域），端口 " + strconv.Itoa(ev.DstPort) + " 不是设备的管理 / VPN 服务端口，探测未到达任何服务"
 	case dst != "" && dst == src:
 		// 外部来源从某安全域进入、又被转发回同一安全域：没有进入任何内部安全域
 		return ReachNo, "源 / 目的安全域相同（" + ev.SrcZone + " → " + ev.DstZone + "），报文未转发到任何内部安全域，该端口没有对外服务"
@@ -284,4 +320,17 @@ func (m *Manager) Policies() []PolicyNote {
 		return out[i].Policy < out[j].Policy
 	})
 	return out
+}
+
+// DeviceRisk 返回防火墙自身服务对公网放行的风险等级：明文管理协议（Telnet、HTTP、SNMP）为高危，
+// 加密管理协议（SSH、HTTPS 管理、NETCONF）为中危；VPN 与路由协议本就面向外部，返回信息级（不作为风险）。
+func DeviceRisk(port int, proto string) (string, model.Severity) {
+	name := DeviceService(port, proto, nil)
+	switch name {
+	case "Telnet", "HTTP 管理", "SNMP":
+		return name, model.SevHigh
+	case "SSH", "HTTPS 管理", "NETCONF":
+		return name, model.SevMedium
+	}
+	return name, model.SevInfo
 }

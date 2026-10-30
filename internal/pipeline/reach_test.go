@@ -59,7 +59,6 @@ func TestReachGateKeepsReachedProbe(t *testing.T) {
 		zone, evidence string
 	}{
 		{"dmz", "已转发至 dmz 安全域"},
-		{"local", "目标为防火墙自身"},
 	} {
 		exp, _ := exposure.Load(config.ExposureConfig{})
 		ev := parseLine(t, strings.Replace(huaweiUnmapped, "destination-zone=untrust", "destination-zone="+c.zone, 1))
@@ -143,5 +142,41 @@ func TestRealIPAutoLearn(t *testing.T) {
 	}
 	if last.SrcIP != "10.0.0.2" {
 		t.Fatal("关闭自动识别后不应改写来源")
+	}
+}
+
+// 打到防火墙自身（local 安全域）：非设备服务端口的探测未到达任何服务，只打标签；管理服务端口的单次探测也只打标签，
+// 但「防火墙管理服务对公网放行」作为暴露面风险记录；自定义的设备服务端口（exposure.device_ports）同样识别。
+func TestReachGateDeviceLocal(t *testing.T) {
+	local := func(port int, src string) *model.Event {
+		line := strings.Replace(huaweiUnmapped, "destination-zone=untrust", "destination-zone=local", 1)
+		line = strings.Replace(line, "destination-port=23,", "destination-port="+strconv.Itoa(port)+",", 1)
+		return parseLine(t, strings.Replace(line, "195.184.76.97", src, 1))
+	}
+	exp, _ := exposure.Load(config.ExposureConfig{DevicePorts: []int{6443}})
+	st, _ := runOnce(t, exp, []*model.Event{local(37215, "79.124.58.130"), local(2323, "205.210.31.58"), local(5432, "85.11.167.7"),
+		local(23, "79.124.58.131"), local(6443, "79.124.58.132")})
+	if got := st.Alerts(store.AlertQuery{Limit: 10}); len(got) != 0 {
+		t.Fatalf("打到防火墙自身的单次探测不应告警: %s", got[0].Evidence)
+	}
+	rep := st.Surface()
+	var titles []string
+	for _, f := range rep.Findings {
+		titles = append(titles, f.Title)
+	}
+	if len(rep.Findings) != 1 || rep.Findings[0].Title != "防火墙管理服务对公网放行: Telnet" || rep.Findings[0].Severity != model.SevHigh {
+		t.Fatalf("应只记录 Telnet 管理服务暴露: %v", titles)
+	}
+	for _, s := range rep.Services {
+		if s.Port == 37215 || s.Port == 2323 || s.Port == 5432 {
+			t.Fatalf("非设备服务端口不应登记为对外服务: %+v", s)
+		}
+	}
+	if p := st.Profile("79.124.58.130"); p == nil || p.Attacks != 0 || len(p.Tags) == 0 {
+		t.Fatalf("应仅打标签: %+v", p)
+	}
+	pol := exp.Policies()
+	if len(pol) != 1 || pol[0].DstZone != "local" || pol[0].Permits != 3 {
+		t.Fatalf("可疑放行策略（local 安全域）: %+v", pol)
 	}
 }

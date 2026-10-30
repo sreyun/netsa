@@ -52,15 +52,15 @@ docker compose logs -f netsa
 
 | 触发 | 行为 |
 |---|---|
-| 创建 tag `v1.6.7` | 构建 + 启动自检 + 推送：`1.6.7`、`1.6`、`1`、`latest`、`sha-xxxxxxx` |
-| 创建预发布 tag `v1.6.7-rc1` | 只推 `1.6.7-rc1`、`sha-xxxxxxx`，不动 `latest` / `1.6` / `1` |
+| 创建 tag `v1.6.8` | 构建 + 启动自检 + 推送：`1.6.8`、`1.6`、`1`、`latest`、`sha-xxxxxxx` |
+| 创建预发布 tag `v1.6.8-rc1` | 只推 `1.6.8-rc1`、`sha-xxxxxxx`，不动 `latest` / `1.6` / `1` |
 | 推送 `master` / Pull Request | 不构建镜像（质量门禁由 `ci` 工作流负责） |
 | 手动触发（workflow_dispatch） | 填写要发布的 tag 与是否更新 `latest`；按该 tag 检出源码，版本与内容严格对应 |
 
 发布流程：
 
 ```bash
-git tag v1.6.7 && git push origin v1.6.7
+git tag v1.6.8 && git push origin v1.6.8
 ```
 
 需要在仓库 **Settings → Secrets and variables → Actions** 配置两个 Secret：
@@ -86,9 +86,9 @@ printf '%s' "$AK" | openssl dgst -binary -sha256 -hmac "$SK" | od -An -vtx1 | tr
 | `GOPROXY` | `https://goproxy.cn,direct` | 构建时的 Go 模块代理 |
 
 ```bash
-docker pull swr.cn-east-3.myhuaweicloud.com/sreyun/netsa:1.6.7
+docker pull swr.cn-east-3.myhuaweicloud.com/sreyun/netsa:1.6.8
 docker run -d --name netsa -p 8080:8080 -p 5514:5514/udp -v netsa-state:/app/state \
-  swr.cn-east-3.myhuaweicloud.com/sreyun/netsa:1.6.7
+  swr.cn-east-3.myhuaweicloud.com/sreyun/netsa:1.6.8
 ```
 
 - **版本随 tag 注入**：构建时通过 `-ldflags "-X main.version=<tag>"` 写入二进制，`netsa version` 与 `/api/meta` 显示的就是发布版本；本地 `docker compose build` 不传该参数，仍使用源码中的默认版本。
@@ -270,7 +270,8 @@ exposure:
 | 源 / 目的安全域相同或目的为外网域（华为 `source-zone=untrust, destination-zone=untrust`） | 报文没有转发到任何内部安全域 | 端口探测只打标签，不告警 |
 | 会话结束时目标无应答（华为会话日志 `RcvPkts=0`、FortiGate `rcvdpkt=0`、Palo Alto end 日志收包数为 0） | 没有建立通信 | 只打标签，不告警 |
 | DNAT 后为内网地址（FortiGate `trandisp=dnat tranip`、华为 `DestinationNatIP`、Palo Alto NAT 目的地址等），或转发到内部安全域（`destination-zone=dmz`） | 确实到达了内部服务 | 保持告警并注明证据，不再按手工清单过滤；DNAT 后地址直接用于关联资产台账 |
-| 目的安全域为 `local` | 打到防火墙自身 | 保持告警，提示确认设备管理服务未对公网开放 |
+| 目的安全域为 `local`，端口不是设备服务（如 37215、2323、5432） | 打到防火墙自身未提供服务的端口 | 只打标签，不告警；按策略汇总为“可疑放行策略”（local 安全域策略过宽） |
+| 目的安全域为 `local`，端口是设备的管理 / VPN 服务（SSH、Telnet、HTTP(S)、SNMP、NETCONF、IKE、L2TP、SSL VPN；可用 `exposure.device_ports` 追加） | 打到防火墙自身的服务 | 单次探测只打标签；管理服务对公网放行记为攻击面风险“防火墙管理服务对公网放行”（Telnet / HTTP / SNMP 为高危，SSH / HTTPS / NETCONF 为中危，VPN 不计）；针对该端口的暴力破解照常告警 |
 | 日志没有上述字段 | 无法判断 | 按 `exposure.enabled` / `services` 判断 |
 
 - **可疑放行策略**：被放行却没到达任何服务的外部流量会按“策略 + 安全域”汇总，显示在 **数据源 → 溯源与检测能力** 和 `GET /api/exposure` 的 `policies` 中。例如外部探测命中出站策略「允许本地上外网」（untrust → untrust），通常是该策略的源安全域或源地址配得过宽，建议限定为内网安全域。

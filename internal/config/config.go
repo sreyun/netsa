@@ -186,6 +186,9 @@ type ExposureConfig struct {
 	// 证据表明没有到达（例如 untrust → untrust 被出站策略放行、会话结束时目标无应答）的端口探测只打标签。
 	// 不依赖手工清单，默认开启；设为 false 恢复为只按 enabled / services 判断。
 	ReachCheck *bool `yaml:"reach_check"`
+	// DevicePorts 是防火墙自身对外提供服务的端口，在内置的管理 / VPN 端口（SSH、Telnet、HTTP(S)、SNMP、IKE、L2TP、SSL VPN 等）之外追加，
+	// 例如改过端口的 SSL VPN。打到防火墙自身（local 安全域）其他端口的探测视为未到达任何服务。
+	DevicePorts []int `yaml:"device_ports"`
 }
 
 // ReachOn 返回是否按会话证据判断探测是否到达服务（未配置时默认开启）。

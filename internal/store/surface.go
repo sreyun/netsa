@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"netsa/internal/exposure"
 	"netsa/internal/geo"
 	"netsa/internal/model"
 )
@@ -425,7 +426,19 @@ func (sf *surface) observeFw(ev *model.Event, published bool) {
 		sv.Allowed++
 		if published && !geo.IsPrivate(ev.SrcIP) {
 			sv.Exposed = true
-			if sv.Risk >= model.SevMedium {
+			if ev.Reach == model.ReachDevice {
+				// 防火墙自身的服务：管理服务对公网放行是可直接处置的风险；VPN / 路由协议本就面向外部，不作为风险
+				if name, sev := exposure.DeviceRisk(ev.DstPort, ev.Proto); sev > model.SevInfo {
+					by := ""
+					if ev.Policy != "" {
+						by = "按策略「" + ev.Policy + "」"
+					}
+					sf.finding("dev:"+key, "防火墙管理服务对公网放行: "+name, "服务暴露", sev, key,
+						"防火墙"+by+"放行了来自公网 "+ev.SrcIP+" 到设备自身（local 安全域）的连接",
+						"在防火墙上把管理服务限制为内网或运维堡垒机地址访问（华为：local 安全域策略与接口 service-manage），"+
+							"关闭 Telnet / HTTP / SNMP v1、v2c 等明文管理协议，改用 SSH / HTTPS / SNMPv3", ev.SrcIP, ev.Time)
+				}
+			} else if sv.Risk >= model.SevMedium {
 				sf.finding("svc:"+key, "高危服务对公网开放: "+sv.Name, "服务暴露", sv.Risk, key,
 					"防火墙放行了来自公网 "+ev.SrcIP+" 的连接", "通过安全组/防火墙将该端口限制为内网或白名单访问，必要时修改默认端口并启用认证", ev.SrcIP, ev.Time)
 			}

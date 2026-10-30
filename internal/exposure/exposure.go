@@ -45,6 +45,8 @@ type Manager struct {
 	// 有会话证据的对外服务（自动识别，等同于已登记的映射）
 	learnMu sync.RWMutex
 	learned map[string]*learnedSvc
+	// 防火墙自身在内置管理 / VPN 端口之外对外提供服务的端口（exposure.device_ports）
+	devicePorts map[int]bool
 }
 
 func key(ip string, port int, proto string) string {
@@ -82,6 +84,14 @@ func Load(cfg config.ExposureConfig) (*Manager, error) {
 		allowed: map[int]struct{}{},
 		suggest: cfg.Suggest, cands: map[string]*candidate{},
 		reach: cfg.ReachOn(), policies: map[string]*policyStat{}, learned: map[string]*learnedSvc{},
+	}
+	for _, p := range cfg.DevicePorts {
+		if p > 0 && p <= 65535 {
+			if m.devicePorts == nil {
+				m.devicePorts = map[int]bool{}
+			}
+			m.devicePorts[p] = true
+		}
 	}
 	for _, p := range cfg.AllowedPorts {
 		if p > 0 && p <= 65535 {
