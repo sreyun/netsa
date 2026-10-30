@@ -52,15 +52,15 @@ docker compose logs -f netsa
 
 | 触发 | 行为 |
 |---|---|
-| 创建 tag `v1.6.8` | 构建 + 启动自检 + 推送：`1.6.8`、`1.6`、`1`、`latest`、`sha-xxxxxxx` |
-| 创建预发布 tag `v1.6.8-rc1` | 只推 `1.6.8-rc1`、`sha-xxxxxxx`，不动 `latest` / `1.6` / `1` |
+| 创建 tag `v1.6.9` | 构建 + 启动自检 + 推送：`1.6.9`、`1.6`、`1`、`latest`、`sha-xxxxxxx` |
+| 创建预发布 tag `v1.6.9-rc1` | 只推 `1.6.9-rc1`、`sha-xxxxxxx`，不动 `latest` / `1.6` / `1` |
 | 推送 `master` / Pull Request | 不构建镜像（质量门禁由 `ci` 工作流负责） |
 | 手动触发（workflow_dispatch） | 填写要发布的 tag 与是否更新 `latest`；按该 tag 检出源码，版本与内容严格对应 |
 
 发布流程：
 
 ```bash
-git tag v1.6.8 && git push origin v1.6.8
+git tag v1.6.9 && git push origin v1.6.9
 ```
 
 需要在仓库 **Settings → Secrets and variables → Actions** 配置两个 Secret：
@@ -86,9 +86,9 @@ printf '%s' "$AK" | openssl dgst -binary -sha256 -hmac "$SK" | od -An -vtx1 | tr
 | `GOPROXY` | `https://goproxy.cn,direct` | 构建时的 Go 模块代理 |
 
 ```bash
-docker pull swr.cn-east-3.myhuaweicloud.com/sreyun/netsa:1.6.8
+docker pull swr.cn-east-3.myhuaweicloud.com/sreyun/netsa:1.6.9
 docker run -d --name netsa -p 8080:8080 -p 5514:5514/udp -v netsa-state:/app/state \
-  swr.cn-east-3.myhuaweicloud.com/sreyun/netsa:1.6.8
+  swr.cn-east-3.myhuaweicloud.com/sreyun/netsa:1.6.9
 ```
 
 - **版本随 tag 注入**：构建时通过 `-ldflags "-X main.version=<tag>"` 写入二进制，`netsa version` 与 `/api/meta` 显示的就是发布版本；本地 `docker compose build` 不传该参数，仍使用源码中的默认版本。
@@ -270,7 +270,7 @@ exposure:
 | 源 / 目的安全域相同或目的为外网域（华为 `source-zone=untrust, destination-zone=untrust`） | 报文没有转发到任何内部安全域 | 端口探测只打标签，不告警 |
 | 会话结束时目标无应答（华为会话日志 `RcvPkts=0`、FortiGate `rcvdpkt=0`、Palo Alto end 日志收包数为 0） | 没有建立通信 | 只打标签，不告警 |
 | DNAT 后为内网地址（FortiGate `trandisp=dnat tranip`、华为 `DestinationNatIP`、Palo Alto NAT 目的地址等），或转发到内部安全域（`destination-zone=dmz`） | 确实到达了内部服务 | 保持告警并注明证据，不再按手工清单过滤；DNAT 后地址直接用于关联资产台账 |
-| 目的安全域为 `local`，端口不是设备服务（如 37215、2323、5432） | 打到防火墙自身未提供服务的端口 | 只打标签，不告警；按策略汇总为“可疑放行策略”（local 安全域策略过宽） |
+| 目的安全域为 `local`，端口不是设备服务（如 37215、2323、5432） | 打到防火墙自身未提供服务的端口 | 只打标签，不告警；按策略汇总为“可疑放行策略”（local 安全域策略过宽）。ICMP 等无端口协议（ping 防火墙）由设备自身应答，不按此判断 |
 | 目的安全域为 `local`，端口是设备的管理 / VPN 服务（SSH、Telnet、HTTP(S)、SNMP、NETCONF、IKE、L2TP、SSL VPN；可用 `exposure.device_ports` 追加） | 打到防火墙自身的服务 | 单次探测只打标签；管理服务对公网放行记为攻击面风险“防火墙管理服务对公网放行”（Telnet / HTTP / SNMP 为高危，SSH / HTTPS / NETCONF 为中危，VPN 不计）；针对该端口的暴力破解照常告警 |
 | 日志没有上述字段 | 无法判断 | 按 `exposure.enabled` / `services` 判断 |
 
@@ -408,7 +408,7 @@ IP 详情页的“同源关联分析”在全部攻击源中查找与当前 IP �
 | 认证日志 “暴力破解成功” | 失败 5 次后任一账号登录成功即严重（用户自己输错、NAT 出口多人共用都会触发） | 是否已构成暴力破解 / 喷洒，成功的账号是否被尝试过 | 两者都满足才判定 |
 | 认证暴力破解 / 密码喷洒 | 办公出口 NAT、跳板机后多人各输错几次即凑够阈值 | 同一来源有 3 个以上账号正常登录 | 降为中危并注明“疑似共享出口” |
 | Web 登录 “疑似破解成功” | 攻击 A 接口后，正常登录 B 接口被当成破解成功 | 成功响应是否出现在被反复提交的同一接口 | 不同接口不判定 |
-| 敏感文件 / WebShell 返回 200 | 单页应用、统一错误页对任何路径都返回首页 | 响应大小与首页正常响应一致，或 3 个以上不同探测路径大小完全相同（自动学习） | 判定为兜底页面，不报敏感资源暴露，不判定成功 |
+| 敏感文件 / WebShell 返回 200 | 单页应用、统一错误页对任何路径都返回首页 | 响应大小与首页正常响应一致，或 3 个以上不同探测路径大小完全相同（自动学习；`//.env`、`/./.env`、`/.env;.css`、`/%2e%65nv` 等绕过 WAF 的写法按同一路径计） | 判定为兜底页面，不报敏感资源暴露，不判定成功 |
 | 接口遍历 / 批量爬取 | 兜底页、统一的“无权限”提示返回 200 | 不同 ID 的响应大小是否各不相同 | 完全相同时不告警 |
 | 大量 5xx（异常请求引发服务端错误） | 后端故障时每个访问多的用户都被告警 | 同一站点是否有 10 个以上来源同时收到 5xx | 视为服务故障，不告警 |
 | 资产存在被利用的 CVE | 利用请求返回 404 也升为“疑似成功 / 严重” | 响应是否表明失败 | 失败的请求不改判为成功 |
@@ -421,6 +421,7 @@ IP 详情页的“同源关联分析”在全部攻击源中查找与当前 IP �
   - 研判样本不少于 5 个、且准确率不高于 20% 的规则，等级自动下调一级。只降不升，不越过分类底线；管理员可锁定规则，立即恢复原等级。
   - 同一规则在同一目标上多次误报，或同一来源多次被整体判为误报（疑似授权扫描），会生成抑制建议，由人工采纳。
   - 每次自动调整都写入进化日志和审计链。
+  - 批量处置（最多 500 个事件）的结论一次计入，学习状态只重算、保存一次。
 - **平台行为基线**：学习每个账号的常用登录网段与时段，以下情况会推送告警并写入审计链：
   - 从新地址登录；在非常用时段登录；
   - 登录失败暴增；1 小时内导出 5 次以上；
@@ -429,7 +430,7 @@ IP 详情页的“同源关联分析”在全部攻击源中查找与当前 IP �
 - **外部大模型（可选，默认关闭）**：使用 OpenAI 兼容接口，支持 DeepSeek、通义千问、智谱、Kimi，以及内网部署的 vLLM / Ollama。
   - 在事件详情中点击“AI 研判”触发；`auto_triage` 开启后，新出现的高危及以上事件会自动研判。
   - 密钥只从环境变量读取。连接公网的模型服务必须使用 HTTPS。
-  - 发送前默认脱敏：内网地址、口令和令牌、手机号、证件号、邮箱。
+  - 发送前默认脱敏：内网地址（IPv4 与 IPv6 ULA / 链路本地）、口令和令牌、手机号、证件号、邮箱。
   - 每小时有调用次数上限，每次调用都写入审计链。
   - 结论写入事件的处置记录，仅供参考，不参与自学习，也不会自动处置。
 

@@ -36,6 +36,7 @@ type sentinelState struct {
 	exports map[string][]time.Time // 账号 → 近 1 小时的导出时间
 	fails   map[string][]time.Time // 账号 → 近 1 小时的登录失败时间
 	alerted map[string]time.Time   // 去重键 → 上次告警时间
+	pruned  time.Time              // 上次清理过期的跟踪记录
 }
 
 const (
@@ -46,6 +47,8 @@ const (
 	maxNets      = 50
 	maxAnomalies = 500
 	maxUsers     = 2000
+	maxTracked   = 10000 // 近 1 小时内跟踪登录失败 / 导出次数的账号名上限
+	maxRecent    = 1000  // 每个账号保留的最近登录失败 / 导出时间数
 )
 
 // netKey 返回地址所在的网段（IPv4 /24、IPv6 /48），同一网段内变化（DHCP）不算新地址。
@@ -72,6 +75,35 @@ func within(list []time.Time, since time.Time) []time.Time {
 		}
 	}
 	return out
+}
+
+// recent 记录账号在近 1 小时内的一次登录失败 / 导出，返回窗口内的次数。
+// 登录失败的账号名由请求方任意填写（可以是不存在的账号），记录数达到上限时先清理已过期的账号；
+// 仍然超过上限（短时间内大量不同账号名）时只计数、不再保存新账号，防止伪造账号名撑爆内存。
+// 清理是全量扫描且在账号管理的锁内执行，至多每分钟一次。
+// 每个账号只保留最近 maxRecent 次（告警阈值远低于此）：被锁定后仍持续尝试的请求也会逐条记录，
+// 不设上限时列表随请求数增长，且每次都要在锁内扫描整个列表。
+func (st *sentinelState) recent(m map[string][]time.Time, user string, at, since time.Time) int {
+	list := append(within(m[user], since), at)
+	if len(list) > maxRecent {
+		list = list[len(list)-maxRecent:]
+	}
+	if _, ok := m[user]; !ok && len(m) >= maxTracked {
+		if d := at.Sub(st.pruned); d >= 0 && d < time.Minute {
+			return len(list)
+		}
+		st.pruned = at
+		for k, v := range m {
+			if len(v) == 0 || v[len(v)-1].Before(since) {
+				delete(m, k)
+			}
+		}
+		if len(m) >= maxTracked {
+			return len(list)
+		}
+	}
+	m[user] = list
+	return len(list)
 }
 
 // ObserveAudit 学习一条审计记录，返回发现的异常（调用方负责推送）。
@@ -141,20 +173,16 @@ func (l *Learner) ObserveAudit(r auth.Record) []Anomaly {
 		}
 		l.dirty = true
 	case r.Action == "": // 登录失败
-		list := append(within(l.sent.fails[r.User], hourAgo), r.Time)
-		l.sent.fails[r.User] = list
-		if len(list) >= failBurst {
+		if n := l.sent.recent(l.sent.fails, r.User, r.Time, hourAgo); n >= failBurst {
 			add("fail|"+r.User, Anomaly{Kind: "login_fail", Severity: model.SevHigh, Title: "平台账号 " + r.User + " 疑似被暴力破解",
-				Detail: "1 小时内登录失败 " + strconv.Itoa(len(list)) + " 次，最近来源 " + r.IP + "（" + r.Reason + "）；平台已按来源与账号自动锁定，请核实是否为本人操作"})
+				Detail: "1 小时内登录失败 " + strconv.Itoa(n) + " 次，最近来源 " + r.IP + "（" + r.Reason + "）；平台已按来源与账号自动锁定，请核实是否为本人操作"})
 		}
 	case !r.OK:
 		return nil
 	case strings.Contains(r.Action, "导出") || r.Action == "下载分析报告":
-		list := append(within(l.sent.exports[r.User], hourAgo), r.Time)
-		l.sent.exports[r.User] = list
-		if len(list) >= exportBurst {
+		if n := l.sent.recent(l.sent.exports, r.User, r.Time, hourAgo); n >= exportBurst {
 			add("export|"+r.User, Anomaly{Kind: "bulk_export", Severity: model.SevMedium, Title: "平台账号 " + r.User + " 短时间内大量导出数据",
-				Detail: "1 小时内导出 " + strconv.Itoa(len(list)) + " 次，最近一次：" + r.Action + " " + r.Detail + "；请核实是否为正常取证，防止日志与告警数据外泄"})
+				Detail: "1 小时内导出 " + strconv.Itoa(n) + " 次，最近一次：" + r.Action + " " + r.Detail + "；请核实是否为正常取证，防止日志与告警数据外泄"})
 		}
 	default:
 		if title, sev := sensitive(r.Action, r.Detail); title != "" {

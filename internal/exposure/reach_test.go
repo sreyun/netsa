@@ -1,6 +1,7 @@
 package exposure
 
 import (
+	"slices"
 	"strconv"
 	"testing"
 
@@ -43,9 +44,11 @@ func TestPolicyNotes(t *testing.T) {
 			SrcZone: "untrust", DstZone: "untrust", Policy: "允许本地上外网"})
 	}
 	m.RecordUnreached(&model.Event{SrcIP: "198.51.100.1", DstIP: "43.242.97.32", DstPort: 22}) // 没有策略与安全域信息：不汇总
+	m.RecordUnreached(&model.Event{SrcIP: "195.184.76.9", DstIP: "43.242.97.35", Proto: "icmp", SrcZone: "untrust", DstZone: "untrust", Policy: "允许本地上外网"})
 	list := m.Policies()
-	if len(list) != 1 || list[0].Policy != "允许本地上外网" || list[0].Permits != 4 || list[0].Sources != 4 ||
-		list[0].TopPorts[0] != "23 × 2" || list[0].SrcZone != "untrust" || list[0].DstZone != "untrust" {
+	if len(list) != 1 || list[0].Policy != "允许本地上外网" || list[0].Permits != 5 || list[0].Sources != 5 ||
+		list[0].TopPorts[0] != "23 × 2" || list[0].SrcZone != "untrust" || list[0].DstZone != "untrust" ||
+		!slices.Contains(list[0].TopPorts, "ICMP 等无端口协议 × 1") {
 		t.Fatalf("可疑放行策略: %+v", list)
 	}
 }
@@ -97,6 +100,15 @@ func TestReachLocalPorts(t *testing.T) {
 	}
 	if v, _ := Reach(ev(6443, "tcp")); v != ReachNo {
 		t.Fatal("未配置时 6443 不是设备服务端口")
+	}
+	// ping 防火墙自身：由设备应答，不按「端口上没有服务」判为未到达，也不计入可疑放行策略
+	if v, why := m.Reach(ev(0, "icmp")); v != ReachUnknown {
+		t.Fatalf("ICMP 打到防火墙自身不应判为未到达: %d（%s）", v, why)
+	}
+	icmp := ev(0, "icmp")
+	icmp.Reply = model.ReplyNone
+	if v, _ := m.Reach(icmp); v != ReachNo {
+		t.Fatal("会话结束时无应答（设备未回应 ping）仍判为未到达")
 	}
 	if name, sev := DeviceRisk(23, "tcp"); name != "Telnet" || sev != model.SevHigh {
 		t.Fatalf("Telnet 管理服务: %s %v", name, sev)

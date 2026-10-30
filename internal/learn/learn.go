@@ -116,6 +116,9 @@ type Learner struct {
 
 	sent  sentinelState
 	calib atomic.Pointer[map[string]RuleStat]
+	// saveMu 串行化落盘：后台定时保存与界面操作（处置、锁定、采纳建议）可能同时触发，
+	// 不串行时两次写入共用同一个临时文件，较旧的状态可能最后改名生效、覆盖较新的状态
+	saveMu sync.Mutex
 
 	// OnChange 在产生进化日志时调用（写入审计链），调用时不持锁。
 	OnChange func(Change)
@@ -185,6 +188,8 @@ func (l *Learner) Save() error {
 	if l == nil || l.opt.Path == "" {
 		return nil
 	}
+	l.saveMu.Lock()
+	defer l.saveMu.Unlock()
 	l.mu.Lock()
 	if !l.dirty {
 		l.mu.Unlock()
@@ -202,40 +207,74 @@ func (l *Learner) Save() error {
 	data, err := json.Marshal(st)
 	l.dirty = false
 	l.mu.Unlock()
+	if err == nil {
+		err = writeFile(l.opt.Path, data)
+	}
 	if err != nil {
+		l.mu.Lock()
+		l.dirty = true // 写入失败：保留未保存标记，由下一次定时保存重试
+		l.mu.Unlock()
+	}
+	return err
+}
+
+// writeFile 先写临时文件再原子替换。
+func writeFile(path string, data []byte) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
 		return err
 	}
-	if err := os.MkdirAll(filepath.Dir(l.opt.Path), 0o750); err != nil {
-		return err
-	}
-	tmp := l.opt.Path + ".tmp"
+	tmp := path + ".tmp"
 	if err := os.WriteFile(tmp, data, 0o640); err != nil {
+		os.Remove(tmp)
 		return err
 	}
-	return os.Rename(tmp, l.opt.Path)
+	return os.Rename(tmp, path)
 }
 
 // Feedback 记录分析员对事件的结论（同一事件再次处置时替换之前的结论；VerdictNone 表示撤回）。
-func (l *Learner) Feedback(c Case) {
-	if l == nil || c.Incident == 0 {
+// 批量处置时一次传入全部结论：规则统计只重算一次、状态只落盘一次（每次落盘都要写出全部样本）。
+func (l *Learner) Feedback(list ...Case) {
+	if l == nil {
 		return
 	}
 	now := time.Now()
+	l.mu.Lock()
+	changed, user := false, ""
+	for _, c := range list {
+		if l.feedbackLocked(c, now) {
+			changed, user = true, c.User
+		}
+	}
+	if !changed {
+		l.mu.Unlock()
+		return
+	}
+	l.dirty = true
+	changes := l.recomputeLocked(now, user)
+	l.mu.Unlock()
+	l.emit(changes)
+	if err := l.Save(); err != nil {
+		log.Printf("[learn] 保存学习状态失败: %v", err)
+	}
+}
+
+// feedbackLocked 记录一条结论，返回样本是否发生变化（调用方持锁）。
+func (l *Learner) feedbackLocked(c Case, now time.Time) bool {
+	if c.Incident == 0 {
+		return false
+	}
 	if c.Time.IsZero() {
 		c.Time = now
 	}
-	l.mu.Lock()
 	old := l.cases[c.Incident]
 	switch {
 	case c.Verdict == VerdictNone:
 		if old == nil {
-			l.mu.Unlock()
-			return
+			return false
 		}
 		delete(l.cases, c.Incident)
 	case old != nil && old.Verdict == c.Verdict:
-		l.mu.Unlock()
-		return
+		return false
 	default:
 		for k := range c.Rules {
 			if len(k) > 128 {
@@ -250,13 +289,7 @@ func (l *Learner) Feedback(c Case) {
 			l.evictLocked()
 		}
 	}
-	l.dirty = true
-	changes := l.recomputeLocked(now, c.User)
-	l.mu.Unlock()
-	l.emit(changes)
-	if err := l.Save(); err != nil {
-		log.Printf("[learn] 保存学习状态失败: %v", err)
-	}
+	return true
 }
 
 // evictLocked 淘汰最早的样本，使数量回到上限的 90%。

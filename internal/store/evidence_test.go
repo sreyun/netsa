@@ -70,6 +70,23 @@ func TestCatchAll200(t *testing.T) {
 	if a := probe("/backup.zip", 9_876_543); a == nil || a.Result != model.ResultSuccess || a.Severity < model.SevHigh {
 		t.Fatalf("真实的敏感文件仍应判定为取到内容: %+v", a)
 	}
+	// 绕过 WAF 的路径变体反复读取同一个真实文件：大小相同是因为同一个文件，不是兜底页面
+	for _, uri := range []string{"/.git/config", "//.git/config", "/./.git/config", "/.git/config;.css", "/%2egit/config", "/.git//config/"} {
+		if a := probe(uri, 7_777); a == nil || a.Result != model.ResultSuccess {
+			t.Fatalf("%s：同一资源的路径变体不应判为兜底页面: %+v", uri, a)
+		}
+	}
+}
+
+func TestResourceKey(t *testing.T) {
+	for in, want := range map[string]string{
+		"/.env": "/.env", "//.env": "/.env", "/./.env": "/.env", "/a/../.env": "/.env", "/.env/": "/.env", "/.env;.css": "/.env",
+		"/%2e%65nv": "/.env", "/app;jsessionid=1/.env": "/app/.env", "": "/", "/": "/", "/%zz": "/%zz",
+	} {
+		if got := resourceKey(in); got != want {
+			t.Errorf("resourceKey(%q) = %q，期望 %q", in, got, want)
+		}
+	}
 }
 
 // 外连威胁情报地址：会话日志记录对端无应答时，连接未建立，与被拦截同级。

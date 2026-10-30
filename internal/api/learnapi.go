@@ -16,10 +16,12 @@ import (
 )
 
 // learnFeedback 把分析员的处置结论交给自学习：已处置为确认攻击，误报为误报，其余状态（重新打开、忽略）撤回之前的结论。
+// 批量处置（最多 500 个事件）的结论一次交给自学习，只重算、落盘一次。
 func (s *Server) learnFeedback(list []store.IncidentView, user string) {
 	if s.Learn == nil {
 		return
 	}
+	cases := make([]learn.Case, 0, len(list))
 	for _, v := range list {
 		verdict := learn.VerdictNone
 		switch v.Status {
@@ -45,8 +47,9 @@ func (s *Server) learnFeedback(list []store.IncidentView, user string) {
 				c.Targets = append(c.Targets, kv.Name)
 			}
 		}
-		s.Learn.Feedback(c)
+		cases = append(cases, c)
 	}
+	s.Learn.Feedback(cases...)
 }
 
 // learnReport 返回自学习状态：规则准确率、自动校准、待确认的建议、进化日志、平台安全异常与合规趋势。
