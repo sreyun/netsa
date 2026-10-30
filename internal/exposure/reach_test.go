@@ -14,25 +14,28 @@ func TestReach(t *testing.T) {
 		return &model.Event{Kind: model.KindFirewall, SrcIP: "195.184.76.97", DstIP: "43.242.97.35", DstPort: 23,
 			SrcZone: src, DstZone: dst, NatDstIP: nat, Reply: reply, Action: model.ActionAllow}
 	}
-	for name, c := range map[string]struct {
+	// 用切片而不是以中文为键的 map：gofmt 按字符数对齐 map 的值，编辑器按显示宽度看起来是错位的，
+	// 手工「对齐」后又会让 CI 的 gofmt 检查失败
+	for _, c := range []struct {
+		name string
 		ev   *model.Event
 		want Verdict
 	}{
-		"untrust → untrust":   {ev("untrust", "untrust", "", 0), ReachNo},
-		"自定义外网域同域转发":          {ev("dianxin", "dianxin", "", 0), ReachNo},
-		"转发回外网域":              {ev("isp1", "Untrust", "", 0), ReachNo},
-		"FortiGate 接口角色 wan":  {ev("wan", "wan", "", 0), ReachNo},
-		"转发到 dmz":             {ev("untrust", "dmz", "", 0), ReachYes},
-		"打到防火墙自身的 Telnet":     {ev("untrust", "local", "", 0), ReachDevice},
-		"DNAT 到内网":            {ev("untrust", "", "10.0.0.5", 0), ReachYes},
-		"DNAT 但目标无应答":         {ev("untrust", "trust", "10.0.0.5", model.ReplyNone), ReachNo},
-		"有应答":                 {ev("", "", "", model.ReplyYes), ReachYes},
-		"没有证据":                {ev("", "", "", 0), ReachUnknown},
-		"NAT 地址为公网（不视为转发到内网）": {ev("", "", "203.0.113.9", 0), ReachUnknown},
+		{"untrust → untrust", ev("untrust", "untrust", "", 0), ReachNo},
+		{"自定义外网域同域转发", ev("dianxin", "dianxin", "", 0), ReachNo},
+		{"转发回外网域", ev("isp1", "Untrust", "", 0), ReachNo},
+		{"FortiGate 接口角色 wan", ev("wan", "wan", "", 0), ReachNo},
+		{"转发到 dmz", ev("untrust", "dmz", "", 0), ReachYes},
+		{"打到防火墙自身的 Telnet", ev("untrust", "local", "", 0), ReachDevice},
+		{"DNAT 到内网", ev("untrust", "", "10.0.0.5", 0), ReachYes},
+		{"DNAT 但目标无应答", ev("untrust", "trust", "10.0.0.5", model.ReplyNone), ReachNo},
+		{"有应答", ev("", "", "", model.ReplyYes), ReachYes},
+		{"没有证据", ev("", "", "", 0), ReachUnknown},
+		{"NAT 地址为公网（不视为转发到内网）", ev("", "", "203.0.113.9", 0), ReachUnknown},
 	} {
 		got, why := Reach(c.ev)
 		if got != c.want || got != ReachUnknown && why == "" {
-			t.Errorf("%s: 得到 %d（%s），期望 %d", name, got, why, c.want)
+			t.Errorf("%s: 得到 %d（%s），期望 %d", c.name, got, why, c.want)
 		}
 	}
 }
