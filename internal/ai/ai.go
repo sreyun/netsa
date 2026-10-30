@@ -285,7 +285,8 @@ func (v Verdict) Note() string {
 // ---------------- 脱敏 ----------------
 
 var (
-	reIPv4      = regexp.MustCompile(`\b(?:\d{1,3}\.){3}\d{1,3}\b`)
+	// 不用 \b 限定边界：地址紧贴字母 / 数字时（如 URL 编码 ping%2010.0.0.1、host_10.0.0.5）\b 不成立，内网地址会漏掉
+	reIPv4      = regexp.MustCompile(`(?:\d{1,3}\.){3}\d{1,3}`)
 	reIPv6      = regexp.MustCompile(`[0-9A-Fa-f]*:[0-9A-Fa-f:]*:[0-9A-Fa-f]*`) // 候选片段，按地址解析校验（排除 08:49:59、MAC 地址等）
 	reSecretArg = regexp.MustCompile(`(?i)((?:pass(?:word|wd)?|pwd|passwd|token|access_token|refresh_token|session(?:id)?|sid|secret|api[_-]?key|apikey|auth(?:orization)?|ticket|cookie|jsessionid|phpsessid|credential)s?["']?\s*[=:]\s*["']?)[^&\s"',;]+`)
 	reBearer    = regexp.MustCompile(`(?i)(bearer|basic)\s+[A-Za-z0-9._~+/=-]{8,}`)
@@ -321,7 +322,18 @@ func (m *Masker) Mask(s string) string {
 		}
 		return p
 	}
-	s = reIPv4.ReplaceAllStringFunc(s, host)
+	s = reIPv4.ReplaceAllStringFunc(s, func(c string) string {
+		if _, err := netip.ParseAddr(c); err == nil {
+			return host(c) // 本身就是合法地址（如公网 110.20.30.40）时不再拆分，避免把其后缀误当成内网地址
+		}
+		// 左侧粘连了其他数字而无法解析（%2010.0.0.1 匹配出的候选是 010.0.0.1）：去掉开头多余的数字再识别
+		for i := 1; i < len(c) && c[i-1] != '.'; i++ {
+			if _, err := netip.ParseAddr(c[i:]); err == nil {
+				return c[:i] + host(c[i:])
+			}
+		}
+		return c
+	})
 	s = reIPv6.ReplaceAllStringFunc(s, host)   // 内网 IPv6（ULA fd00::/8、链路本地 fe80::/10 等）
 	s = reBearer.ReplaceAllString(s, "$1 ***") // 先处理认证头，否则下一条会把 Bearer 当成值替换掉、漏掉令牌本身
 	s = reSecretArg.ReplaceAllString(s, "${1}***")

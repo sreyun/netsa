@@ -185,12 +185,12 @@ docker run -d --name netsa -p 8080:8080 -p 5514:5514/udp -v netsa-state:/app/sta
 - **SWR 介质类型**：使用 `outputs: type=registry,oci-mediatypes=false` 并关闭 provenance / SBOM 附件，避免仓库里出现 `unknown/unknown` 架构条目导致拉取时选错架构。
 - 镜像以非 root（uid 10001）运行，配置内置在 `/app/configs`，状态目录为 `/app/state`（建议挂载数据卷）。
 
-质量门禁由 [.github/workflows/ci.yml](.github/workflows/ci.yml) 负责：`gofmt`、`go vet`、前端语法检查，以及两轮测试——`go test -race -short ./...` 验证并发正确性（race 检测会让用例慢 5~10 倍，故走降级规模），`go test ./...` 以完整规模验证性能退化类断言。任何一步失败，后面的步骤都会被跳过，提交前请先在本地执行[开发与测试](#开发与测试)中的检查。
+质量门禁由 [.github/workflows/ci.yml](.github/workflows/ci.yml) 负责：`gofmt`、`go vet`、前端语法检查，以及两轮测试——`go test -race -short ./...` 验证并发正确性（race 检测会让用例慢 5~10 倍，故走降级规模），`go test ./...` 以完整规模验证性能退化类断言，最后用 `govulncheck` 检查依赖与标准库中代码可达的已知漏洞。任何一步失败，后面的步骤都会被跳过，提交前请先在本地执行[开发与测试](#开发与测试)中的检查。
 
 ## 本地运行
 
 ```bash
-# 编译（需要 Go 1.23+；纯 Go 实现，无 CGO）
+# 编译（需要 Go 1.25+，发布版本使用 Go 1.27 构建；纯 Go 实现，无 CGO）
 go build -o bin/netsa ./cmd/netsa
 
 # 生成 6 小时演示日志并启动，浏览器打开 http://localhost:8080（账号 admin / Netsa@demo2026）
@@ -229,8 +229,14 @@ go test -race -short ./...     # 需要 CGO 与 C 编译器（gcc）
 - `-race` 依赖 CGO。本机没有 gcc 时（例如 Windows），可以在容器里执行：
 
   ```bash
-  docker run --rm -v "$PWD":/src -w /src -e GOPROXY=https://goproxy.cn,direct golang:1.23-alpine \
+  docker run --rm -v "$PWD":/src -w /src -e GOPROXY=https://goproxy.cn,direct golang:1.27-alpine \
     sh -c 'apk add --no-cache gcc musl-dev && CGO_ENABLED=1 go test -race -short ./...'
+  ```
+
+- 依赖与标准库的已知漏洞（CI 同样执行，发现代码可达的漏洞即失败）：
+
+  ```bash
+  go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 ./...
   ```
 
 - 测试用例中的中文名称请写成结构体字段（`[]struct{ name string; … }`），不要用作 map 的键：gofmt 按字符数对齐 map 的值，编辑器里看起来错位，手工对齐后 `gofmt -l` 就会失败。

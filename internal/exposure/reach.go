@@ -155,12 +155,14 @@ func (m *Manager) Learn(ev *model.Event, why string) {
 		if ev.Time.After(l.last) {
 			l.last = ev.Time
 		}
+		m.learnDirty.Store(true)
 		return
 	}
 	if len(m.learned) >= maxLearned {
 		return
 	}
 	m.learned[k] = &learnedSvc{ip: ip, port: ev.DstPort, proto: proto, reason: why, hits: 1, first: ev.Time, last: ev.Time}
+	m.learnDirty.Store(true)
 }
 
 func (m *Manager) isLearned(ip string, port int, proto string) bool {

@@ -15,9 +15,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # 与 Dockerfile 的构建镜像保持同一主版本。不用 go-version-file：go.mod 中的 go 指令是最低版本（如 1.25.0），
+      # 按它安装会拿到该版本最早的补丁，缺少后续的安全修复；1.27.x 总是取该主版本的最新补丁
       - uses: actions/setup-go@v5
         with:
-          go-version-file: go.mod
+          go-version: '1.27.x'
           cache: true
 
       - name: go mod verify
@@ -47,6 +49,10 @@ jobs:
 
       - name: build
         run: CGO_ENABLED=0 go build -trimpath -o /tmp/netsa ./cmd/netsa
+
+      # 依赖与标准库的已知漏洞：只报告代码实际调用到的漏洞，发现即失败（升级依赖或工具链后再提交）
+      - name: govulncheck
+        run: go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 ./...
 
   web:
     name: web · syntax

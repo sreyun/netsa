@@ -47,6 +47,13 @@ func TestIncidentLifecycle(t *testing.T) {
 	if _, err := s.UpdateIncidents([]uint64{a1.IncidentID}, "alice", IncidentUpdate{Status: "bogus"}); err != ErrIncStatus {
 		t.Fatal("应拒绝无效状态")
 	}
+	// 批量处置中含不存在的事件：整体失败，已存在的事件不能被部分修改
+	if _, err := s.UpdateIncidents([]uint64{a1.IncidentID, 999}, "alice", IncidentUpdate{Status: IncInvestigating, Note: "批量"}); err != ErrNoIncident {
+		t.Fatalf("批量处置含不存在的事件应报错: %v", err)
+	}
+	if d := s.Incident(a1.IncidentID); d.Status != IncOpen || len(d.Notes) != 0 {
+		t.Fatalf("批量处置失败时不应部分生效: %s %+v", d.Status, d.Notes)
+	}
 	if _, err := s.UpdateIncidents([]uint64{999}, "alice", IncidentUpdate{Note: "x"}); err != ErrNoIncident {
 		t.Fatal("事件不存在")
 	}
@@ -67,7 +74,7 @@ func TestIncidentLifecycle(t *testing.T) {
 	// 出现更高等级的告警：自动重新打开
 	rec(now.Add(4*time.Minute), "r5", model.SevCritical, model.ResultSuccess)
 	d = s.Incident(a1.IncidentID)
-	if d.Status != IncOpen || !d.Closed.IsZero() || d.Due.Sub(time.Now()) > time.Hour || d.Notes[len(d.Notes)-1].User != "系统" {
+	if d.Status != IncOpen || !d.Closed.IsZero() || time.Until(d.Due) > time.Hour || d.Notes[len(d.Notes)-1].User != "系统" {
 		t.Fatalf("更高等级的告警应重新打开事件: %+v", d.IncidentView)
 	}
 	// 已处置后再出现告警：新事件

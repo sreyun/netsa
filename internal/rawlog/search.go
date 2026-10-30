@@ -135,9 +135,11 @@ func (s *Store) Search(ctx context.Context, q Query) (Result, error) {
 		res.Scanned++
 		// 保留该分段中时间最新的 Limit 条
 		var found []Record
+		budget := false // 扫描量在本分段中途达到上限
 		err := scanSegment(ctx, path, func(line []byte) bool {
 			res.Bytes += int64(len(line)) + 1
 			if res.Bytes >= q.MaxBytes {
+				budget = true
 				return false
 			}
 			if ip != "" && !bytes.Contains(line, ipB) || len(kw) > 0 && !containsFold(line, kw, &lower) {
@@ -158,7 +160,15 @@ func (s *Store) Search(ctx context.Context, q Query) (Result, error) {
 			}
 			return true
 		})
-		if err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
+		// 本分段没有扫描完（超时或达到扫描量上限）：结果必须标记为不完整。
+		// 此前只在下一个分段开始前检查，最后一个分段被截断时结果会被误报为完整
+		cut := ""
+		switch {
+		case errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded):
+			cut = "检索超时，结果不完整，请缩小时间范围或增加过滤条件"
+		case budget:
+			cut = "扫描量达到上限，结果不完整，请缩小时间范围或增加过滤条件"
+		case err != nil:
 			res.Reason = "部分分段读取失败: " + err.Error()
 		}
 		sort.SliceStable(found, func(i, j int) bool { return found[i].Time.After(found[j].Time) })
@@ -169,6 +179,13 @@ func (s *Store) Search(ctx context.Context, q Query) (Result, error) {
 			res.Truncated = true
 			if res.Reason == "" {
 				res.Reason = "结果较多，仅显示最新的 " + strconv.Itoa(q.Limit) + " 条"
+			}
+			break
+		}
+		if cut != "" {
+			res.Truncated = true
+			if res.Reason == "" {
+				res.Reason = cut
 			}
 			break
 		}

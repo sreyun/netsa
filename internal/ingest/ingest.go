@@ -110,6 +110,8 @@ type Manager struct {
 	smu            sync.Mutex
 	silence        map[string]*silenceState
 	wg             sync.WaitGroup
+	// 测试中缩短文件被删除后的处理时限（零值使用 rotateGrace / fileGoneAfter）
+	goneGrace, goneAfter time.Duration
 }
 
 // NewManager 创建管理器，buffer 为输出通道可缓存的批数。
@@ -128,6 +130,18 @@ func (m *Manager) add(name, path, typ, logFormat, host string) (*source, error) 
 	m.sources = append(m.sources, s)
 	m.mu.Unlock()
 	return s, nil
+}
+
+// remove 移除不再跟踪的数据源（通配符匹配到的文件已被删除）。
+func (m *Manager) remove(s *source) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for i, x := range m.sources {
+		if x == s {
+			m.sources = append(m.sources[:i:i], m.sources[i+1:]...)
+			return
+		}
+	}
 }
 
 // QueueLen / QueueCap 返回事件投递通道的当前批次数与容量：长度持续接近容量说明下游处理不过来。
@@ -312,26 +326,31 @@ func (m *Manager) StartSource(ctx context.Context, sc config.SourceConfig) error
 	if strings.TrimSpace(sc.Silence) != "" {
 		silence, _ = config.ParseSilence(sc.Silence, 0)
 	}
+	var smu sync.Mutex // 保护 started：跟踪协程在通配符文件消失后会移除记录
 	started := map[string]bool{}
 	seen := &fileSet{}
 	scan := func(first bool) {
 		for _, pattern := range sc.Paths {
+			wild := strings.ContainsAny(pattern, "*?[")
 			matches, _ := filepath.Glob(pattern)
-			if len(matches) == 0 && !strings.ContainsAny(pattern, "*?[") {
+			if len(matches) == 0 && !wild {
 				matches = []string{pattern} // 文件尚不存在，等待创建
 			}
 			sort.Strings(matches)
 			for _, path := range matches {
-				if started[path] || strings.HasSuffix(path, ".gz") {
+				smu.Lock()
+				skip := started[path] || strings.HasSuffix(path, ".gz")
+				started[path] = true
+				smu.Unlock()
+				if skip {
 					continue
 				}
-				started[path] = true
 				// 轮转后被重命名的旧文件（如 access.log → access.log.1）已经读过，再次被通配符匹配时跳过
 				if !first && seen.contains(path) {
 					continue
 				}
 				name := sc.Name
-				if len(matches) > 1 || strings.ContainsAny(pattern, "*?[") {
+				if len(matches) > 1 || wild {
 					name = sc.Name + ":" + filepath.Base(path)
 				}
 				s, err := m.add(name, path, sc.Type, sc.LogFormat, sc.Host)
@@ -340,8 +359,21 @@ func (m *Manager) StartSource(ctx context.Context, sc config.SourceConfig) error
 					continue
 				}
 				s.group, s.silence = sc.Name, silence
+				// 通配符匹配到的文件（如按日期命名、按保留期删除的日志）长期不存在时停止跟踪并移除，
+				// 否则每个删除过的文件都会留下一个空转的跟踪协程与状态页条目；再次出现时由下一轮扫描重新发现。
+				// 明确配置的单个文件始终等待其出现
+				var gone func()
+				if wild {
+					p := path
+					gone = func() {
+						smu.Lock()
+						delete(started, p)
+						smu.Unlock()
+						m.remove(s)
+					}
+				}
 				// 首轮发现的文件按配置决定是否从头读取；之后新出现的文件总是从头读取
-				go m.tail(ctx, s, path, sc.FromBeginning || !first, seen)
+				go m.tail(ctx, s, path, sc.FromBeginning || !first, seen, gone)
 			}
 		}
 	}
@@ -363,16 +395,34 @@ func (m *Manager) StartSource(ctx context.Context, sc config.SourceConfig) error
 
 // tail 以轮询方式跟踪文件（跨平台），处理 logrotate 的重命名与 copytruncate 两种轮转方式。
 // 持续有数据时连续读取并按批投递；读到末尾时先投递未满的批次再等待，保证实时性。
-func (m *Manager) tail(ctx context.Context, s *source, path string, fromStart bool, seen *fileSet) {
+// 文件被删除时：超过 rotateGrace 后关闭已打开的文件；gone 不为空（通配符匹配到的文件）时，
+// 路径持续不存在超过 fileGoneAfter 后调用 gone 并结束跟踪。
+func (m *Manager) tail(ctx context.Context, s *source, path string, fromStart bool, seen *fileSet, gone func()) {
 	var (
-		f      *os.File
-		fi     os.FileInfo
-		lr     *lineReader
-		offset int64
-		first  = true
-		old    *rotated // 已被轮转、仍在收尾读取的旧文件
-		busy   int
+		f       *os.File
+		fi      os.FileInfo
+		lr      *lineReader
+		offset  int64
+		first   = true
+		old     *rotated // 已被轮转、仍在收尾读取的旧文件
+		busy    int
+		missing time.Time // 路径开始不存在的时间
 	)
+	// release 关闭文件。文件已被删除（而不是重命名）时同时移出已跟踪集合：删除后 inode 可能被新文件复用，
+	// 通配符再发现的新文件会被误认为已读过的旧文件，从此不被跟踪
+	release := func(f *os.File) {
+		if st, err := f.Stat(); err == nil && unlinked(st) {
+			seen.remove(st)
+		}
+		f.Close()
+	}
+	grace, goneAfter := rotateGrace, fileGoneAfter
+	if m.goneGrace > 0 {
+		grace = m.goneGrace
+	}
+	if m.goneAfter > 0 {
+		goneAfter = m.goneAfter
+	}
 	defer func() {
 		if f != nil {
 			f.Close()
@@ -411,7 +461,7 @@ func (m *Manager) tail(ctx context.Context, s *source, path string, fromStart bo
 			if line, has := old.lr.flush(); has {
 				m.handle(ctx, s, line)
 			}
-			old.f.Close()
+			release(old.f)
 			old = nil
 		}
 	}
@@ -426,11 +476,20 @@ func (m *Manager) tail(ctx context.Context, s *source, path string, fromStart bo
 				fromStart = true
 				drainOld(false)
 				m.flush(ctx, s)
+				if missing.IsZero() {
+					missing = time.Now()
+				}
+				if gone != nil && old == nil && time.Since(missing) > goneAfter {
+					log.Printf("[ingest] %s 已不存在超过 %s，停止跟踪（再次出现时自动恢复）", path, fmtDur(goneAfter))
+					gone()
+					return
+				}
 				if !sleep(2 * time.Second) {
 					return
 				}
 				continue
 			}
+			missing = time.Time{}
 			fi, _ = f.Stat()
 			seen.add(fi)
 			offset = 0
@@ -466,9 +525,30 @@ func (m *Manager) tail(ctx context.Context, s *source, path string, fromStart bo
 			idle += 250 * time.Millisecond
 		}
 		nfi, err := os.Stat(path)
+		if err == nil {
+			missing = time.Time{}
+		}
 		switch {
 		case err != nil:
-			// 文件被移走，等待新文件出现
+			// 文件被移走或删除，等待新文件出现。宽限期内继续读取已打开的文件（写入方可能尚未重新打开日志）；
+			// 超过宽限期后读完剩余内容并关闭：否则已删除的文件一直处于打开状态，占用的磁盘空间永远无法释放
+			if missing.IsZero() {
+				missing = time.Now()
+			} else if time.Since(missing) > grace {
+				for {
+					line, _, ok, _ := lr.next()
+					if !ok {
+						break
+					}
+					m.handle(ctx, s, line)
+				}
+				if line, has := lr.flush(); has {
+					m.handle(ctx, s, line)
+				}
+				m.flush(ctx, s)
+				release(f)
+				f = nil
+			}
 		case !os.SameFile(fi, nfi):
 			// 文件被轮转（重命名后新建）。nginx 等程序在收到重新打开日志的信号之前仍会向旧文件写入，
 			// 因此旧文件不立即关闭，而是在宽限期内继续读取，同时从头读取新文件。
@@ -485,8 +565,9 @@ func (m *Manager) tail(ctx context.Context, s *source, path string, fromStart bo
 }
 
 const (
-	rotateGrace = 30 * time.Second // 轮转后继续读取旧文件的最长时间
-	rotateQuiet = 5 * time.Second  // 旧文件持续无新内容达到该时间即关闭
+	rotateGrace   = 30 * time.Second // 轮转后继续读取旧文件的最长时间；文件被删除后继续读取已打开文件的宽限期
+	rotateQuiet   = 5 * time.Second  // 旧文件持续无新内容达到该时间即关闭
+	fileGoneAfter = 10 * time.Minute // 通配符匹配到的文件持续不存在超过该时间即停止跟踪
 )
 
 // rotated 是已被轮转但仍在收尾读取的旧文件。
@@ -513,6 +594,19 @@ func (fs *fileSet) add(fi os.FileInfo) {
 	if len(fs.infos) > 256 {
 		fs.infos = fs.infos[len(fs.infos)-256:]
 	}
+}
+
+// remove 移除一个文件身份（文件已被删除，其 inode 可能被复用）。
+func (fs *fileSet) remove(fi os.FileInfo) {
+	fs.mu.Lock()
+	defer fs.mu.Unlock()
+	out := fs.infos[:0]
+	for _, x := range fs.infos {
+		if !os.SameFile(x, fi) {
+			out = append(out, x)
+		}
+	}
+	fs.infos = out
 }
 
 // contains 判断 path 是否为已跟踪过的文件（按文件身份而非文件名判断，重命名后仍能识别）。

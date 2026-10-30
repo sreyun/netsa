@@ -380,6 +380,12 @@ func cmdServe(args []string) error {
 	if n := a.store.RefreshGeo(a.geo.Relocate); n > 0 {
 		log.Printf("[geo] 已按当前定位库更新 %d 个历史攻击源的归属地", n)
 	}
+	// 恢复上次运行自动识别的对外服务（只在实时服务中恢复，离线分析不受历史状态影响）
+	if err := a.exposure.SetPath(dataFile(cfg, "", "exposure-learned.json"), time.Now()); err != nil {
+		log.Printf("[exposure] 恢复自动识别的对外服务失败（将重新识别）: %v", err)
+	} else if n := a.exposure.LearnedCount(); n > 0 {
+		log.Printf("[exposure] 已恢复 %d 个自动识别的对外服务", n)
+	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -437,6 +443,9 @@ func cmdServe(args []string) error {
 			if err := a.ingest.Senders.Flush(); err != nil {
 				log.Printf("[syslog] %v", err)
 			}
+			if err := a.exposure.Flush(); err != nil {
+				log.Printf("[exposure] %v", err)
+			}
 		case <-ctx.Done():
 			log.Printf("正在退出...")
 			shutdown, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -453,6 +462,9 @@ func cmdServe(args []string) error {
 				log.Printf("[learn] 保存学习状态失败: %v", err)
 			}
 			a.ingest.Senders.Flush()
+			if err := a.exposure.Flush(); err != nil {
+				log.Printf("[exposure] %v", err)
+			}
 			if err := a.store.Save(cfg.Storage.Snapshot); err != nil {
 				log.Printf("[store] 保存快照失败: %v", err)
 			}

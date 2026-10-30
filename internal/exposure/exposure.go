@@ -42,9 +42,11 @@ type Manager struct {
 	unreached atomic.Int64
 	polMu     sync.Mutex
 	policies  map[string]*policyStat
-	// 有会话证据的对外服务（自动识别，等同于已登记的映射）
-	learnMu sync.RWMutex
-	learned map[string]*learnedSvc
+	// 有会话证据的对外服务（自动识别，等同于已登记的映射），见 persist.go 的持久化
+	learnMu    sync.RWMutex
+	learned    map[string]*learnedSvc
+	learnDirty atomic.Bool
+	path       string // 自动识别结果的保存位置，为空时只保存在内存中
 	// 防火墙自身在内置管理 / VPN 端口之外对外提供服务的端口（exposure.device_ports）
 	devicePorts map[int]bool
 }

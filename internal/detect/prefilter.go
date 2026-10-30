@@ -232,22 +232,3 @@ func buildPrefilter(pattern string, flags syntax.Flags) [][]string {
 	}
 	return best(toCNF(analyze(re.Simplify())))
 }
-
-// prefilterPass 判断文本是否满足全部必要子句。
-func prefilterPass(s string, cnf [][]string) bool {
-	for _, clause := range cnf {
-		if !containsAnyStr(s, clause) {
-			return false
-		}
-	}
-	return true
-}
-
-func containsAnyStr(s string, subs []string) bool {
-	for _, sub := range subs {
-		if strings.Contains(s, sub) {
-			return true
-		}
-	}
-	return false
-}

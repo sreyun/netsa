@@ -31,6 +31,18 @@ func TestMasker(t *testing.T) {
 	if NewMasker(false).Mask(in) != in {
 		t.Fatal("关闭脱敏时应原样返回")
 	}
+	// 地址紧贴其他字符（URL 编码、拼接在参数名后）同样脱敏；本身合法的公网地址不能被拆出「内网后缀」
+	glued := NewMasker(true).Mask("cmd=ping%2010.20.30.40&h=host_172.16.0.9 src 110.20.30.40 v2026.10.30.1")
+	for _, leak := range []string{"10.20.30.40&", "172.16.0.9"} {
+		if strings.Contains(glued, leak) {
+			t.Errorf("紧贴其他字符的内网地址未脱敏 %q: %s", leak, glued)
+		}
+	}
+	for _, keep := range []string{"%20内网主机#1&", "host_内网主机#2", "src 110.20.30.40", "v2026.10.30.1"} {
+		if !strings.Contains(glued, keep) {
+			t.Errorf("脱敏结果应包含 %q: %s", keep, glued)
+		}
+	}
 	// 内网 IPv6（ULA、链路本地）同样脱敏，同一地址的不同写法对应同一个占位符；公网 IPv6、时间与 MAC 地址保留
 	v6 := m.Mask("fd00:10::5 → 2001:4860:4860::8888 at 08:49:59 from fe80::1 mac 00:1a:2b:3c:4d:5e, again fd00:10:0:0:0:0:0:5")
 	for _, keep := range []string{"内网主机#3 →", "2001:4860:4860::8888", "08:49:59", "from 内网主机#4", "00:1a:2b:3c:4d:5e", "again 内网主机#3"} {

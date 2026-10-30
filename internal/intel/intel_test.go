@@ -1,7 +1,11 @@
 package intel
 
 import (
+	"context"
 	"fmt"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"net/netip"
 	"strings"
 	"testing"
@@ -28,6 +32,33 @@ bad-line
 	}
 	if l.count != 3 || len(l.addrs) != 2 {
 		t.Fatalf("网段 %d 个、IP %d 个", l.count, len(l.addrs))
+	}
+}
+
+// Tor 出口列表拉取失败（错误状态码、内容不是 IP 列表）时保留上次的列表，不能被清空。
+func TestFetchTorKeepsListOnFailure(t *testing.T) {
+	status, body := http.StatusOK, "# exits\n185.220.101.1\n185.220.101.2\n"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(status)
+		io.WriteString(w, body)
+	}))
+	defer srv.Close()
+	db := &DB{tor: map[netip.Addr]bool{}}
+	ctx := context.Background()
+	if err := db.fetchTor(ctx, srv.Client(), srv.URL); err != nil || len(db.Match("185.220.101.2")) != 1 {
+		t.Fatalf("首次拉取: %v %v", err, db.Match("185.220.101.2"))
+	}
+	for _, c := range []struct {
+		status int
+		body   string
+	}{{http.StatusServiceUnavailable, "busy"}, {http.StatusOK, "<html>rate limited</html>"}} {
+		status, body = c.status, c.body
+		if err := db.fetchTor(ctx, srv.Client(), srv.URL); err == nil {
+			t.Fatalf("HTTP %d %q 应返回错误", c.status, c.body)
+		}
+		if len(db.Match("185.220.101.1")) != 1 {
+			t.Fatalf("拉取失败（HTTP %d）后不应清空已有列表", c.status)
+		}
 	}
 }
 
