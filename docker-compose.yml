@@ -7,7 +7,7 @@ name: netsa
 services:
   netsa:
     # 默认跟随最新发布版本；生产环境建议在 .env 中固定版本，例如
-    #   NETSA_IMAGE=swr.cn-east-3.myhuaweicloud.com/sreyun/netsa:1.6.9
+    #   NETSA_IMAGE=swr.cn-east-3.myhuaweicloud.com/sreyun/netsa:1.6.10
     # 内网环境可改为私有仓库地址；从源码构建的镜像同样通过该变量指定（见 README「从源码构建镜像」）
     image: ${NETSA_IMAGE:-swr.cn-east-3.myhuaweicloud.com/sreyun/netsa:latest}
     container_name: netsa
