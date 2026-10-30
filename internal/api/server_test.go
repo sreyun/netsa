@@ -114,6 +114,16 @@ func TestMetaMapAndExport(t *testing.T) {
 	if rec := get(h, "/api/ip/203.0.113.250"); rec.Code != 404 {
 		t.Fatalf("不存在的 IP 应返回 404: %d", rec.Code)
 	}
+	// 等价写法（IPv4 映射地址、IPv6 大写 / 未压缩）与入库时的规范写法查到同一个画像与告警
+	if rec := get(h, "/api/ip/::ffff:198.51.100.20"); rec.Code != 200 {
+		t.Fatalf("IPv4 映射地址应查到画像: %d", rec.Code)
+	}
+	if rec := get(h, "/api/alerts?ip=::ffff:198.51.100.20"); !strings.Contains(rec.Body.String(), `"src_ip":"198.51.100.20"`) {
+		t.Fatalf("按等价写法查询告警: %s", rec.Body.String())
+	}
+	if got := canonIP("2001:0DB8:0000::0001"); got != "2001:db8::1" {
+		t.Fatalf("IPv6 规范化: %q", got)
+	}
 	if rec := get(h, "/api/attackers?limit=999999"); rec.Code != 200 {
 		t.Fatalf("超大 limit 应被限制而非报错: %d", rec.Code)
 	}

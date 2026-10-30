@@ -69,6 +69,19 @@ func TestTrail(t *testing.T) {
 		t.Fatalf("应发现记录被删除: %+v", v)
 	}
 	os.WriteFile(f, b, 0o640)
+	// 删除最近的记录（截断链尾）：剩余记录仍然首尾相接，必须与运行中的链尾比对才能发现
+	files := tr2.files()
+	last := files[len(files)-1]
+	lb, _ := os.ReadFile(last)
+	tail := strings.SplitAfter(strings.TrimSuffix(string(lb), "\n"), "\n")
+	os.WriteFile(last, []byte(strings.Join(tail[:len(tail)-1], "")), 0o640)
+	if v := tr2.Verify(); v.OK || !strings.Contains(strings.Join(v.Problems, ";"), "链尾缺失") {
+		t.Fatalf("应发现链尾记录被删除: %+v", v)
+	}
+	os.WriteFile(last, lb, 0o640)
+	if v := tr2.Verify(); !v.OK {
+		t.Fatalf("恢复后应校验通过: %+v", v)
+	}
 
 	// 留存清理：8 月文件超过留存期后删除，锚点保证校验仍然通过
 	tr2.retention = 40 // 截止 9 月 15 日：8 月整月过期，9 月仍在留存期内

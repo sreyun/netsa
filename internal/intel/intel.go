@@ -4,6 +4,8 @@ package intel
 import (
 	"bufio"
 	"context"
+	"errors"
+	"fmt"
 	"io"
 	"log"
 	"net/http"
@@ -84,6 +86,12 @@ func Load(cfg config.IntelConfig) (*DB, error) {
 }
 
 func parseList(name string, r io.Reader) *list {
+	l, _ := readList(name, r)
+	return l
+}
+
+// readList 逐行解析情报列表；读取中断（网络断开、超长行）时返回已解析的部分与错误。
+func readList(name string, r io.Reader) (*list, error) {
 	l := &list{name: name, addrs: map[netip.Addr]bool{}}
 	sc := bufio.NewScanner(r)
 	for sc.Scan() {
@@ -105,7 +113,7 @@ func parseList(name string, r io.Reader) *list {
 			l.addrs[a.Unmap()] = true
 		}
 	}
-	return l
+	return l, sc.Err()
 }
 
 // Match 返回命中的情报名称列表。
@@ -159,7 +167,18 @@ func (db *DB) fetchTor(ctx context.Context, client *http.Client, url string) err
 		return err
 	}
 	defer resp.Body.Close()
-	l := parseList("tor", resp.Body)
+	// 拉取失败时保留上次的列表：此前不检查状态码与读取错误，源站返回错误页（限流、5xx）或下载中途断开时，
+	// 会用空的 / 不完整的列表替换掉已有列表，Tor 情报静默失效到下一次拉取（6 小时）
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("HTTP %d，保留上次的列表", resp.StatusCode)
+	}
+	l, err := readList("tor", io.LimitReader(resp.Body, 32<<20))
+	if err != nil {
+		return fmt.Errorf("读取中断（%v），保留上次的列表", err)
+	}
+	if len(l.addrs) == 0 {
+		return errors.New("返回的内容中没有 IP 地址（可能不是出口节点列表），保留上次的列表")
+	}
 	db.mu.Lock()
 	db.tor = l.addrs
 	db.mu.Unlock()

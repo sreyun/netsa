@@ -259,7 +259,8 @@ func (s *Server) authLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	f.Username = strings.TrimSpace(f.Username)
-	if f.Username == "" || f.Password == "" || len(f.Password) > 256 {
+	// 账号名最长 32 个字符：超长的用户名不可能存在，不进入锁定统计（避免任意长度的键撑大失败计数表）
+	if f.Username == "" || f.Password == "" || len(f.Password) > 256 || len(f.Username) > 64 {
 		writeErrorCode(w, http.StatusBadRequest, "请输入用户名和密码", "bad_request")
 		return
 	}

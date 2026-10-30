@@ -64,26 +64,9 @@ func newACMatcher(lits []string) *acMatcher {
 	return m
 }
 
-// scan 扫描文本，对每个出现的字面量回调其编号与结束位置（不含）。
-func (m *acMatcher) scan(s string, fn func(id int32, end int)) {
-	node := int32(0)
-	for i := 0; i < len(s); i++ {
-		c := m.alpha[s[i]]
-		if c == 0 {
-			node = 0
-			continue
-		}
-		node = m.next[int(node)*m.width+int(c)]
-		for _, id := range m.out[node] {
-			fn(id, i+1)
-		}
-	}
-}
-
 // bitset 是固定位数的位图。
 type bitset []uint64
 
-func newBitset(n int) bitset      { return make(bitset, (n+63)/64) }
 func (b bitset) set(i int32)      { b[i>>6] |= 1 << (uint(i) & 63) }
 func (b bitset) has(i int32) bool { return b[i>>6]&(1<<(uint(i)&63)) != 0 }
 func (b bitset) clear() {

@@ -1,9 +1,12 @@
 package exposure
 
 import (
+	"os"
+	"path/filepath"
 	"slices"
 	"strconv"
 	"testing"
+	"time"
 
 	"netsa/internal/config"
 	"netsa/internal/model"
@@ -80,6 +83,42 @@ func TestLearnedServices(t *testing.T) {
 	}
 	if c := m.Candidates(); len(c) != 0 {
 		t.Fatalf("已自动识别的服务不应再作为候选: %+v", c)
+	}
+}
+
+// 自动识别的对外服务在重启后恢复；长期没有再出现会话证据的服务（可能已下线）不再恢复。
+func TestLearnedPersist(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "exposure-learned.json")
+	now := time.Now()
+	m, _ := Load(config.ExposureConfig{Enabled: true})
+	if err := m.SetPath(path, now); err != nil {
+		t.Fatal(err)
+	}
+	m.Learn(&model.Event{Time: now, DstIP: "43.242.97.36", DstPort: 443, Proto: "tcp", NatDstIP: "10.0.0.21"}, "经 DNAT 转发至 10.0.0.21")
+	m.Learn(&model.Event{Time: now.Add(-40 * 24 * time.Hour), DstIP: "43.242.97.37", DstPort: 22, Proto: "tcp"}, "目标有应答")
+	if err := m.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("应写入文件: %v", err)
+	}
+
+	m2, _ := Load(config.ExposureConfig{Enabled: true})
+	if err := m2.SetPath(path, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := m2.Lookup("43.242.97.36", 443, "tcp"); !ok || m2.LearnedCount() != 1 {
+		t.Fatalf("重启后应恢复自动识别的服务（过期的不恢复）: %+v", m2.Learned())
+	}
+	if l := m2.Learned()[0]; l.Reason != "经 DNAT 转发至 10.0.0.21" || l.Hits != 1 {
+		t.Fatalf("恢复的内容: %+v", l)
+	}
+	if err := m2.Flush(); err != nil { // 没有变化时不重写
+		t.Fatal(err)
+	}
+	os.WriteFile(path, []byte("{broken"), 0o600)
+	if err := (&Manager{learned: map[string]*learnedSvc{}}).SetPath(path, now); err == nil {
+		t.Fatal("文件损坏时应返回错误")
 	}
 }
 

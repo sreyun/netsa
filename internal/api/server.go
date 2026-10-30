@@ -357,8 +357,17 @@ func (s *Server) attackers(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]any{"total": total, "items": list})
 }
 
+// canonIP 把查询参数中的 IP 规范化为入库时的写法（IPv4 映射地址、IPv6 大小写与零压缩、区域标识），
+// 否则 2001:DB8::1、::ffff:203.0.113.5 这类等价写法查不到已有的画像与告警；无法解析时原样返回。
+func canonIP(s string) string {
+	if a, err := netip.ParseAddr(strings.TrimSpace(s)); err == nil {
+		return a.Unmap().WithZone("").String()
+	}
+	return s
+}
+
 func (s *Server) ipDetail(w http.ResponseWriter, r *http.Request) {
-	d := s.Store.IPDetail(r.PathValue("ip"))
+	d := s.Store.IPDetail(canonIP(r.PathValue("ip")))
 	if d == nil {
 		writeError(w, http.StatusNotFound, "未找到该 IP 的记录")
 		return
@@ -397,7 +406,7 @@ func (s *Server) alerts(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	since, _ := strconv.ParseUint(q.Get("since"), 10, 64)
 	list := s.Store.Alerts(store.AlertQuery{
-		MinSeverity: model.ParseSeverity(q.Get("severity")), Category: q.Get("category"), IP: q.Get("ip"),
+		MinSeverity: model.ParseSeverity(q.Get("severity")), Category: q.Get("category"), IP: canonIP(q.Get("ip")),
 		Result: q.Get("result"), Kind: q.Get("kind"), Search: q.Get("q"), SinceID: since,
 		Limit: clamp(qint(r, "limit", 200), 1, 2000),
 		Phase: q.Get("phase"), Target: q.Get("target"), From: qtime(q.Get("from")), To: qtime(q.Get("to")), Technique: q.Get("technique"),
@@ -610,19 +619,34 @@ func (b *Broker) Serve(w http.ResponseWriter, r *http.Request, alive func() bool
 	}
 	ping := time.NewTicker(every)
 	defer ping.Stop()
+	// 长连接不设整体期限，但每次写入限时：客户端不再读取（网络卡死、恶意慢读）时发送缓冲区写满，
+	// 没有写期限的写入会永久阻塞，连接与订阅名额（上限 256）就再也不会释放
+	rc := http.NewResponseController(w)
+	send := func(format string, args ...any) bool {
+		_ = rc.SetWriteDeadline(time.Now().Add(sseWriteTimeout))
+		if _, err := fmt.Fprintf(w, format, args...); err != nil {
+			return false
+		}
+		return rc.Flush() == nil
+	}
 	for {
 		select {
 		case <-r.Context().Done():
 			return
 		case msg := <-ch:
-			fmt.Fprintf(w, "event: alert\ndata: %s\n\n", msg)
-			fl.Flush()
+			if !send("event: alert\ndata: %s\n\n", msg) {
+				return
+			}
 		case <-ping.C:
 			if alive != nil && !alive() {
 				return
 			}
-			fmt.Fprint(w, ": ping\n\n")
-			fl.Flush()
+			if !send(": ping\n\n") {
+				return
+			}
 		}
 	}
 }
+
+// sseWriteTimeout 是实时告警流单次写入的最长时间。
+const sseWriteTimeout = 30 * time.Second

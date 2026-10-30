@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"io"
 	"log"
 	"net/http"
 	"strconv"
@@ -120,7 +121,8 @@ func (a *IPAPI) query(ctx context.Context, ips []string) (map[string]*SourceResu
 		return nil, wait, errStatus(resp.StatusCode)
 	}
 	var list []ipapiResp
-	if err := json.NewDecoder(resp.Body).Decode(&list); err != nil {
+	// 第三方接口（或配置的兼容服务）的响应大小加上限：100 个 IP 的结果约 30KB
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&list); err != nil {
 		return nil, wait, err
 	}
 	out := map[string]*SourceResult{}

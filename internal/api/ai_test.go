@@ -15,6 +15,18 @@ import (
 	"netsa/internal/store"
 )
 
+// 先脱敏再截断：内网地址跨过截断位置时，不能以残缺形式（脱敏规则无法识别）发给外部模型。
+func TestIncidentFactsMaskBeforeClip(t *testing.T) {
+	s, st := testServer(t, "", "")
+	st.Record(&model.Event{Kind: model.KindWeb, SrcIP: "203.0.113.9", Method: "GET", URI: "/x", Time: time.Now()},
+		[]model.Hit{{RuleID: "r", Name: "SQL注入", Category: "SQL注入", Severity: model.SevHigh, Result: model.ResultPassed,
+			Evidence: strings.Repeat("a", 290) + " 10.20.30.40"}}) // 截断位置落在地址中间（第 300 个字符）
+	facts := s.incidentFacts(st.Incident(1), ai.NewMasker(true))
+	if strings.Contains(facts, "10.20.30") || !strings.Contains(facts, "203.0.113.9") {
+		t.Fatalf("内网地址被截断后未脱敏:\n%s", facts)
+	}
+}
+
 // 事件 AI 研判：发送前脱敏，结论写入处置记录；未启用时返回 404。
 func TestIncidentAI(t *testing.T) {
 	var sent string

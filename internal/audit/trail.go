@@ -139,14 +139,17 @@ func (t *Trail) AppendAudit(r auth.Record) {
 	}
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	now := t.now()
 	if r.Time.IsZero() {
-		r.Time = t.now()
+		r.Time = now
 	}
 	e := Entry{Seq: t.seq + 1, Time: r.Time, User: clip(r.User, 64), IP: clip(r.IP, 64), Action: clip(r.Action, 64), Detail: clip(r.Detail, 500),
 		OK: r.OK, Reason: clip(r.Reason, 300), Agent: clip(r.Agent, 200), Prev: t.last}
 	e.Hash = e.compute()
 	b, _ := json.Marshal(e)
-	path := filepath.Join(t.dir, "audit-"+e.Time.Format("200601")+".jsonl")
+	// 按追加时间（而不是调用方给出的记录时间）选择月份文件：调用方在锁外取的时间可能早于上一条记录，
+	// 跨月时会被写进上个月的文件，文件顺序与链的顺序不一致，校验会误报为篡改
+	path := filepath.Join(t.dir, "audit-"+now.Format("200601")+".jsonl")
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o640)
 	if err == nil {
 		_, err = f.Write(append(b, '\n'))
@@ -270,6 +273,8 @@ func (t *Trail) Verify() VerifyResult {
 	t.mu.Lock()
 	files := t.files()
 	anchor := t.anchor()
+	// 运行中已知的链尾：只校验文件内部的连续性发现不了「删掉最后几条记录」，剩下的记录仍然首尾相接
+	liveSeq, liveHash := t.seq, t.last
 	t.mu.Unlock()
 	prev, seq := anchor, uint64(0)
 	res.Anchored = anchor != ""
@@ -298,11 +303,18 @@ func (t *Trail) Verify() VerifyResult {
 			if e.compute() != e.Hash {
 				res.Problems = append(res.Problems, fmt.Sprintf("%s：第 %d 条记录内容与哈希不一致（记录被修改）", filepath.Base(f), e.Seq))
 			}
+			if e.Seq == liveSeq && e.Hash != liveHash {
+				res.Problems = append(res.Problems, fmt.Sprintf("%s：第 %d 条记录与运行中记录的链尾哈希不一致（记录被替换）", filepath.Base(f), e.Seq))
+			}
 			prev, seq = e.Hash, e.Seq
 			if len(res.Problems) >= 50 {
 				break
 			}
 		}
+	}
+	// 校验期间可能有新记录追加（序号大于 liveSeq），但不会少于运行中已写入的链尾
+	if seq < liveSeq && len(res.Problems) < 50 { // 问题过多时提前结束了扫描，seq 并不是文件中的链尾
+		res.Problems = append(res.Problems, fmt.Sprintf("链尾缺失：已写入至第 %d 条，文件中只到第 %d 条（最近的记录被删除）", liveSeq, seq))
 	}
 	res.LastSeq = seq
 	res.OK = len(res.Problems) == 0

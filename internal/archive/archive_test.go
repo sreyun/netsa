@@ -13,6 +13,24 @@ import (
 	"netsa/internal/model"
 )
 
+// 未配置 timezone（time.Local）时按 TZ 环境变量分桶，而不是落到数据库会话时区（外部库常为 UTC）。
+func TestZoneName(t *testing.T) {
+	sh, _ := time.LoadLocation("Asia/Shanghai")
+	if z := zoneName(sh); z != "Asia/Shanghai" {
+		t.Fatalf("显式时区: %q", z)
+	}
+	t.Setenv("TZ", "Asia/Shanghai")
+	if z := zoneName(time.Local); z != "Asia/Shanghai" {
+		t.Fatalf("time.Local 应取 TZ 环境变量: %q", z)
+	}
+	for _, tz := range []string{"", "Local", "No/Such_Zone"} {
+		t.Setenv("TZ", tz)
+		if z := zoneName(time.Local); z != "" {
+			t.Fatalf("TZ=%q 无法识别时应按会话时区（返回空）: %q", tz, z)
+		}
+	}
+}
+
 func TestWhereBuilder(t *testing.T) {
 	from := time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC)
 	to := from.AddDate(0, 1, 0)

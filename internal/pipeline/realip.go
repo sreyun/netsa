@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"netsa/internal/config"
+	"netsa/internal/detect"
 	"netsa/internal/geo"
 	"netsa/internal/model"
 )
@@ -247,8 +248,10 @@ func (r *RealIP) Apply(ev *model.Event) *model.Hit {
 	if !r.isTrusted(peer) && !(r.auto && r.learnPeer(peer, ev)) {
 		switch {
 		case containsLoopback(ev.XFF) || containsLoopback(ev.XRealIP):
+			// 头部内容完全由攻击者控制：转义控制字符并截断，避免超长 / 带换行的证据进入告警、推送与归档
 			return &model.Hit{RuleID: "spoof-xff", Name: "伪造来源地址头(绕过IP限制)", Category: "IP伪造",
-				Severity: model.SevLow, Phase: model.PhaseRecon, Evidence: "X-Forwarded-For: " + ev.XFF + " X-Real-IP: " + ev.XRealIP}
+				Severity: model.SevLow, Phase: model.PhaseRecon,
+				Evidence: "X-Forwarded-For: " + detect.Printable(ev.XFF, 200) + " X-Real-IP: " + detect.Printable(ev.XRealIP, 100)}
 		case r.cdnOnly && !geo.IsInternal(peer) && !peer.IsLoopback():
 			return &model.Hit{RuleID: "cdn-bypass", Name: "绕过CDN直连源站", Category: "CDN绕过",
 				Severity: model.SevMedium, Phase: model.PhaseRecon, Evidence: "直连地址 " + ev.SrcIP + " 不属于可信 CDN/代理网段，源站地址可能已暴露"}

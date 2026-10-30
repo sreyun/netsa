@@ -5,6 +5,7 @@ import (
 	"crypto/tls"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"strconv"
 	"strings"
@@ -103,7 +104,8 @@ func (c *RDAPClient) Lookup(ctx context.Context, ip string) (*RDAPInfo, error) {
 		return nil, fmt.Errorf("RDAP 返回 HTTP %d", resp.StatusCode)
 	}
 	var r rdapResp
-	if err := json.NewDecoder(resp.Body).Decode(&r); err != nil {
+	// RDAP 服务器会跟随重定向到各地区注册机构，响应大小加上限（正常结果只有几十 KB）
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 2<<20)).Decode(&r); err != nil {
 		return nil, err
 	}
 	info := &RDAPInfo{

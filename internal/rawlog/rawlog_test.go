@@ -102,6 +102,10 @@ func TestWriteSearchVerify(t *testing.T) {
 	if res, _ := s.Search(ctx2, Query{From: base, To: base.Add(30 * time.Minute), Keyword: "late line"}); len(res.Records) != 1 {
 		t.Fatal("追加写入的日志")
 	}
+	// 扫描量在唯一（也是最后一个）分段中途达到上限：结果必须标记为不完整，不能当作完整结果展示
+	if res, _ := s.Search(ctx2, Query{From: base, To: base.Add(20 * time.Minute), MaxBytes: 500}); !res.Truncated || !strings.Contains(res.Reason, "扫描量") {
+		t.Fatalf("最后一个分段被截断时应标记为不完整: %+v", res)
+	}
 
 	// 完整性校验：哈希链完整、分段一致
 	v := s.Verify(ctx2)

@@ -142,10 +142,7 @@ func (s *Server) assetImport(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusRequestEntityTooLarge, "文件过大（最大 20MB）")
 		return
 	}
-	name := strings.TrimSpace(q.Get("name"))
-	if len(name) > 100 {
-		name = name[:100]
-	}
+	name := clipRunes(strings.TrimSpace(q.Get("name")), 100) // 按字符截断：按字节截断会把中文名称截成非法 UTF-8
 	var res assets.ImportResult
 	action := "导入资产"
 	if typ == "assets" {

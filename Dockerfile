@@ -5,7 +5,9 @@
 ARG BASE_REGISTRY=docker.io
 
 # ---------- 构建阶段 ----------
-FROM ${BASE_REGISTRY}/library/golang:1.23-alpine AS build
+# Go 工具链须使用仍在维护期内的版本：标准库（net/http、crypto/tls、crypto/x509 等）的安全修复只进入受支持的版本，
+# 用已停止维护的版本编译，二进制会带上已公开的漏洞（可用 govulncheck ./... 检查）
+FROM ${BASE_REGISTRY}/library/golang:1.27-alpine AS build
 # 默认使用国内代理；海外环境可 --build-arg GOPROXY=https://proxy.golang.org,direct 覆盖
 ARG GOPROXY=https://goproxy.cn,direct
 # 版本号由 CI 传入（tag 名，去掉前缀 v）；不传时使用源码中的默认值
@@ -22,7 +24,8 @@ RUN ver="${VERSION#v}" && \
     go build -trimpath -ldflags "-s -w ${ver:+-X main.version=${ver}}" -o /out/netsa ./cmd/netsa
 
 # ---------- 运行阶段 ----------
-FROM ${BASE_REGISTRY}/library/alpine:3.20
+# 运行镜像同样使用仍在维护期内的 Alpine 版本（3.20 已于 2026-04 停止维护，不再提供安全更新）
+FROM ${BASE_REGISTRY}/library/alpine:3.23
 RUN apk add --no-cache ca-certificates tzdata \
  && addgroup -S -g 10001 netsa \
  && adduser -S -D -H -u 10001 -G netsa netsa \

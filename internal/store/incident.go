@@ -521,12 +521,23 @@ func (s *Store) UpdateIncidents(ids []uint64, user string, u IncidentUpdate) ([]
 	now := time.Now()
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	var out []IncidentView
+	// 先确认全部事件存在再修改：批量处置中途遇到不存在（已被淘汰）的事件时，前面的事件不能已经被改掉，
+	// 否则接口报错、研判反馈与审计都按失败处理，事件状态却已部分变更。重复的编号只处理一次
+	list := make([]*Incident, 0, len(ids))
+	seen := make(map[uint64]bool, len(ids))
 	for _, id := range ids {
+		if seen[id] {
+			continue
+		}
+		seen[id] = true
 		i := s.incidents[id]
 		if i == nil {
 			return nil, ErrNoIncident
 		}
+		list = append(list, i)
+	}
+	var out []IncidentView
+	for _, i := range list {
 		var actions []string
 		if u.Status != "" && u.Status != i.Status {
 			actions = append(actions, "状态："+IncidentStatusLabel[i.Status]+" → "+IncidentStatusLabel[u.Status])

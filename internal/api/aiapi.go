@@ -65,22 +65,26 @@ func (s *Server) incidentFacts(d *store.IncidentDetail, m *ai.Masker) string {
 		if i == 20 {
 			break
 		}
-		ev := a.Evidence
-		if len(ev) > 300 {
-			ev = ev[:300]
-		}
-		ua := a.UA
-		if len(ua) > 120 {
-			ua = ua[:120]
-		}
+		// 先脱敏再截断：先截断可能把内网地址切成不完整的形式（如 10.20.30），脱敏规则不再识别，
+		// 地址的前几段会原样发给外部模型；按字符截断，不产生非法 UTF-8
+		ev := clipRunes(m.Mask(a.Evidence), 300)
+		ua := clipRunes(m.Mask(a.UA), 120)
 		sb.WriteString("- " + a.Time.In(loc).Format("01-02 15:04:05") + " " + a.RuleID + " " + a.Name + " [" + a.Severity.Label() + "/" + a.Result + "] 目标 " +
-			m.Mask(a.Target) + " | 证据 " + m.Mask(ev))
+			m.Mask(a.Target) + " | 证据 " + ev)
 		if ua != "" {
-			sb.WriteString(" | UA " + m.Mask(ua))
+			sb.WriteString(" | UA " + ua)
 		}
 		sb.WriteString("\n")
 	}
 	return sb.String()
+}
+
+// clipRunes 按字符截断到最多 n 个字符（不截断多字节字符）。
+func clipRunes(s string, n int) string {
+	if r := []rune(s); len(r) > n {
+		return string(r[:n])
+	}
+	return s
 }
 
 // triage 研判一个事件，结论写入事件处置记录并记入审计链。user 为触发人（自动研判为「系统」）。

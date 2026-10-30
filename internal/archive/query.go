@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/netip"
+	"os"
 	"slices"
 	"strconv"
 	"strings"
@@ -285,9 +286,9 @@ func (a *Archive) Stats(ctx context.Context, q Query) (*Stats, error) {
 	case span > 400*24*time.Hour:
 		format, st.Bucket = "YYYY-MM", "month"
 	}
-	ts := "time AT TIME ZONE " + quoteLiteral(a.opt.Location.String())
-	if a.opt.Location == time.Local {
-		ts = "time"
+	ts := "time"
+	if z := zoneName(a.opt.Location); z != "" {
+		ts = "time AT TIME ZONE " + quoteLiteral(z)
 	}
 	// 取最近的 400 个时间段（倒序取再反转）
 	if err := top("SELECT to_char("+ts+", '"+format+"') AS d, '', count(*) FROM "+Table+where+" GROUP BY d ORDER BY d DESC LIMIT 400", &st.Trend); err != nil {
@@ -295,6 +296,21 @@ func (a *Archive) Stats(ctx context.Context, q Query) (*Stats, error) {
 	}
 	slices.Reverse(st.Trend)
 	return st, nil
+}
+
+// zoneName 返回 PostgreSQL 可识别的时区名。未配置 timezone 时使用的 time.Local 名为 "Local"，数据库不认识，
+// 此前直接按数据库会话时区分桶：外部数据库常为 UTC，趋势会整体错开 8 小时。此时改用 TZ 环境变量
+// （容器镜像默认 Asia/Shanghai，与页面展示时区一致）；都没有时返回空，仍按会话时区。
+func zoneName(loc *time.Location) string {
+	if loc != time.Local {
+		return loc.String()
+	}
+	if tz := strings.TrimPrefix(os.Getenv("TZ"), ":"); tz != "" && tz != "Local" {
+		if _, err := time.LoadLocation(tz); err == nil {
+			return tz
+		}
+	}
+	return ""
 }
 
 // quoteLiteral 生成 SQL 字符串字面量（仅用于程序内部的时区名）。

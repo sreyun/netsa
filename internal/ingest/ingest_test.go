@@ -169,6 +169,32 @@ func TestTailFileCreatedLater(t *testing.T) {
 	}
 }
 
+// 通配符匹配到的文件被删除（按日期命名、按保留期删除的日志）：宽限期后关闭文件（否则被删除文件的磁盘空间无法释放），
+// 长期不存在后停止跟踪并从状态页移除，不再留下空转的跟踪协程。
+func TestWildcardFileRemoved(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "app-20261001.log")
+	appendFile(t, path, 0, 2)
+	m := NewManager(100)
+	m.goneGrace, m.goneAfter = 300*time.Millisecond, 600*time.Millisecond
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if err := m.StartSource(ctx, config.SourceConfig{Name: "app", Type: "auto", Paths: []string{filepath.Join(dir, "app-*.log")}, FromBeginning: true}); err != nil {
+		t.Fatal(err)
+	}
+	collect(t, m.Out, 2)
+	if err := os.Remove(path); err != nil {
+		t.Skip("当前平台无法删除已打开的文件")
+	}
+	deadline := time.Now().Add(10 * time.Second)
+	for len(m.Stats()) > 0 && time.Now().Before(deadline) {
+		time.Sleep(100 * time.Millisecond)
+	}
+	if st := m.Stats(); len(st) != 0 {
+		t.Fatalf("文件删除后应停止跟踪并移除数据源: %+v", st)
+	}
+}
+
 // 通配符同时匹配当前日志与轮转后的旧文件（access.log*）时，旧文件不能被当作新文件从头重复读取。
 func TestRotatedFileNotReread(t *testing.T) {
 	dir := t.TempDir()
