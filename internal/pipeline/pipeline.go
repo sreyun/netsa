@@ -383,11 +383,21 @@ func (p *Pipeline) gateExposure(ev *model.Event, hits []model.Hit, reach exposur
 			return out
 		}
 		return hits
-	case exposure.ReachYes, exposure.ReachDevice:
-		suffix := "；会话证据：" + why
-		if reach == exposure.ReachDevice {
-			suffix += "，请确认设备的管理 / 业务服务未对公网开放"
+	case exposure.ReachDevice:
+		// 打到防火墙自身的管理 / VPN 服务端口：互联网扫描的单次探测不可处置，只打标签；
+		// 「管理服务对公网放行」作为暴露面风险单独记录（攻击面），针对该端口的暴力破解等行为照常告警
+		out := rewriteSingleProbes(hits, func(h *model.Hit) {
+			h.TagOnly = true
+			h.Severity = model.SevInfo
+			h.Evidence = truncEvidence(h.Evidence + "；会话证据：" + why + "，已作为暴露面风险记录（攻击面分析），单次探测不计入攻击统计")
+		})
+		if out != nil {
+			p.Exposure.AddUnreached()
+			return out
 		}
+		return hits
+	case exposure.ReachYes:
+		suffix := "；会话证据：" + why
 		if out := rewriteProbes(hits, func(h *model.Hit) { h.Evidence = truncEvidence(h.Evidence + suffix) }); out != nil {
 			return out
 		}
@@ -422,7 +432,7 @@ func (p *Pipeline) reachOf(ev *model.Event) (exposure.Verdict, string) {
 	if !p.Exposure.ReachCheck() || ev.Action != model.ActionAllow || ev.SrcIP == "" || geo.IsPrivate(ev.SrcIP) {
 		return exposure.ReachUnknown, ""
 	}
-	return exposure.Reach(ev)
+	return p.Exposure.Reach(ev)
 }
 
 // rewriteProbes 复制命中切片（不修改调用方的数据），对依赖「目标端口确有服务」的命中执行 fn；没有这类命中时返回 nil。
@@ -430,6 +440,21 @@ func rewriteProbes(hits []model.Hit, fn func(h *model.Hit)) []model.Hit {
 	var out []model.Hit
 	for i := range hits {
 		if !exposureFilterable(hits[i]) {
+			continue
+		}
+		if out == nil {
+			out = append([]model.Hit(nil), hits...)
+		}
+		fn(&out[i])
+	}
+	return out
+}
+
+// rewriteSingleProbes 与 rewriteProbes 相同，但只处理单次的端口探测（不含端口级暴力破解等行为检测）。
+func rewriteSingleProbes(hits []model.Hit, fn func(h *model.Hit)) []model.Hit {
+	var out []model.Hit
+	for i := range hits {
+		if hits[i].Category != detect.CatRiskService && hits[i].Category != detect.CatIoT {
 			continue
 		}
 		if out == nil {

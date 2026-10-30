@@ -17,16 +17,16 @@ func TestReach(t *testing.T) {
 		ev   *model.Event
 		want Verdict
 	}{
-		"untrust → untrust":  {ev("untrust", "untrust", "", 0), ReachNo},
-		"自定义外网域同域转发":         {ev("dianxin", "dianxin", "", 0), ReachNo},
-		"转发回外网域":             {ev("isp1", "Untrust", "", 0), ReachNo},
-		"FortiGate 接口角色 wan": {ev("wan", "wan", "", 0), ReachNo},
-		"转发到 dmz":            {ev("untrust", "dmz", "", 0), ReachYes},
-		"打到防火墙自身":            {ev("untrust", "local", "", 0), ReachDevice},
-		"DNAT 到内网":           {ev("untrust", "", "10.0.0.5", 0), ReachYes},
-		"DNAT 但目标无应答":        {ev("untrust", "trust", "10.0.0.5", model.ReplyNone), ReachNo},
-		"有应答":                {ev("", "", "", model.ReplyYes), ReachYes},
-		"没有证据":               {ev("", "", "", 0), ReachUnknown},
+		"untrust → untrust":   {ev("untrust", "untrust", "", 0), ReachNo},
+		"自定义外网域同域转发":          {ev("dianxin", "dianxin", "", 0), ReachNo},
+		"转发回外网域":              {ev("isp1", "Untrust", "", 0), ReachNo},
+		"FortiGate 接口角色 wan":  {ev("wan", "wan", "", 0), ReachNo},
+		"转发到 dmz":             {ev("untrust", "dmz", "", 0), ReachYes},
+		"打到防火墙自身的 Telnet":     {ev("untrust", "local", "", 0), ReachDevice},
+		"DNAT 到内网":            {ev("untrust", "", "10.0.0.5", 0), ReachYes},
+		"DNAT 但目标无应答":         {ev("untrust", "trust", "10.0.0.5", model.ReplyNone), ReachNo},
+		"有应答":                 {ev("", "", "", model.ReplyYes), ReachYes},
+		"没有证据":                {ev("", "", "", 0), ReachUnknown},
 		"NAT 地址为公网（不视为转发到内网）": {ev("", "", "203.0.113.9", 0), ReachUnknown},
 	} {
 		got, why := Reach(c.ev)
@@ -74,5 +74,34 @@ func TestLearnedServices(t *testing.T) {
 	}
 	if c := m.Candidates(); len(c) != 0 {
 		t.Fatalf("已自动识别的服务不应再作为候选: %+v", c)
+	}
+}
+
+// 打到防火墙自身的非服务端口（互联网扫描 37215、2323、5432 等）未到达任何服务；配置追加的设备端口识别为设备服务。
+func TestReachLocalPorts(t *testing.T) {
+	ev := func(port int, proto string) *model.Event {
+		return &model.Event{SrcIP: "79.124.58.130", DstIP: "43.242.97.51", DstPort: port, Proto: proto, SrcZone: "untrust", DstZone: "local", Action: model.ActionAllow}
+	}
+	m, _ := Load(config.ExposureConfig{DevicePorts: []int{6443}})
+	for _, c := range []struct {
+		port  int
+		proto string
+		want  Verdict
+	}{
+		{37215, "tcp", ReachNo}, {2323, "tcp", ReachNo}, {5432, "tcp", ReachNo}, {22, "tcp", ReachDevice}, {161, "udp", ReachDevice},
+		{161, "tcp", ReachNo}, {500, "", ReachDevice}, {6443, "tcp", ReachDevice},
+	} {
+		if got, why := m.Reach(ev(c.port, c.proto)); got != c.want || why == "" {
+			t.Errorf("%d/%s: %d（%s）", c.port, c.proto, got, why)
+		}
+	}
+	if v, _ := Reach(ev(6443, "tcp")); v != ReachNo {
+		t.Fatal("未配置时 6443 不是设备服务端口")
+	}
+	if name, sev := DeviceRisk(23, "tcp"); name != "Telnet" || sev != model.SevHigh {
+		t.Fatalf("Telnet 管理服务: %s %v", name, sev)
+	}
+	if _, sev := DeviceRisk(4500, "udp"); sev != model.SevInfo {
+		t.Fatal("VPN 端口按设计对外开放，不作为风险")
 	}
 }

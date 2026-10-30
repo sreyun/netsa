@@ -213,7 +213,12 @@ exposure:
   # 会话证据研判（默认开启，与 enabled 无关）：防火墙放行、但日志自身表明没有到达服务的端口探测只打标签——
   # 目的安全域仍为外网（如华为 source-zone=untrust, destination-zone=untrust，常见于出站策略源安全域配置过宽），
   # 或会话结束时目标没有任何应答（华为会话日志 RcvPkts=0、FortiGate rcvdpkt=0）。经 DNAT 转发到内网的保持告警。
+  # 打到防火墙自身（destination-zone=local）的探测：非设备服务端口只打标签；管理服务端口的单次探测也只打标签，
+  # “防火墙管理服务对公网放行”记为攻击面风险。
   reach_check: true
+  # 防火墙自身对外提供服务的端口，在内置的 SSH / Telnet / HTTP(S) / SNMP / NETCONF / IKE / L2TP / SSL VPN 端口之外追加，
+  # 例如改过端口的 SSL VPN：[6443]
+  device_ports: []
   enabled: false
   # 兜底端口白名单：拿不到精确 NAT 表时（例如由云负载均衡、上级防火墙转发），这些端口视为已发布。
   allowed_ports: []
