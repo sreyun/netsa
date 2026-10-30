@@ -1,24 +1,27 @@
-# 生产部署：docker compose up -d --build
+# 生产部署（直接使用华为云 SWR 上发布的镜像，无需在服务器上编译）：
+#   docker compose pull && docker compose up -d
 # 浏览器访问 http://<服务器IP>:8080 ，防火墙/网络设备 syslog 发送到 <服务器IP>:5514
+# 镜像地址、版本、管理员初始密码、告警归档等均可在同目录的 .env 中设置，模板见 .env.example
 name: netsa
 
 services:
   netsa:
-    build:
-      context: .
-      args:
-        # 国内网络构建可改为 https://goproxy.cn,direct
-        GOPROXY: ${GOPROXY:-https://proxy.golang.org,direct}
-    image: netsa:latest
+    # 默认跟随最新发布版本；生产环境建议在 .env 中固定版本，例如
+    #   NETSA_IMAGE=swr.cn-east-3.myhuaweicloud.com/sreyun/netsa:1.6.9
+    # 内网环境可改为私有仓库地址；从源码构建的镜像同样通过该变量指定（见 README「从源码构建镜像」）
+    image: ${NETSA_IMAGE:-swr.cn-east-3.myhuaweicloud.com/sreyun/netsa:latest}
     container_name: netsa
     restart: unless-stopped
     command: ["serve", "-c", "/app/configs/docker.yaml"]
     environment:
       TZ: Asia/Shanghai
       # 可选：首次启动时管理员 admin 的初始密码；不设置则随机生成并输出在日志中（docker compose logs netsa | grep 初始密码）
-      # NETSA_ADMIN_PASSWORD: "请替换为强密码"
+      NETSA_ADMIN_PASSWORD: ${NETSA_ADMIN_PASSWORD:-}
       # 可选：告警归档连接串，在 .env 中设置后生效（未设置时不启用归档，无需数据库），见下方 postgres 服务说明
       NETSA_ARCHIVE_DSN: ${NETSA_ARCHIVE_DSN:-}
+      # 可选：外部大模型密钥（配置 ai.enabled 后使用）、周报月报发信口令
+      NETSA_AI_API_KEY: ${NETSA_AI_API_KEY:-}
+      NETSA_SMTP_PASSWORD: ${NETSA_SMTP_PASSWORD:-}
     ports:
       - "8080:8080"
       - "5514:5514/udp"
@@ -27,7 +30,8 @@ services:
     group_add:
       - "4"
     volumes:
-      # 配置文件挂载为只读，修改后 docker compose restart 生效
+      # 配置文件挂载为只读，修改后 docker compose restart netsa 生效。
+      # 必须与本文件放在一起：缺少该文件时 Docker 会创建同名空目录，容器无法启动
       - ./configs/docker.yaml:/app/configs/docker.yaml:ro
       # 必须挂载目录而不是单个文件：logrotate 轮转会创建新文件，单文件挂载会一直指向旧文件
       - /var/log/nginx:/logs/nginx:ro
@@ -48,14 +52,14 @@ services:
         max-size: "20m"
         max-file: "3"
 
-  # 可选：告警归档数据库（PostgreSQL）。默认不启动；启用方法：
+  # 可选：告警归档数据库（PostgreSQL 18，pgvector 镜像）。默认不启动；启用方法：
   #   1. 在本目录的 .env 文件中写入（两处密码相同，使用强密码）：
   #        POSTGRES_PASSWORD=强密码
   #        NETSA_ARCHIVE_DSN=postgres://netsa:强密码@postgres:5432/netsa?sslmode=disable
   #   2. docker compose --profile archive up -d
   # 已有 PostgreSQL 时无需启动此服务，把 NETSA_ARCHIVE_DSN 指向现有数据库即可。
   postgres:
-    image: postgres:17-alpine
+    image: ${PG_IMAGE:-swr.cn-east-3.myhuaweicloud.com/sreyun/pgvector:pg18}
     container_name: netsa-postgres
     profiles: ["archive"]
     restart: unless-stopped
@@ -66,7 +70,10 @@ services:
       TZ: Asia/Shanghai
     # 不映射端口，只允许同一 compose 网络中的 netsa 访问；需用外部工具连接时可加 "127.0.0.1:5432:5432"
     volumes:
-      - netsa-pg:/var/lib/postgresql/data
+      # PostgreSQL 18 镜像的数据目录为 /var/lib/postgresql/18/docker，数据卷须挂载到 /var/lib/postgresql
+      # （不再是 17 及以前的 /var/lib/postgresql/data）。旧版 PostgreSQL 17 的数据在数据卷 netsa-pg 中，
+      # 不能被 18 直接读取，迁移方法见 README「告警归档」一节
+      - netsa-pg18:/var/lib/postgresql
     shm_size: 256mb
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U netsa -d netsa"]
@@ -81,4 +88,4 @@ services:
 
 volumes:
   netsa-state:
-  netsa-pg:
+  netsa-pg18:

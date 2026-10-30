@@ -28,23 +28,112 @@
 
 ## 快速开始（Docker Compose）
 
-```bash
-# 演示环境：模拟器持续生成日志，netsa 实时分析，浏览器打开 http://localhost:8080
-docker compose -f docker-compose.demo.yml up -d --build
+镜像发布在华为云容器镜像服务（SWR），同时提供 amd64 与 arm64，服务器上无需安装 Go、无需编译：
 
-# 生产部署：读取宿主机 /var/log/nginx 与 /var/log 下的防火墙日志，并在 5514 端口接收 syslog
-docker compose up -d --build
+| 镜像 | 用途 |
+|---|---|
+| `swr.cn-east-3.myhuaweicloud.com/sreyun/netsa:latest` | netsa 主程序（默认）。也可使用版本号标签，如 `:1.6.9` |
+| `swr.cn-east-3.myhuaweicloud.com/sreyun/pgvector:pg18` | 可选的告警归档数据库（PostgreSQL 18 + pgvector），只在启用归档时拉取 |
+
+### 生产部署
+
+```bash
+# 1. 获取部署文件：docker-compose.yml、configs/docker.yaml、.env.example
+git clone https://github.com/sreyun/netsa.git && cd netsa
+
+# 2. 可选：设置管理员初始密码、固定镜像版本、启用告警归档等（变量说明见文件内注释）
+cp .env.example .env
+
+# 3. 拉取镜像并启动：读取宿主机 /var/log/nginx 与 /var/log 下的防火墙 / 认证日志，并在 5514 端口接收 syslog
+docker compose pull
+docker compose up -d
 docker compose logs -f netsa
 ```
 
-- **登录**：演示环境账号 `admin` / `Netsa@demo2026`（见 [configs/demo.yaml](configs/demo.yaml)）。生产部署首次启动会自动创建管理员 `admin` 并在日志中输出初始密码：`docker compose logs netsa | grep 初始密码`，首次登录后须修改；也可在 `docker-compose.yml` 中通过 `NETSA_ADMIN_PASSWORD` 指定。
-- 国内网络构建镜像较慢时：`GOPROXY=https://goproxy.cn,direct docker compose up -d --build`
-- 修改 [configs/docker.yaml](configs/docker.yaml) 后执行 `docker compose restart netsa` 生效（配置以只读方式挂载）。
-- 态势数据保存在数据卷 `netsa-state`（`/app/state`），容器重建后自动恢复。
-- 容器以非 root 用户（uid 10001）运行，并加入 `adm` 组（gid 4）以读取 nginx 日志；若宿主机日志权限不同，调整 `group_add` 或日志文件权限。
-- 日志必须以**目录**方式挂载：logrotate 轮转会创建新文件，单文件挂载会一直指向旧文件。
-- 若需在告警中看到网络设备的真实源地址（多设备共用 syslog 端口时），可将服务改为 `network_mode: host`。
-- 健康检查：`GET /healthz`（不需要认证）。
+- **只需要两个文件**：服务器上不想克隆整个仓库时，把 `docker-compose.yml` 与 `configs/docker.yaml` 按原有的相对路径放到同一目录即可。配置文件必须存在，否则 Docker 会创建同名空目录，容器无法启动。
+- **登录**：浏览器访问 `http://<服务器IP>:8080`。首次启动会自动创建管理员 `admin`，初始密码输出在日志中：`docker compose logs netsa | grep 初始密码`，首次登录后须修改。也可以在 `.env` 中用 `NETSA_ADMIN_PASSWORD` 指定初始密码。
+- **接入日志**：网络设备的 syslog 发送到 `<服务器IP>:5514`（UDP / TCP）；本机日志的路径在 [configs/docker.yaml](configs/docker.yaml) 的 `sources` 中配置，详见下文[接入日志](#接入日志)。
+- **修改配置**：编辑 [configs/docker.yaml](configs/docker.yaml) 后执行 `docker compose restart netsa` 生效（配置以只读方式挂载）。
+- **数据持久化**：态势数据、账号、原始日志与审计链都保存在数据卷 `netsa-state`（容器内 `/app/state`），容器重建或升级后自动恢复。
+- **权限**：容器以非 root 用户（uid 10001）运行，并加入 `adm` 组（gid 4）以读取 nginx 日志；宿主机日志权限不同时，调整 `group_add` 或日志文件权限。
+- **日志必须以目录方式挂载**：logrotate 轮转会创建新文件，单文件挂载会一直指向旧文件。
+- **保留设备真实源地址**：多台设备共用 syslog 端口、需要在发送端管理中按设备地址区分时，可把服务改为 `network_mode: host`。
+- **健康检查**：`GET /healthz`（不需要认证），compose 已配置容器健康检查。
+- **告警归档**：需要长期留存、检索历史告警时，按 [告警归档](#告警归档可选postgresql) 一节在 `.env` 中设置数据库密码后执行 `docker compose --profile archive up -d`。
+
+`.env` 中可用的变量（均为可选）：
+
+| 变量 | 默认值 | 说明 |
+|---|---|---|
+| `NETSA_IMAGE` | `swr.cn-east-3.myhuaweicloud.com/sreyun/netsa:latest` | netsa 镜像；生产环境建议固定版本号，内网可改为私有仓库地址 |
+| `PG_IMAGE` | `swr.cn-east-3.myhuaweicloud.com/sreyun/pgvector:pg18` | 告警归档数据库镜像 |
+| `NETSA_ADMIN_PASSWORD` | 随机生成 | 首次启动时管理员 `admin` 的初始密码 |
+| `POSTGRES_PASSWORD` | — | 自带 PostgreSQL 的密码（启用归档时必填） |
+| `NETSA_ARCHIVE_DSN` | — | 告警归档连接串，设置后启用归档 |
+| `NETSA_AI_API_KEY` | — | 外部大模型密钥（`ai.enabled` 开启时使用） |
+| `NETSA_SMTP_PASSWORD` | — | 周报 / 月报发信口令 |
+
+### 升级与回滚
+
+```bash
+# 升级前备份数据卷（数据卷名为「项目名_卷名」，即 netsa_netsa-state）
+docker run --rm --user 0 --entrypoint tar -v netsa_netsa-state:/state -v "$PWD":/backup \
+  swr.cn-east-3.myhuaweicloud.com/sreyun/netsa:latest czf /backup/netsa-state-$(date +%Y%m%d).tgz -C /state .
+
+# 使用 latest 时直接拉取最新版本；固定版本时先修改 .env 中 NETSA_IMAGE 的版本号
+docker compose pull
+docker compose up -d
+```
+
+- `docker compose up -d` 不会自动更新本地已有的 `latest`，升级时需要先执行 `docker compose pull`。
+- 回滚时把 `NETSA_IMAGE` 改回旧版本号。新版本写入的状态快照，旧版本可能拒绝读取（会改名保留，不会被覆盖，见[注意事项](#注意事项)），因此先停止服务、用升级前的备份覆盖数据卷，再启动：
+
+  ```bash
+  docker compose down
+  docker run --rm --user 0 --entrypoint tar -v netsa_netsa-state:/state -v "$PWD":/backup \
+    swr.cn-east-3.myhuaweicloud.com/sreyun/netsa:latest xzf /backup/netsa-state-20261030.tgz -C /state
+  docker compose up -d
+  ```
+
+### 内网 / 离线部署
+
+服务器不能访问 SWR 时，在能联网的机器上导出镜像，拷贝到服务器后导入：
+
+```bash
+# 联网机器：按服务器架构拉取（arm64 服务器用 --platform linux/arm64），不启用归档可不拉取 pgvector
+docker pull --platform linux/amd64 swr.cn-east-3.myhuaweicloud.com/sreyun/netsa:1.6.9
+docker pull --platform linux/amd64 swr.cn-east-3.myhuaweicloud.com/sreyun/pgvector:pg18
+docker save -o netsa-images.tar swr.cn-east-3.myhuaweicloud.com/sreyun/netsa:1.6.9 \
+  swr.cn-east-3.myhuaweicloud.com/sreyun/pgvector:pg18
+
+# 服务器：导入后直接启动（不要执行 docker compose pull），.env 中写入相同的镜像标签
+docker load -i netsa-images.tar
+echo 'NETSA_IMAGE=swr.cn-east-3.myhuaweicloud.com/sreyun/netsa:1.6.9' >> .env
+docker compose up -d
+```
+
+- 也可以把镜像推送到内网私有仓库，再把 `NETSA_IMAGE` / `PG_IMAGE` 改为私有仓库地址。
+- 隔离网络中请在 [configs/docker.yaml](configs/docker.yaml) 中关闭在线溯源 `geo.online.enabled: false`，由内置的 ip2region 与区划地名库提供离线定位。
+
+### 演示环境
+
+```bash
+# 模拟器持续生成日志，netsa 实时分析，浏览器打开 http://localhost:8080（账号 admin / Netsa@demo2026）
+docker compose -f docker-compose.demo.yml up -d --build
+# 停止并清除演示数据
+docker compose -f docker-compose.demo.yml down -v
+```
+
+演示环境从源码构建镜像（默认使用 `goproxy.cn` 下载 Go 依赖），账号见 [configs/demo.yaml](configs/demo.yaml)。
+
+### 从源码构建镜像
+
+```bash
+# 默认使用 goproxy.cn；海外网络加 --build-arg GOPROXY=https://proxy.golang.org,direct，
+# 基础镜像拉取慢时加 --build-arg BASE_REGISTRY=docker.m.daocloud.io
+docker build -t netsa:dev .
+NETSA_IMAGE=netsa:dev docker compose up -d   # 或写入 .env
+```
 
 ### 镜像构建与发布（华为云 SWR）
 
@@ -91,12 +180,12 @@ docker run -d --name netsa -p 8080:8080 -p 5514:5514/udp -v netsa-state:/app/sta
   swr.cn-east-3.myhuaweicloud.com/sreyun/netsa:1.6.9
 ```
 
-- **版本随 tag 注入**：构建时通过 `-ldflags "-X main.version=<tag>"` 写入二进制，`netsa version` 与 `/api/meta` 显示的就是发布版本；本地 `docker compose build` 不传该参数，仍使用源码中的默认版本。
+- **版本随 tag 注入**：构建时通过 `-ldflags "-X main.version=<tag>"` 写入二进制，`netsa version` 与 `/api/meta` 显示的就是发布版本；本地 `docker build` 不传该参数，仍使用源码中的默认版本。
 - **推送前自检**：先用 amd64 构建并实际运行 `netsa rules` / `netsa version`，确认二进制可执行、规则可加载、版本与 tag 一致后才推送多架构镜像。
-
-质量门禁由 [.github/workflows/ci.yml](.github/workflows/ci.yml) 负责：`gofmt`、`go vet`、前端语法检查，以及两轮测试——`go test -race -short ./...` 验证并发正确性（race 检测会让用例慢 5~10 倍，故走降级规模），`go test ./...` 以完整规模验证性能退化类断言。
 - **SWR 介质类型**：使用 `outputs: type=registry,oci-mediatypes=false` 并关闭 provenance / SBOM 附件，避免仓库里出现 `unknown/unknown` 架构条目导致拉取时选错架构。
 - 镜像以非 root（uid 10001）运行，配置内置在 `/app/configs`，状态目录为 `/app/state`（建议挂载数据卷）。
+
+质量门禁由 [.github/workflows/ci.yml](.github/workflows/ci.yml) 负责：`gofmt`、`go vet`、前端语法检查，以及两轮测试——`go test -race -short ./...` 验证并发正确性（race 检测会让用例慢 5~10 倍，故走降级规模），`go test ./...` 以完整规模验证性能退化类断言。任何一步失败，后面的步骤都会被跳过，提交前请先在本地执行[开发与测试](#开发与测试)中的检查。
 
 ## 本地运行
 
@@ -126,6 +215,27 @@ go build -o bin/netsa ./cmd/netsa
 GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -trimpath -ldflags "-s -w" -o bin/netsa-linux-amd64 ./cmd/netsa
 ```
 
+## 开发与测试
+
+提交前按 CI 的顺序在本地检查：
+
+```bash
+gofmt -l internal cmd          # 必须没有输出
+go vet ./...
+go test ./...                  # 完整规模，约 1 分钟
+go test -race -short ./...     # 需要 CGO 与 C 编译器（gcc）
+```
+
+- `-race` 依赖 CGO。本机没有 gcc 时（例如 Windows），可以在容器里执行：
+
+  ```bash
+  docker run --rm -v "$PWD":/src -w /src -e GOPROXY=https://goproxy.cn,direct golang:1.23-alpine \
+    sh -c 'apk add --no-cache gcc musl-dev && CGO_ENABLED=1 go test -race -short ./...'
+  ```
+
+- 测试用例中的中文名称请写成结构体字段（`[]struct{ name string; … }`），不要用作 map 的键：gofmt 按字符数对齐 map 的值，编辑器里看起来错位，手工对齐后 `gofmt -l` 就会失败。
+- 前端为原生 JavaScript，CI 只做语法检查：`for f in web/static/*.js; do node --check "$f"; done`。
+
 ## 架构
 
 ```
@@ -141,18 +251,31 @@ GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -trimpath -ldflags "-s -w" -o bin
 ```
 
 ```
-cmd/netsa/            命令行入口（serve / analyze / simulate / rules）
-internal/parser/      日志解析与格式自动识别（nginx、log_format 编译、各类防火墙、syslog 头）
+cmd/netsa/            命令行入口（serve / analyze / simulate / rules / passwd / hash-password / version）
+internal/parser/      日志解析与格式自动识别（nginx、log_format 编译、各类防火墙、IDS、认证、DNS、syslog 头）
 internal/detect/      URL 归一化、特征规则、结果研判、行为检测
-internal/pipeline/    处理流水线、真实 IP 还原、通知去重
-internal/geo/         多源定位融合、ip2region / MaxMind / ip-api、区划地名库、RDAP
+internal/risk/        威胁等级统一裁决（攻击分类底线、拦截与成功的等级上限）
+internal/pipeline/    处理流水线、真实 IP 还原（含反向代理自动识别）、DNAT 暴露面过滤、资产关联
+internal/exposure/    对外发布服务清单、会话证据研判（是否到达服务）、候选映射与可疑放行策略
+internal/geo/         多源定位融合、ip2region / MaxMind / ip-api、区划地名库、内网网段、RDAP
 internal/intel/       本地黑名单、Tor 出口、rDNS 测绘机构识别
-internal/store/       攻击者画像与评分、告警、时间序列、地图聚合、攻击面、快照
-internal/ingest/      文件跟踪、批量读取、syslog 接收
-internal/api/         REST API、SSE、封禁列表导出、安全响应头
-internal/auth/        登录账号、PBKDF2 密码哈希、签名会话、登录失败锁定与审计
+internal/store/       攻击者画像与评分、告警、安全事件、时间序列、地图聚合、攻击面、安全评估、快照
+internal/ingest/      文件跟踪、批量读取、syslog 接收（UDP / TCP / TLS）、发送端管理
+internal/rawlog/      原始日志留存（按小时压缩、哈希链防篡改、检索与导出）
+internal/suppress/    误报抑制规则
+internal/assets/      资产台账与漏洞导入、攻击与漏洞关联
+internal/learn/       自学习：研判反馈校准、平台账号行为基线、持续合规自检
+internal/ai/          可选的外部大模型研判（OpenAI 兼容接口、发送前脱敏、调用限额）
+internal/api/         REST API、SSE、封禁列表导出、报表与等保合规、安全响应头
+internal/auth/        登录账号、PBKDF2 密码哈希、签名会话、双因素认证、API 令牌、登录失败锁定
+internal/audit/       防篡改审计链（哈希链、校验与导出）
 internal/archive/     可选的 PostgreSQL 告警归档（异步 COPY 批量写入、按月分区、历史查询）
 internal/alert/       钉钉 / 企业微信 / 飞书 / Webhook 告警推送（多选等级、合并、限速、加签）
+internal/mailer/      SMTP 发信（周报、月报、合规报告）
+internal/qr/          二维码生成（绑定身份验证器）
+internal/demo/        演示日志生成器（simulate 命令）
+internal/config/      配置加载、默认值与校验
+internal/model/       流水线公共数据结构
 internal/safe/        异常保护（单条畸形数据不影响服务）
 web/static/           前端大屏（ECharts、世界地图、中国省级/地市级地图已内置，可离线使用）
 data/                 离线定位库（ip2region；MaxMind 可放入此目录）
@@ -572,16 +695,42 @@ archive:
   retention_years: 0      # 保留周期（年）：0 永久保留（默认），N 表示至少保留最近 N 年
 ```
 
-也可使用环境变量 `NETSA_ARCHIVE_DSN`（优先于配置文件，避免口令写入配置）。Docker Compose 部署可直接启用自带的 PostgreSQL：
+也可使用环境变量 `NETSA_ARCHIVE_DSN`（优先于配置文件，避免口令写入配置）。Docker Compose 部署可直接启用自带的 PostgreSQL 18（镜像 `swr.cn-east-3.myhuaweicloud.com/sreyun/pgvector:pg18`，可用 `.env` 中的 `PG_IMAGE` 替换）：
 
 ```bash
-# .env（两处密码相同）
+# .env（两处密码相同；密码含 @ : / ? # 等字符时，连接串中需按 URL 编码，如 @ 写成 %40）
 POSTGRES_PASSWORD=强密码
 NETSA_ARCHIVE_DSN=postgres://netsa:强密码@postgres:5432/netsa?sslmode=disable
 ```
 
 ```bash
+docker compose --profile archive pull
 docker compose --profile archive up -d
+```
+
+- 自带的数据库不映射端口，只有同一 compose 网络中的 netsa 能访问；数据保存在数据卷 `netsa-pg18`。
+- PostgreSQL 18 镜像的数据目录是 `/var/lib/postgresql/18/docker`，compose 把数据卷挂载到 `/var/lib/postgresql`。自行编写编排文件时不要再挂载到 17 及以前的 `/var/lib/postgresql/data`。
+- 以后启停都要带上 `--profile archive`（如 `docker compose --profile archive down`），否则只会操作 netsa。
+
+**从旧版 compose（PostgreSQL 17）迁移**：旧版的数据在数据卷 `netsa_netsa-pg` 中，PostgreSQL 18 不能直接读取。不需要保留历史告警时直接按上面的步骤启动即可（会使用新的空数据卷）。需要保留时，先用 PostgreSQL 17 导出，再导入新库：
+
+```bash
+docker compose --profile archive down                # 停止旧服务
+# 1. 用 PostgreSQL 17 临时挂载旧数据卷并导出
+docker run -d --name netsa-pg17 -v netsa_netsa-pg:/var/lib/postgresql/data postgres:17-alpine
+docker exec netsa-pg17 sh -c 'until pg_isready -U netsa -d netsa; do sleep 1; done'
+docker exec netsa-pg17 pg_dump -U netsa -d netsa -Fc -f /tmp/netsa.dump
+docker cp netsa-pg17:/tmp/netsa.dump ./netsa-archive.dump
+docker rm -f netsa-pg17
+# 2. 只启动新数据库并导入（必须在 netsa 启动前导入，避免 netsa 先建出空表）。
+#    首次初始化时镜像会先启动一个只监听本地 socket 的临时实例，按 TCP 等待才是正式实例
+docker compose --profile archive up -d postgres
+docker exec netsa-postgres sh -c 'until pg_isready -h 127.0.0.1 -U netsa -d netsa; do sleep 1; done'
+docker cp ./netsa-archive.dump netsa-postgres:/tmp/netsa.dump
+docker exec netsa-postgres pg_restore -U netsa -d netsa --no-owner /tmp/netsa.dump
+# 3. 启动全部服务，确认“数据源 → 告警归档”中历史分区与行数正常后，再按需删除旧数据卷
+docker compose --profile archive up -d
+# docker volume rm netsa_netsa-pg
 ```
 
 - **准备数据库**：只需一个普通账号（无需超级用户）和它拥有的数据库，例如 `CREATE ROLE netsa LOGIN PASSWORD '…'; CREATE DATABASE netsa OWNER netsa;`。表结构与分区由 netsa 自动创建与维护。
