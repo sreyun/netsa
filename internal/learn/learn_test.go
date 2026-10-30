@@ -4,6 +4,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -205,6 +206,75 @@ func TestComplianceWatch(t *testing.T) {
 	}
 	if r := l.Report(); len(r.Compliance) != 2 || r.Compliance[1].Fail != 1 {
 		t.Fatalf("趋势: %+v", r.Compliance)
+	}
+}
+
+// 批量处置：一次传入多个结论只产生一次重算与进化日志；后台定时保存与界面操作并发落盘时，文件始终是完整的最新状态。
+func TestFeedbackBatchAndConcurrentSave(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "learn.json")
+	l := newLearner(t, path)
+	var logged []Change
+	l.OnChange = func(c Change) { logged = append(logged, c) }
+	var batch []Case
+	for i := 1; i <= 6; i++ {
+		batch = append(batch, fpCase(uint64(i), map[string]int{"xss-dom": 1}, "www.example.com/s", "198.51.100."+strconv.Itoa(i), VerdictFP))
+	}
+	batch = append(batch, Case{Incident: 99, Verdict: VerdictNone}) // 撤回不存在的结论：忽略
+	l.Feedback(batch...)
+	if r := l.Report(); r.Cases != 6 || r.Calibrated != 1 || len(logged) != 1 {
+		t.Fatalf("批量结论: cases=%d calibrated=%d changes=%+v", r.Cases, r.Calibrated, logged)
+	}
+
+	l.OnChange = nil
+	var wg sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		wg.Add(2)
+		go func(i int) {
+			defer wg.Done()
+			l.Feedback(Case{Incident: uint64(100 + i), Source: "203.0.113.1", Rules: map[string]int{"sqli-bool": 1}, Verdict: VerdictTP, User: "ana"})
+		}(i)
+		go func() {
+			defer wg.Done()
+			l.ObserveAudit(rec("admin", "10.0.0.1", "", "", true, time.Now()))
+			if err := l.Save(); err != nil {
+				t.Error(err)
+			}
+		}()
+	}
+	wg.Wait()
+	if err := l.Save(); err != nil {
+		t.Fatal(err)
+	}
+	if r := newLearner(t, path).Report(); r.Cases != 14 || r.TP != 8 {
+		t.Fatalf("并发保存后重新加载: cases=%d tp=%d", r.Cases, r.TP)
+	}
+}
+
+// 登录失败的账号名由请求方任意填写：大量不同账号名时跟踪记录有上限，过期的会被清理。
+func TestSentinelTrackedBounded(t *testing.T) {
+	l := newLearner(t, "")
+	base := time.Date(2026, 10, 29, 10, 0, 0, 0, time.Local)
+	for i := 0; i < maxTracked+500; i++ {
+		l.ObserveAudit(rec("u"+strconv.Itoa(i), "198.51.100.7", "", "", false, base))
+	}
+	if n := len(l.sent.fails); n > maxTracked {
+		t.Fatalf("跟踪的账号名应有上限: %d", n)
+	}
+	// 1 小时后旧记录过期，新账号名可以继续跟踪
+	later := base.Add(2 * time.Hour)
+	var got []Anomaly
+	for i := 0; i < failBurst; i++ {
+		got = append(got, l.ObserveAudit(rec("ops", "198.51.100.8", "", "", false, later.Add(time.Duration(i)*time.Second)))...)
+	}
+	if len(got) != 1 || got[0].Kind != "login_fail" || len(l.sent.fails) > maxTracked {
+		t.Fatalf("过期清理后应能继续发现暴力破解: %+v（跟踪 %d 个）", got, len(l.sent.fails))
+	}
+	// 同一账号被锁定后仍被持续尝试：每个账号保留的记录数有上限
+	for i := 0; i < maxRecent*3; i++ {
+		l.ObserveAudit(rec("ops", "198.51.100.8", "", "", false, later.Add(time.Minute+time.Duration(i)*time.Millisecond)))
+	}
+	if n := len(l.sent.fails["ops"]); n != maxRecent {
+		t.Fatalf("单个账号的记录数应有上限: %d", n)
 	}
 }
 

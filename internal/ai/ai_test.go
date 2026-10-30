@@ -31,6 +31,13 @@ func TestMasker(t *testing.T) {
 	if NewMasker(false).Mask(in) != in {
 		t.Fatal("关闭脱敏时应原样返回")
 	}
+	// 内网 IPv6（ULA、链路本地）同样脱敏，同一地址的不同写法对应同一个占位符；公网 IPv6、时间与 MAC 地址保留
+	v6 := m.Mask("fd00:10::5 → 2001:4860:4860::8888 at 08:49:59 from fe80::1 mac 00:1a:2b:3c:4d:5e, again fd00:10:0:0:0:0:0:5")
+	for _, keep := range []string{"内网主机#3 →", "2001:4860:4860::8888", "08:49:59", "from 内网主机#4", "00:1a:2b:3c:4d:5e", "again 内网主机#3"} {
+		if !strings.Contains(v6, keep) {
+			t.Errorf("IPv6 脱敏结果应包含 %q: %s", keep, v6)
+		}
+	}
 }
 
 func TestParseVerdict(t *testing.T) {

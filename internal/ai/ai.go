@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/netip"
 	"regexp"
 	"strconv"
 	"strings"
@@ -285,6 +286,7 @@ func (v Verdict) Note() string {
 
 var (
 	reIPv4      = regexp.MustCompile(`\b(?:\d{1,3}\.){3}\d{1,3}\b`)
+	reIPv6      = regexp.MustCompile(`[0-9A-Fa-f]*:[0-9A-Fa-f:]*:[0-9A-Fa-f]*`) // 候选片段，按地址解析校验（排除 08:49:59、MAC 地址等）
 	reSecretArg = regexp.MustCompile(`(?i)((?:pass(?:word|wd)?|pwd|passwd|token|access_token|refresh_token|session(?:id)?|sid|secret|api[_-]?key|apikey|auth(?:orization)?|ticket|cookie|jsessionid|phpsessid|credential)s?["']?\s*[=:]\s*["']?)[^&\s"',;]+`)
 	reBearer    = regexp.MustCompile(`(?i)(bearer|basic)\s+[A-Za-z0-9._~+/=-]{8,}`)
 	reEmail     = regexp.MustCompile(`[A-Za-z0-9._%+-]+@((?:[A-Za-z0-9-]+\.)+[A-Za-z]{2,})`)
@@ -301,22 +303,26 @@ type Masker struct {
 // NewMasker 创建脱敏器（on 为 false 时原样返回）。
 func NewMasker(on bool) *Masker { return &Masker{on: on, hosts: map[string]string{}} }
 
-// Mask 脱敏一段文本：内网地址、口令 / 令牌类参数与认证头、邮箱、手机号、身份证号。公网地址（攻击来源）保留用于研判。
+// Mask 脱敏一段文本：内网地址（IPv4 / IPv6）、口令 / 令牌类参数与认证头、邮箱、手机号、身份证号。公网地址（攻击来源）保留用于研判。
 func (m *Masker) Mask(s string) string {
 	if !m.on || s == "" {
 		return s
 	}
-	s = reIPv4.ReplaceAllStringFunc(s, func(ip string) string {
-		if !geo.IsPrivate(ip) {
+	host := func(ip string) string {
+		a, err := netip.ParseAddr(ip)
+		if err != nil || !geo.IsInternal(a.Unmap()) {
 			return ip
 		}
-		p, ok := m.hosts[ip]
+		k := a.Unmap().String() // 同一地址的不同写法（如 IPv6 缩写）对应同一个占位符
+		p, ok := m.hosts[k]
 		if !ok {
 			p = "内网主机#" + strconv.Itoa(len(m.hosts)+1)
-			m.hosts[ip] = p
+			m.hosts[k] = p
 		}
 		return p
-	})
+	}
+	s = reIPv4.ReplaceAllStringFunc(s, host)
+	s = reIPv6.ReplaceAllStringFunc(s, host)   // 内网 IPv6（ULA fd00::/8、链路本地 fe80::/10 等）
 	s = reBearer.ReplaceAllString(s, "$1 ***") // 先处理认证头，否则下一条会把 Bearer 当成值替换掉、漏掉令牌本身
 	s = reSecretArg.ReplaceAllString(s, "${1}***")
 	s = reEmail.ReplaceAllString(s, "***@$1")

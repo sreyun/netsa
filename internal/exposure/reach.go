@@ -84,6 +84,10 @@ func reach(ev *model.Event, extra map[int]bool) (Verdict, string) {
 	src, dst := strings.ToLower(ev.SrcZone), strings.ToLower(ev.DstZone)
 	switch {
 	case dst == "local":
+		if ev.DstPort <= 0 {
+			// ICMP 等没有端口的协议：ping 由防火墙自身应答，不存在「端口上有没有服务」的问题，不下结论
+			return ReachUnknown, ""
+		}
 		if svc := DeviceService(ev.DstPort, ev.Proto, extra); svc != "" {
 			return ReachDevice, "目标为防火墙自身的 " + svc + " 服务（local 安全域）"
 		}
@@ -307,7 +311,11 @@ func (m *Manager) Policies() []PolicyNote {
 		}
 		top := make([]string, len(ports))
 		for i, port := range ports {
-			top[i] = strconv.Itoa(port) + " × " + strconv.FormatInt(p.ports[port], 10)
+			name := strconv.Itoa(port)
+			if port <= 0 {
+				name = "ICMP 等无端口协议"
+			}
+			top[i] = name + " × " + strconv.FormatInt(p.ports[port], 10)
 		}
 		out = append(out, PolicyNote{Policy: p.policy, SrcZone: p.srcZone, DstZone: p.dstZone, Permits: p.permits,
 			Sources: len(p.sources), TopPorts: top, Example: p.example, LastSeen: p.last})

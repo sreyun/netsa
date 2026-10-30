@@ -2,6 +2,8 @@ package store
 
 import (
 	"math"
+	"net/url"
+	"path"
 	"regexp"
 	"slices"
 	"strconv"
@@ -115,6 +117,7 @@ func (sf *surface) catchAll(host, path string, bytes int64) bool {
 	if bytes <= 0 {
 		return false
 	}
+	path = resourceKey(path)
 	if path != "/" {
 		if ep := sf.Endpoints[host+" /"]; ep != nil && ep.baselineMatches(bytes) {
 			return true
@@ -143,6 +146,23 @@ func (sf *surface) catchAll(host, path string, bytes int64) bool {
 		paths[path] = struct{}{}
 	}
 	return len(paths) >= softSamePath
+}
+
+// resourceKey 把指向同一资源的路径变体归一：百分号编码、重复斜杠、/./ 与 ../、末尾斜杠、;参数（Tomcat / Spring）。
+// 攻击者绕过 WAF 时常用 //.env、/./.env、/.env;.css、/%2e%65nv 等变体反复读取同一个真实文件，
+// 这些响应的大小当然相同，不能算作「不同探测路径返回相同大小」而误判为兜底页面、把真实泄露改判为未取到内容。
+func resourceKey(p string) string {
+	if u, err := url.PathUnescape(p); err == nil {
+		p = strings.ToLower(u)
+	}
+	if strings.IndexByte(p, ';') >= 0 {
+		segs := strings.Split(p, "/")
+		for i, s := range segs {
+			segs[i], _, _ = strings.Cut(s, ";")
+		}
+		p = strings.Join(segs, "/")
+	}
+	return path.Clean("/" + p)
 }
 
 func newSurface() *surface {
