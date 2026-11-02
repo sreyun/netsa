@@ -4,6 +4,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -70,6 +71,7 @@ func TestLearnRoles(t *testing.T) {
 		{http.MethodGet, "/api/learn", auth.RoleAnalyst},
 		{http.MethodPost, "/api/learn/suggestions/abc/apply", auth.RoleAnalyst},
 		{http.MethodPost, "/api/learn/rules/xss-dom/pin", auth.RoleAdmin},
+		{http.MethodPut, "/api/learn/policy", auth.RoleAdmin},
 	} {
 		if got := requiredRole(httptest.NewRequest(c.method, c.path, nil)); got != c.role {
 			t.Errorf("%s %s: %s，期望 %s", c.method, c.path, got, c.role)
@@ -101,5 +103,38 @@ func TestLearnSentinelWired(t *testing.T) {
 	}
 	if !found {
 		t.Fatal("异常应写入审计链")
+	}
+}
+
+// 自学习策略在 Web 页面修改：立即生效、无效值拒绝、记入审计与进化日志；自动生效次数出现在报告与监控指标中。
+func TestLearnPolicyAPI(t *testing.T) {
+	s, _ := testServer(t, "", "")
+	s.Learn, _ = learn.Load(learn.Options{Calibrate: true, Escalate: true})
+	trail, err := audit.Open(t.TempDir(), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.Trail = trail
+	h := s.Handler()
+	if rec := do(h, http.MethodPut, "/api/learn/policy", `{"calibrate":true,"min_verdicts":5,"max_precision":1.5,"escalate":true,"escalate_days":30}`, nil); rec.Code != 400 {
+		t.Fatalf("无效的准确率阈值应拒绝: %d %s", rec.Code, rec.Body.String())
+	}
+	if rec := do(h, http.MethodPut, "/api/learn/policy", `{"calibrate":false,"min_verdicts":6,"max_precision":0.15,"escalate":false,"escalate_days":14}`, nil); rec.Code != 200 {
+		t.Fatalf("修改策略: %d %s", rec.Code, rec.Body.String())
+	}
+	var resp struct{ Report learn.Report }
+	decode(t, do(h, http.MethodGet, "/api/learn", "", nil).Body.Bytes(), &resp)
+	if p := resp.Report.Policy; !resp.Report.PolicyUI || p.Calibrate || p.Escalate || p.MinVerdicts != 6 || p.EscalateDays != 14 || resp.Report.Options.Calibrate {
+		t.Fatalf("策略应立即生效: %+v", resp.Report)
+	}
+	found := false
+	for _, e := range trail.Search(audit.Query{Limit: 20}) {
+		found = found || e.Action == "修改自学习策略"
+	}
+	if !found {
+		t.Fatal("策略修改应记入审计")
+	}
+	if m := do(h, http.MethodGet, "/metrics", "", nil).Body.String(); !strings.Contains(m, `netsa_learn_applied_total{kind="target"}`) {
+		t.Fatalf("监控指标应包含自学习生效次数:\n%s", m)
 	}
 }

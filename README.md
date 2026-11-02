@@ -32,7 +32,7 @@
 
 | 镜像 | 用途 |
 |---|---|
-| `swr.cn-east-3.myhuaweicloud.com/sreyun/netsa:latest` | netsa 主程序（默认）。也可使用版本号标签，如 `:1.6.11` |
+| `swr.cn-east-3.myhuaweicloud.com/sreyun/netsa:latest` | netsa 主程序（默认）。也可使用版本号标签，如 `:1.6.12` |
 | `swr.cn-east-3.myhuaweicloud.com/sreyun/pgvector:pg18` | 可选的告警归档数据库（PostgreSQL 18 + pgvector），只在启用归档时拉取 |
 
 ### 生产部署
@@ -106,14 +106,14 @@ docker compose up -d
 
 ```bash
 # 联网机器：按服务器架构拉取（arm64 服务器用 --platform linux/arm64），不启用归档可不拉取 pgvector
-docker pull --platform linux/amd64 swr.cn-east-3.myhuaweicloud.com/sreyun/netsa:1.6.11
+docker pull --platform linux/amd64 swr.cn-east-3.myhuaweicloud.com/sreyun/netsa:1.6.12
 docker pull --platform linux/amd64 swr.cn-east-3.myhuaweicloud.com/sreyun/pgvector:pg18
-docker save -o netsa-images.tar swr.cn-east-3.myhuaweicloud.com/sreyun/netsa:1.6.11 \
+docker save -o netsa-images.tar swr.cn-east-3.myhuaweicloud.com/sreyun/netsa:1.6.12 \
   swr.cn-east-3.myhuaweicloud.com/sreyun/pgvector:pg18
 
 # 服务器：导入后直接启动（不要执行 docker compose pull），.env 中写入相同的镜像标签
 docker load -i netsa-images.tar
-echo 'NETSA_IMAGE=swr.cn-east-3.myhuaweicloud.com/sreyun/netsa:1.6.11' >> .env
+echo 'NETSA_IMAGE=swr.cn-east-3.myhuaweicloud.com/sreyun/netsa:1.6.12' >> .env
 docker compose up -d
 ```
 
@@ -146,16 +146,16 @@ NETSA_IMAGE=netsa:dev docker compose up -d   # 或写入 .env
 
 | 触发 | 行为 |
 |---|---|
-| 创建 tag `v1.6.11` | 构建 + 启动自检 + 推送：`1.6.11`、`1.6`、`1`、`latest`、`sha-xxxxxxx` |
-| 创建预发布 tag `v1.6.11-rc1` | 只推 `1.6.11-rc1`、`sha-xxxxxxx`，不动 `latest` / `1.6` / `1` |
+| 创建 tag `v1.6.12` | 构建 + 启动自检 + 推送：`1.6.12`、`1.6`、`1`、`latest`、`sha-xxxxxxx` |
+| 创建预发布 tag `v1.6.12-rc1` | 只推 `1.6.12-rc1`、`sha-xxxxxxx`，不动 `latest` / `1.6` / `1` |
 | 推送 `master` / Pull Request | 不构建镜像（质量门禁由 `ci` 工作流负责） |
 | 手动触发（workflow_dispatch） | 填写要发布的 tag 与是否更新 `latest`；按该 tag 检出源码，版本与内容严格对应 |
 
 发布流程：
 
 ```bash
-git tag v1.6.11
-git push origin v1.6.11
+git tag v1.6.12
+git push origin v1.6.12
 ```
 
 需要在仓库 **Settings → Secrets and variables → Actions** 配置两个 Secret：
@@ -181,9 +181,9 @@ printf '%s' "$AK" | openssl dgst -binary -sha256 -hmac "$SK" | od -An -vtx1 | tr
 | `GOPROXY` | `https://goproxy.cn,direct` | 构建时的 Go 模块代理 |
 
 ```bash
-docker pull swr.cn-east-3.myhuaweicloud.com/sreyun/netsa:1.6.11
+docker pull swr.cn-east-3.myhuaweicloud.com/sreyun/netsa:1.6.12
 docker run -d --name netsa -p 8080:8080 -p 5514:5514/udp -v netsa-state:/app/state \
-  swr.cn-east-3.myhuaweicloud.com/sreyun/netsa:1.6.11
+  swr.cn-east-3.myhuaweicloud.com/sreyun/netsa:1.6.12
 ```
 
 - **版本随 tag 注入**：构建时通过 `-ldflags "-X main.version=<tag>"` 写入二进制，`netsa version` 与 `/api/meta` 显示的就是发布版本；本地 `docker build` 不传该参数，仍使用源码中的默认版本。
@@ -550,13 +550,28 @@ IP 详情页的“同源关联分析”在全部攻击源中查找与当前 IP �
 
 ## 自学习与外部模型
 
-“系统配置 → 自学习”页面集中展示以下能力。自学习的配置项见 `learn:`；外部模型在该页面的“外部模型 → 配置模型”中配置（管理员）。
+“系统配置 → 自学习”页面集中展示以下能力。自学习策略在“规则准确率与自动校准 → 策略”中调整（管理员，初始值见 `learn:`）；外部模型在“外部模型 → 配置模型”中配置（管理员）。
+
+**哪些学习结果会自动生效**：分析员的结论积累到阈值后，校准与升级会自动作用于之后的检测，无需重启或人工操作；会隐藏告警的误报抑制始终需要人工采纳。
+
+| 学习结果 | 是否自动生效 | 作用 |
+|---|---|---|
+| 规则级校准 | 自动 | 准确率持续偏低的规则，命中等级下调一级 |
+| 目标级精细校准 | 自动 | 只在个别目标上反复误报的规则，只下调该目标上的命中 |
+| 确认攻击源复现升级 | 自动 | 被确认为攻击的来源再次出现，低危 / 中危命中升级一级 |
+| 对外服务自动识别 | 自动 | 有会话证据的对外服务计入攻击面（见[未做 DNAT 映射的端口探测](#未做-dnat-映射的端口探测)） |
+| 误报抑制建议 | 人工采纳 | 采纳后符合条件的命中不再告警 |
+| 外部模型一致率 | 仅评估 | 写在 AI 研判记录中，帮助判断模型结论的可信度 |
+
+页面顶部的“自动生效”统计本次启动以来被自动下调 / 升级的命中次数，监控指标为 `netsa_learn_applied_total{kind="rule|target|escalate"}`。
 
 - **研判反馈学习**：只从分析员的处置结论中学习，已处置计为确认攻击，误报计为误报。
-  - **规则级校准**：研判样本不少于 5 个、且准确率不高于 20% 的规则，等级自动下调一级。只降不升，不越过分类底线；管理员可锁定规则，立即恢复原等级。
-  - **目标级精细校准**：规则整体准确率正常、只在个别目标上反复误报时（同一规则在同一目标上被研判为误报不少于 3 次、且从未确认为攻击；目标按“主机 + 路径”归一，忽略查询参数），只下调该目标上的命中一级，其他目标不受影响。该目标上出现确认的攻击、或锁定规则后自动恢复。一次命中最多下调一级。
+  - **规则级校准**：研判样本不少于 5 个、且准确率不高于 20% 的规则，等级自动下调一级；管理员可锁定规则，立即恢复原等级。
+  - **目标级精细校准**：规则整体准确率正常、只在个别目标上反复误报时（同一规则在同一目标上被研判为误报不少于 3 次、且从未确认为攻击；目标按“主机 + 路径”归一，忽略查询参数），只下调该目标上的命中一级，其他目标不受影响。该目标上出现确认的攻击、或锁定规则后自动恢复。
+  - **下调的边界**：一次命中最多下调一级，最多低于攻击分类底线一级（如 SQL 注入从高危降到中危，不再推送、处置时限按中危）；响应证明利用成功时仍升为严重。若仍按底线抬回，注入、命令执行这类底线即高危的规则，校准就完全不起作用。
+  - **确认攻击源复现升级**：事件被处置为“已处置”（确认攻击）的来源，在 30 天内再次出现时，其低危 / 中危攻击命中升级一级（最多到高危，严重只能来自成功利用等证据），证据中注明原事件编号。只看来源最近一次结论：同一来源后来被判为误报（如确认是授权扫描）就不再升级。有效期按日志时间计算，离线分析历史日志时同样准确。
   - 同一规则在同一目标上多次误报，或同一来源多次被整体判为误报（疑似授权扫描），会生成抑制建议，由人工采纳。
-  - 每次自动调整都写入进化日志和审计链。
+  - 每次自动调整与策略修改都写入进化日志和审计链。
   - 批量处置（最多 500 个事件）的结论一次计入，学习状态只重算、保存一次。
 - **平台行为基线**：学习每个账号的常用登录网段与时段，以下情况会推送告警并写入审计链：
   - 从新地址登录；在非常用时段登录；
@@ -642,7 +657,7 @@ IP 详情页的“同源关联分析”在全部攻击源中查找与当前 IP �
 - **处置状态**：待处理 → 处置中 → 已处置 / 误报 / 忽略；可指派负责人（管理员或运营分析员）、填写处置说明，**关闭事件必须填写说明**，处置过程（状态变化、指派、备注）全程记录。支持批量处置、只看我负责的、只看超时。
 - **处置时限（SLA）**：严重 1 小时、高危 4 小时、中危 24 小时、低危 72 小时；**涉及核心资产时按高一级计算**；事件等级升高时时限相应缩短。超时未关闭的事件推送提醒到告警机器人（每个事件提醒一次，较多时合并为一条），导航栏显示待处置 / 超时数。
 - **自动重开**：标记为误报 / 忽略的事件之后出现更高等级的告警时自动重新打开，并在处置记录中注明原因。
-- **误报抑制**：在告警列表或事件详情中对误报的告警点击“标记误报”，按 **检测规则、攻击类型、来源 IP / 网段、目标路径** 的组合生成抑制规则（可设有效期，可选同时把所属事件标记为误报）。命中抑制规则的攻击不产生告警、不计入攻击统计与威胁评分，只累计抑制次数用于审计；只按攻击类型抑制等范围过大的规则会被拒绝。
+- **误报抑制**：在告警列表或事件详情中对误报的告警点击“标记误报”，按 **检测规则、攻击类型、来源 IP / 网段、目标路径** 的组合生成抑制规则（可设有效期，可选同时把所属事件标记为误报）。命中抑制规则的攻击不产生告警、不计入攻击统计与威胁评分，只累计抑制次数用于审计；只按攻击类型抑制等范围过大的规则会被拒绝。最多 1000 条生效中的规则（已过期的不占名额）；过期规则保留 30 天供核对，之后自动清理。
 - 告警、事件接口支持 API 令牌调用，便于对接 SOAR、工单系统自动处置（`POST /api/incidents/bulk`）。
 
 ## Syslog 发送端管理与数据源健康
@@ -824,7 +839,7 @@ docker compose --profile archive up -d
 | `GET /api/exposure` | 对外发布服务清单（DNAT 映射）、兜底端口与已过滤的探测次数 |
 | `GET /api/incidents/{id}`、`POST /api/incidents/{id}`、`POST /api/incidents/bulk` | 事件详情 / 处置（`status`、`assignee`、`note`；批量时附 `ids`，运营分析员以上）、`GET /api/incidents/assignees` 可指派的负责人 |
 | `POST /api/incidents/{id}/ai` | 对事件执行 AI 研判，结论写入处置记录（运营分析员以上） |
-| `GET /api/learn`、`POST /api/learn/suggestions/{id}/apply|dismiss`、`POST /api/learn/rules/{rule}/pin|unpin` | 自学习状态（规则 / 目标级校准、模型一致率、建议、进化日志）、采纳或忽略建议、锁定规则（管理员） |
+| `GET /api/learn`、`POST /api/learn/suggestions/{id}/apply|dismiss`、`POST /api/learn/rules/{rule}/pin|unpin`、`PUT /api/learn/policy` | 自学习状态（规则 / 目标级校准、确认攻击源、自动生效次数、模型一致率、建议、进化日志）、采纳或忽略建议、锁定规则与修改策略（管理员） |
 | `GET /api/ai/settings`、`PUT /api/ai/settings`、`POST /api/ai/test` | 外部模型配置（地址、名称、密钥、启用；响应不含密钥）与连接测试（管理员） |
 | `GET/POST /api/suppressions`、`DELETE /api/suppressions/{id}` | 误报抑制规则（写操作需运营分析员以上） |
 | `GET /api/syslog/senders`、`POST /api/syslog/senders`、`PUT/DELETE /api/syslog/senders/{id}`、`PUT /api/syslog/policy` | syslog 发送端画像、登记与白名单开关（写操作需管理员） |

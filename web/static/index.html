@@ -296,7 +296,8 @@
       <div class="panel"><h3>待确认的建议 <small>反复被研判为误报的模式；采纳后创建误报抑制，需人工确认</small></h3><div id="lnSugs" class="scroll"></div></div>
       <div class="panel"><h3>平台安全异常 <small>学习账号的常用登录网段与时段，发现异常登录、批量导出与高危变更</small></h3><div id="lnAnoms" class="scroll"></div></div>
     </div>
-    <div class="panel"><h3>规则准确率与自动校准 <small>只从分析员的处置结论学习：已处置 = 确认攻击，误报 = 误报；准确率持续偏低的规则自动下调一级，可锁定恢复</small></h3>
+    <div class="panel"><h3>规则准确率与自动校准 <small>只从分析员的处置结论学习：已处置 = 确认攻击，误报 = 误报；准确率持续偏低的规则自动下调一级，可锁定恢复</small><button type="button" class="more need-admin" id="lnPolicyEdit">策略 ›</button></h3>
+      <div class="ln-policy" id="lnPolicy"></div>
       <div class="scroll"><table class="table" id="lnRules"></table></div></div>
     <div class="panel"><h3>精细校准（规则 + 目标） <small id="lnCtxIntro">规则整体准确率正常、只在个别目标上反复误报时，只下调该目标上的命中一级，其他目标不受影响</small></h3>
       <div class="scroll"><table class="table" id="lnCtx"></table></div></div>
@@ -538,6 +539,24 @@
       <div class="form-msg" id="tokMsg" role="status"></div>
     </div>
     <div class="modal-foot"><span class="spacer"></span><button type="button" class="btn" data-close="tokModal">取消</button><button type="submit" class="btn primary" id="tokSave">创建</button></div>
+  </form>
+</div>
+
+<!-- 自学习策略（自学习 → 规则准确率与自动校准 → 策略） -->
+<div class="modal-mask" id="lpModal" hidden>
+  <form class="modal" role="dialog" aria-modal="true" aria-labelledby="lpTitle" id="lpForm" autocomplete="off" novalidate>
+    <div class="modal-head"><b id="lpTitle">自学习策略</b><button type="button" class="close" data-close="lpModal" aria-label="关闭">✕</button></div>
+    <div class="modal-body">
+      <label class="inline"><input type="checkbox" id="lpCalib"> 自动校准：按分析员的误报结论自动下调命中等级（规则级 + 目标级）</label>
+      <label class="field"><span class="flabel">规则级最少样本</span><input id="lpMin" type="number" min="2" max="1000" step="1"></label>
+      <label class="field"><span class="flabel">准确率阈值（%）</span><input id="lpPrec" type="number" min="1" max="99" step="1"></label>
+      <div class="hint">规则研判样本不少于上述数量、且准确率不高于阈值时整体下调一级；同一规则在同一目标上误报不少于 max(3, 样本数 − 2) 次且从未确认为攻击时，只下调该目标。最多低于攻击分类底线一级，响应证明利用成功时仍升为严重。</div>
+      <label class="inline"><input type="checkbox" id="lpEsc"> 确认攻击源复现升级：事件被处置为“已处置”的来源再次出现时，低危 / 中危命中升级一级（最多到高危）</label>
+      <label class="field"><span class="flabel">有效天数</span><input id="lpDays" type="number" min="1" max="365" step="1"></label>
+      <div class="hint">保存后立即生效，变化记入进化日志与审计链，并优先于配置文件 learn 段。误报抑制会隐藏告警，始终需要人工采纳，不会自动生效。</div>
+      <div class="form-msg" id="lpMsg" role="status"></div>
+    </div>
+    <div class="modal-foot"><span class="spacer"></span><button type="button" class="btn" data-close="lpModal">取消</button><button type="submit" class="btn primary" id="lpSave">保存</button></div>
   </form>
 </div>
 

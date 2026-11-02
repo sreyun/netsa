@@ -89,6 +89,26 @@ func TestFinalize(t *testing.T) {
 			want: model.SevInfo,
 		},
 		{
+			name: "自学习下调的注入命中：最多低于底线一级（高危底线 → 中危）",
+			hit:  model.Hit{Category: "SQL注入", Severity: model.SevMedium, Result: model.ResultBlocked, Learned: -1},
+			want: model.SevMedium,
+		},
+		{
+			name: "自学习下调也不能越过底线两级",
+			hit:  model.Hit{Category: "SQL注入", Severity: model.SevLow, Result: model.ResultBlocked, Learned: -1},
+			want: model.SevMedium,
+		},
+		{
+			name: "自学习下调但响应证明利用成功：仍升为严重",
+			hit:  model.Hit{Category: "SQL注入", Severity: model.SevMedium, Result: model.ResultSuccess, Learned: -1},
+			want: model.SevCritical,
+		},
+		{
+			name: "自学习下调的低危底线分类：不低于低危",
+			hit:  model.Hit{Category: "扫描器", Severity: model.SevInfo, Learned: -1},
+			want: model.SevLow,
+		},
+		{
 			name: "未知分类保持声明等级",
 			hit:  model.Hit{Category: "自定义规则", Severity: model.SevMedium, Result: model.ResultPassed},
 			want: model.SevMedium,

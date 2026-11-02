@@ -40,6 +40,9 @@ type Engine struct {
 	ac       *acMatcher // 全部预过滤字面量的多模式匹配自动机
 	words    int        // 每个文本段位图的字数
 	bitsPool sync.Pool
+	uaRules  []int    // 针对 UA 的规则在 rules 中的下标（结果按 UA 缓存，见 uacache.go）
+	uaSlot   []int    // rules 下标 → uaRules 中的位置，非 UA 规则为 -1
+	uac      *uaCache // UA 规则的匹配结果缓存
 }
 
 func NewEngine(rulesFile string, successMinBytes int64) (*Engine, error) {
@@ -72,6 +75,15 @@ func NewEngine(rulesFile string, successMinBytes int64) (*Engine, error) {
 		e.words = (len(lits) + 63) / 64
 		e.bitsPool.New = func() any { b := make(bitset, segCount*e.words); return &b }
 	}
+	e.uaSlot = make([]int, len(rules))
+	for i, r := range rules {
+		e.uaSlot[i] = -1
+		if segOf(r.Target) == segUA {
+			e.uaSlot[i] = len(e.uaRules)
+			e.uaRules = append(e.uaRules, i)
+		}
+	}
+	e.uac = newUACache()
 	return e, nil
 }
 
@@ -185,26 +197,40 @@ func (e *Engine) inspectWeb(ev *model.Event) []model.Hit {
 		defer e.bitsPool.Put(bp)
 	}
 
+	var uaLocs []int32 // UA 规则的命中位置（按 UA 缓存）
+	if ua != "" && len(e.uaRules) > 0 {
+		uaLocs = e.uaLocs(ua, &segs)
+	}
 	var hits []model.Hit
-	for _, r := range e.rules {
+	for i, r := range e.rules {
 		seg := segOf(r.Target)
 		text := [segCount]string{uri, path, ua, ref, all}[seg]
 		if text == "" || !r.methodOK(ev.Method) {
 			continue
 		}
-		if r.needIDs != nil && e.ac != nil && !clausesPass(r.needIDs, segs[seg]) {
-			continue
-		}
+		// 先判断与本次请求相关的廉价条件，再做预过滤与正则
 		if r.OnlyFailed && result != model.ResultFailed && result != model.ResultBlocked {
 			continue
 		}
-		loc := r.re.FindStringIndex(text)
-		if loc == nil {
-			continue
+		var start, end int
+		if s := e.uaSlot[i]; s >= 0 {
+			if uaLocs[2*s] < 0 {
+				continue
+			}
+			start, end = int(uaLocs[2*s]), int(uaLocs[2*s+1])
+		} else {
+			if r.needIDs != nil && e.ac != nil && !clausesPass(r.needIDs, segs[seg]) {
+				continue
+			}
+			loc := r.re.FindStringIndex(text)
+			if loc == nil {
+				continue
+			}
+			start, end = loc[0], loc[1]
 		}
 		h := model.Hit{
 			RuleID: r.ID, Name: r.Name, Category: r.Category, Severity: r.sev, Phase: r.Phase,
-			Evidence: excerpt(text, loc[0], loc[1]), Result: result, TagOnly: r.TagOnly,
+			Evidence: excerpt(text, start, end), Result: result, TagOnly: r.TagOnly,
 		}
 		if result == model.ResultSuccess && !risk.ResponseProvable(r.Category) {
 			h.Result = model.ResultPassed

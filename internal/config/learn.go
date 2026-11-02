@@ -3,7 +3,8 @@ package config
 import "fmt"
 
 // LearnConfig 是自学习参数，均默认开启。自学习只从分析员的研判结论与平台自身的审计记录中学习，
-// 自动调整只降不升、每次最多一级、不越过攻击分类的等级底线；会隐藏告警的误报抑制只生成建议，由人确认采纳。
+// 自动调整每次最多一级：按误报结论下调（最多低于攻击分类底线一级），确认攻击源复现时上调（最多到高危）；
+// 会隐藏告警的误报抑制只生成建议，由人确认采纳。
 type LearnConfig struct {
 	// Calibrate 按研判准确率自动校准规则等级：研判样本达到 min_verdicts 且准确率不高于 max_precision 的规则下调一级。
 	Calibrate    *bool   `yaml:"calibrate"`
@@ -13,7 +14,13 @@ type LearnConfig struct {
 	Sentinel *bool `yaml:"sentinel"`
 	// Compliance 每小时自动执行等保合规自检，测评项结果下降时告警；每天自动校验审计链完整性。
 	Compliance *bool `yaml:"compliance"`
+	// Escalate 被分析员确认为攻击的来源在 escalate_days 天内再次出现时，其低危 / 中危攻击命中升级一级（最多到高危）。
+	Escalate     *bool `yaml:"escalate"`
+	EscalateDays int   `yaml:"escalate_days"` // 默认 30
 }
+
+// EscalateOn 返回是否升级已确认攻击来源的复现命中。
+func (c LearnConfig) EscalateOn() bool { return onByDefault(c.Escalate) }
 
 func onByDefault(b *bool) bool { return b == nil || *b }
 
@@ -32,6 +39,9 @@ func (c LearnConfig) validate() error {
 	}
 	if c.MaxPrecision < 0 || c.MaxPrecision >= 1 {
 		return fmt.Errorf("learn.max_precision 应在 0 ~ 1 之间（不含 1）")
+	}
+	if c.EscalateDays < 0 || c.EscalateDays > 365 {
+		return fmt.Errorf("learn.escalate_days 应在 0 ~ 365 之间")
 	}
 	return nil
 }

@@ -1,6 +1,7 @@
 package api
 
 import (
+	"fmt"
 	"log"
 	"net/http"
 	"strconv"
@@ -139,6 +140,31 @@ func (s *Server) learnPin(w http.ResponseWriter, r *http.Request) {
 	}
 	s.audit(r, act, rule, nil)
 	writeJSON(w, map[string]any{"ok": true})
+}
+
+// learnPolicy 修改自学习策略（管理员）：自动校准、确认攻击源复现升级及其阈值，立即生效。
+func (s *Server) learnPolicy(w http.ResponseWriter, r *http.Request) {
+	if s.Learn == nil {
+		writeError(w, http.StatusNotFound, "未启用自学习")
+		return
+	}
+	var p learn.Policy
+	if !decodeForm(w, r, &p) {
+		return
+	}
+	user := "anonymous"
+	if sess := sessionOf(r); sess != nil {
+		user = sess.User
+	}
+	err := s.Learn.SetPolicy(p, user)
+	s.audit(r, "修改自学习策略", fmt.Sprintf("自动校准 %v（样本 ≥ %d，准确率 ≤ %.0f%%），确认攻击源复现升级 %v（%d 天）",
+		p.Calibrate, p.MinVerdicts, p.MaxPrecision*100, p.Escalate, p.EscalateDays), err)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	pol, _ := s.Learn.Policy()
+	writeJSON(w, map[string]any{"ok": true, "policy": pol})
 }
 
 // learnTick 由后台任务每分钟调用：每小时执行一次合规自检，每天凌晨校验审计链完整性，并保存学习状态。

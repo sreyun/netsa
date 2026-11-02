@@ -428,3 +428,73 @@ func TestSuggestionDedupTargets(t *testing.T) {
 		t.Fatalf("应按事件去重: %+v", s)
 	}
 }
+
+// 确认攻击源复现升级：只看来源最近一次人工结论，按事件时间判断有效期；只升低危 / 中危，最多到高危。
+// 策略可在界面修改，立即生效并在重启后保持。
+func TestEscalationAndPolicy(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "learn.json")
+	l, err := Load(Options{Path: path, Calibrate: true, Escalate: true, EscalateDays: 30})
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	l.Feedback(Case{Incident: 7, Source: "203.0.113.7", Rules: map[string]int{"sqli-union": 1}, Verdict: VerdictTP, User: "ana", Time: now.Add(-time.Hour)})
+	ev := &model.Event{Kind: model.KindWeb, SrcIP: "203.0.113.7", Host: "shop", URI: "/.git/config", Time: now}
+	hits := []model.Hit{
+		{RuleID: "sens-vcs", Severity: model.SevMedium, Evidence: "e"},
+		{RuleID: "sqli-union", Severity: model.SevHigh},
+		{RuleID: "ua-scanner", Severity: model.SevLow},
+		{RuleID: "ua-automation", Severity: model.SevInfo, TagOnly: true},
+	}
+	g := l.Calibrate(ev, hits)
+	if g[0].Severity != model.SevHigh || g[0].Learned != 1 || !strings.Contains(g[0].Evidence, "事件 #7") {
+		t.Fatalf("中危应升级为高危: %+v", g[0])
+	}
+	if g[1].Severity != model.SevHigh || g[1].Learned != 0 {
+		t.Fatalf("高危不再升级（严重只能来自成功利用等证据）: %+v", g[1])
+	}
+	if g[2].Severity != model.SevMedium || g[3].Severity != model.SevInfo || g[3].Learned != 0 {
+		t.Fatalf("低危升一级、标签命中不变: %+v %+v", g[2], g[3])
+	}
+	if hits[0].Severity != model.SevMedium {
+		t.Fatal("不应修改调用方的数据")
+	}
+	// 有效期按事件时间判断：离线回放 40 天后的日志不再升级
+	if g := l.Calibrate(&model.Event{SrcIP: "203.0.113.7", Time: now.Add(40 * 24 * time.Hour)}, hits[:1]); g[0].Severity != model.SevMedium {
+		t.Fatal("超过有效期不应升级")
+	}
+	if g := l.Calibrate(&model.Event{SrcIP: "203.0.113.8", Time: now}, hits[:1]); g[0].Severity != model.SevMedium {
+		t.Fatal("其他来源不应升级")
+	}
+	if r := l.Report(); r.Confirmed != 1 || r.Applied.Escalated != 2 {
+		t.Fatalf("统计: confirmed=%d applied=%+v", r.Confirmed, r.Applied)
+	}
+	// 同一来源后来被判为误报（如确认是授权扫描）：不再升级
+	l.Feedback(Case{Incident: 8, Source: "203.0.113.7", Rules: map[string]int{"ua-scanner": 1, "sens-vcs": 1, "x": 1}, Verdict: VerdictFP, User: "ana", Time: now})
+	if g := l.Calibrate(ev, hits[:1]); g[0].Severity != model.SevMedium {
+		t.Fatal("最近一次结论为误报的来源不应升级")
+	}
+
+	// 界面策略：校验、立即生效、记入进化日志、重启后保持
+	if err := l.SetPolicy(Policy{Calibrate: true, MinVerdicts: 1, MaxPrecision: 0.2, Escalate: true, EscalateDays: 30}, "admin"); err == nil {
+		t.Fatal("应拒绝过小的样本数")
+	}
+	l.Feedback(Case{Incident: 9, Source: "203.0.113.9", Rules: map[string]int{"r": 1}, Verdict: VerdictTP, User: "ana", Time: now})
+	if err := l.SetPolicy(Policy{Calibrate: true, MinVerdicts: 8, MaxPrecision: 0.1, Escalate: false, EscalateDays: 7}, "admin"); err != nil {
+		t.Fatal(err)
+	}
+	if g := l.Calibrate(&model.Event{SrcIP: "203.0.113.9", Time: now}, hits[:1]); g[0].Severity != model.SevMedium {
+		t.Fatal("关闭升级后应立即停止")
+	}
+	r := l.Report()
+	if !r.PolicyUI || r.Policy.MinVerdicts != 8 || r.Options.CtxMinFP != 6 || r.Policy.UpdatedBy != "admin" || r.Changes[0].Kind != "policy" {
+		t.Fatalf("策略: %+v %+v %+v", r.Policy, r.Options, r.Changes[0])
+	}
+	l2, err := Load(Options{Path: path, Calibrate: true, Escalate: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p, ui := l2.Policy(); !ui || p.Escalate || p.MinVerdicts != 8 || p.EscalateDays != 7 {
+		t.Fatalf("重启后应保持界面策略: %+v %v", p, ui)
+	}
+}

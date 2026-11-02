@@ -2,8 +2,10 @@
 //
 // 设计边界（自学习不能变成新的风险来源）：
 //   - 只从人的结论学习：分析员把事件处置为「已处置」（确认攻击）或「误报」时才计入样本，AI 与系统自动生成的状态不参与；
-//   - 自动调整只降不升、每次最多一级、不越过攻击分类的等级底线，且可随时撤销（锁定规则）；
-//     校准分两种粒度：规则整体准确率持续偏低时整体下调，只在个别目标上反复误报时只下调该目标（规则 + 目标）；
+//   - 自动调整每次最多一级，且可随时撤销（锁定规则 / 关闭策略）：
+//     下调分两种粒度：规则整体准确率持续偏低时整体下调，只在个别目标上反复误报时只下调该目标（规则 + 目标），
+//     最多低于攻击分类底线一级，响应证明利用成功时仍升为严重；
+//     上调只针对分析员确认过的攻击来源（有效期内复现），只升低危 / 中危，最多到高危；
 //   - 外部模型的结论不作为样本，只用分析员的结论评估模型的一致率，并把历史人工结论提供给模型作研判参考；
 //   - 会隐藏告警的动作（误报抑制）只生成建议，必须由人确认采纳；
 //   - 每一次自动调整都记入「进化日志」并写入审计链。
@@ -39,6 +41,51 @@ type Options struct {
 	Compliance   bool    `json:"compliance"`    // 持续合规自检
 	// CtxMinFP 是「规则 + 目标」精细校准所需的最少误报次数（由 MinVerdicts 推导：max(3, MinVerdicts-2)）
 	CtxMinFP int `json:"ctx_min_fp"`
+	// Escalate 已被分析员确认为攻击的来源在 EscalateDays 天内再次出现时，攻击命中升级一级（不超过高危）
+	Escalate     bool `json:"escalate"`
+	EscalateDays int  `json:"escalate_days"` // 默认 30
+}
+
+// Policy 是可在 Web 管理页面调整的自学习策略，保存在学习状态中，优先于配置文件。
+type Policy struct {
+	Calibrate    bool      `json:"calibrate"`
+	MinVerdicts  int       `json:"min_verdicts"`
+	MaxPrecision float64   `json:"max_precision"`
+	Escalate     bool      `json:"escalate"`
+	EscalateDays int       `json:"escalate_days"`
+	UpdatedBy    string    `json:"updated_by,omitempty"`
+	Updated      time.Time `json:"updated,omitzero"`
+}
+
+func (p Policy) check() error {
+	switch {
+	case p.MinVerdicts < 2 || p.MinVerdicts > 1000:
+		return errors.New("规则校准的最少样本数应在 2 ~ 1000 之间")
+	case p.MaxPrecision <= 0 || p.MaxPrecision >= 1:
+		return errors.New("准确率阈值应在 1% ~ 99% 之间")
+	case p.EscalateDays < 1 || p.EscalateDays > 365:
+		return errors.New("确认攻击源的有效天数应在 1 ~ 365 之间")
+	}
+	return nil
+}
+
+// apply 把策略写入运行参数（调用方持锁）。
+func (o *Options) apply(p Policy) {
+	o.Calibrate, o.MinVerdicts, o.MaxPrecision, o.Escalate, o.EscalateDays = p.Calibrate, p.MinVerdicts, p.MaxPrecision, p.Escalate, p.EscalateDays
+	o.CtxMinFP = max(3, o.MinVerdicts-2)
+}
+
+// Applied 统计自学习结果在检测中自动生效的次数（本次启动以来）。
+type Applied struct {
+	Rule      int64     `json:"rule"`      // 按规则整体校准下调的命中
+	Target    int64     `json:"target"`    // 按「规则 + 目标」精细校准下调的命中
+	Escalated int64     `json:"escalated"` // 已确认攻击来源复现、升级的命中
+	Since     time.Time `json:"since"`
+}
+
+type appliedCounters struct {
+	rule, target, escalated atomic.Int64
+	since                   time.Time
 }
 
 // Verdict 是分析员对一个安全事件的结论。
@@ -89,8 +136,16 @@ type ContextStat struct {
 
 // snapshot 是热路径使用的校准快照（无锁读取）。
 type snapshot struct {
-	rules map[string]RuleStat
-	ctx   map[[2]string]ContextStat // 规则 + 归一化目标
+	rules   map[string]RuleStat
+	ctx     map[[2]string]ContextStat // 规则 + 归一化目标
+	sources map[string]confirmed      // 最近一次结论为「确认攻击」的来源
+	days    int                       // 确认攻击源的有效天数
+}
+
+// confirmed 是来源最近一次被确认为攻击的事件。
+type confirmed struct {
+	incident uint64
+	time     time.Time
 }
 
 // Suggestion 是一条需要人工确认的误报抑制建议。
@@ -139,8 +194,10 @@ type Learner struct {
 	compHist  []CompPoint
 	dirty     bool
 
-	sent  sentinelState
-	calib atomic.Pointer[snapshot]
+	sent    sentinelState
+	calib   atomic.Pointer[snapshot]
+	applied appliedCounters
+	policy  *Policy // 界面设置的策略（为空表示使用配置文件）
 	// saveMu 串行化落盘：后台定时保存与界面操作（处置、锁定、采纳建议）可能同时触发，
 	// 不串行时两次写入共用同一个临时文件，较旧的状态可能最后改名生效、覆盖较新的状态
 	saveMu sync.Mutex
@@ -160,6 +217,7 @@ type state struct {
 	Comp      map[string]string    `json:"compliance,omitempty"`
 	CompHist  []CompPoint          `json:"compliance_history,omitempty"`
 	AI        map[uint64]*AIRecord `json:"ai,omitempty"`
+	Policy    *Policy              `json:"policy,omitempty"`
 }
 
 // Load 读取学习状态（文件不存在时从零开始）。
@@ -170,9 +228,13 @@ func Load(opt Options) (*Learner, error) {
 	if opt.MaxPrecision <= 0 || opt.MaxPrecision >= 1 {
 		opt.MaxPrecision = 0.2
 	}
+	if opt.EscalateDays <= 0 {
+		opt.EscalateDays = 30
+	}
 	opt.CtxMinFP = max(3, opt.MinVerdicts-2)
 	l := &Learner{opt: opt, cases: map[uint64]*Case{}, pinned: map[string]bool{}, handled: map[string]string{},
 		users: map[string]*userBase{}, comp: map[string]string{}, ai: map[uint64]*AIRecord{}}
+	l.applied.since = time.Now()
 	if opt.Path != "" {
 		data, err := os.ReadFile(opt.Path)
 		switch {
@@ -207,6 +269,10 @@ func Load(opt Options) (*Learner, error) {
 					l.ai[id] = r
 				}
 			}
+			if p := st.Policy; p != nil && p.check() == nil { // 界面设置的策略优先于配置文件
+				l.policy = p
+				l.opt.apply(*p)
+			}
 		}
 	}
 	n := len(l.changes)
@@ -227,7 +293,7 @@ func (l *Learner) Save() error {
 		l.mu.Unlock()
 		return nil
 	}
-	st := state{Handled: l.handled, Changes: l.changes, Users: l.users, Anomalies: l.anomalies, Comp: l.comp, CompHist: l.compHist, AI: l.ai}
+	st := state{Handled: l.handled, Changes: l.changes, Users: l.users, Anomalies: l.anomalies, Comp: l.comp, CompHist: l.compHist, AI: l.ai, Policy: l.policy}
 	for _, c := range l.cases {
 		st.Cases = append(st.Cases, c)
 	}
@@ -465,7 +531,7 @@ func (l *Learner) recomputeLocked(now time.Time, user string) []Change {
 		switch {
 		case st.Calibrated && !was:
 			changes = append(changes, Change{Time: now, Kind: "calibrate", Rule: r, User: "自学习",
-				Detail: fmt.Sprintf("规则 %s 研判 %d 次中 %d 次为误报（准确率 %.0f%%），等级自动下调一级（不低于攻击分类底线）", r, n, st.FP, st.Precision*100)})
+				Detail: fmt.Sprintf("规则 %s 研判 %d 次中 %d 次为误报（准确率 %.0f%%），等级自动下调一级（最多低于攻击分类底线一级，利用成功仍为严重）", r, n, st.FP, st.Precision*100)})
 		case !st.Calibrated && was:
 			why := "准确率已回升"
 			if st.Pinned {
@@ -493,7 +559,7 @@ func (l *Learner) recomputeLocked(now time.Time, user string) []Change {
 	l.stats = stats
 	ctxCal, ctxChanges := l.calibrateContextsLocked(ctx, old, now, user)
 	changes = append(changes, ctxChanges...)
-	l.calib.Store(&snapshot{rules: calib, ctx: ctxCal})
+	l.calib.Store(&snapshot{rules: calib, ctx: ctxCal, sources: l.confirmedSourcesLocked(), days: l.opt.EscalateDays})
 	for _, c := range changes {
 		l.logLocked(c)
 	}
@@ -552,7 +618,7 @@ func (l *Learner) calibrateContextsLocked(ctx map[[2]string]*ctxStat, old *snaps
 	for _, k := range sortedCtxKeys(cal) {
 		if _, was := old.ctx[k]; !was {
 			changes = append(changes, Change{Time: now, Kind: "calibrate_ctx", Rule: k[0], User: "自学习",
-				Detail: fmt.Sprintf("规则 %s 在 %s 上 %d 次被研判为误报、从未确认为攻击，该规则在此目标上的命中等级自动下调一级（不低于攻击分类底线，其他目标不受影响）", k[0], k[1], cal[k].FP)})
+				Detail: fmt.Sprintf("规则 %s 在 %s 上 %d 次被研判为误报、从未确认为攻击，该规则在此目标上的命中等级自动下调一级（最多低于攻击分类底线一级，其他目标不受影响）", k[0], k[1], cal[k].FP)})
 		}
 	}
 	for _, k := range sortedCtxKeys(old.ctx) {
@@ -614,33 +680,56 @@ func (l *Learner) Calibrate(ev *model.Event, hits []model.Hit) []model.Hit {
 		return hits
 	}
 	m := l.calib.Load()
-	if m == nil || len(m.rules)+len(m.ctx) == 0 {
+	if m == nil || len(m.rules)+len(m.ctx)+len(m.sources) == 0 {
 		return hits
+	}
+	// 已确认的攻击来源在有效期内复现（按事件时间判断，离线回放历史日志时同样准确）
+	var src confirmed
+	if ev != nil && len(m.sources) > 0 {
+		if c, ok := m.sources[ev.SrcIP]; ok {
+			at := ev.Time
+			if at.IsZero() {
+				at = time.Now()
+			}
+			if age := at.Sub(c.time); age >= -time.Hour && age <= time.Duration(m.days)*24*time.Hour {
+				src = c
+			}
+		}
 	}
 	var out []model.Hit
 	target, haveTarget := "", false
 	for i := range hits {
-		if hits[i].TagOnly || hits[i].Severity <= model.SevLow {
+		if hits[i].TagOnly {
 			continue
 		}
-		note := ""
-		if st, ok := m.rules[hits[i].RuleID]; ok {
-			note = "；自学习校准：该规则研判 " + strconv.Itoa(st.TP+st.FP) + " 次中 " + strconv.Itoa(st.FP) + " 次为误报，等级下调一级"
-		} else if len(m.ctx) > 0 && ev != nil {
-			if !haveTarget { // 目标只在需要时计算一次（热路径）
-				target, haveTarget = targetKey(ev.Target()), true
-			}
-			if cs, ok := m.ctx[[2]string{hits[i].RuleID, target}]; ok {
-				note = "；自学习校准：该规则在此目标上 " + strconv.Itoa(cs.FP) + " 次被研判为误报、从未确认为攻击，等级下调一级"
+		note, delta := "", int8(0)
+		if hits[i].Severity > model.SevLow {
+			if st, ok := m.rules[hits[i].RuleID]; ok {
+				note, delta = "；自学习校准：该规则研判 "+strconv.Itoa(st.TP+st.FP)+" 次中 "+strconv.Itoa(st.FP)+" 次为误报，等级下调一级", -1
+				l.applied.rule.Add(1)
+			} else if len(m.ctx) > 0 && ev != nil {
+				if !haveTarget { // 目标只在需要时计算一次（热路径）
+					target, haveTarget = targetKey(ev.Target()), true
+				}
+				if cs, ok := m.ctx[[2]string{hits[i].RuleID, target}]; ok {
+					note, delta = "；自学习校准：该规则在此目标上 "+strconv.Itoa(cs.FP)+" 次被研判为误报、从未确认为攻击，等级下调一级", -1
+					l.applied.target.Add(1)
+				}
 			}
 		}
-		if note == "" {
+		// 确认攻击源复现：只升级低危 / 中危的攻击命中，最多到高危；严重级只能由成功利用等证据产生
+		if delta == 0 && src.incident != 0 && hits[i].Severity >= model.SevLow && hits[i].Severity < model.SevHigh {
+			note, delta = "；自学习：该来源曾被分析员确认为攻击（事件 #"+strconv.FormatUint(src.incident, 10)+"），等级上调一级", 1
+			l.applied.escalated.Add(1)
+		}
+		if delta == 0 {
 			continue
 		}
 		if out == nil {
 			out = append([]model.Hit(nil), hits...)
 		}
-		out[i].Severity--
+		out[i].Severity += model.Severity(delta)
+		out[i].Learned = delta
 		out[i].Evidence += note
 	}
 	if out == nil {
@@ -738,6 +827,10 @@ type Report struct {
 	Anomalies   []Anomaly     `json:"anomalies"`
 	Compliance  []CompPoint   `json:"compliance"` // 合规符合率趋势
 	Options     Options       `json:"options"`
+	Policy      Policy        `json:"policy"`    // 当前生效的策略
+	PolicyUI    bool          `json:"policy_ui"` // 策略来自界面设置（否则来自配置文件）
+	Applied     Applied       `json:"applied"`   // 学习结果在检测中自动生效的次数
+	Confirmed   int           `json:"confirmed"` // 最近一次结论为确认攻击的来源数（复现时升级）
 }
 
 // Report 返回自学习状态概览。
@@ -750,6 +843,16 @@ func (l *Learner) Report() Report {
 	defer l.mu.Unlock()
 	r.Options = l.opt
 	r.Options.Path = ""
+	r.Policy, r.PolicyUI = l.policyLocked(), l.policy != nil
+	r.Applied = l.appliedStats()
+	if m := l.calib.Load(); m != nil { // 只统计仍在有效期内、复现时会被升级的来源
+		cut := time.Now().Add(-time.Duration(m.days) * 24 * time.Hour)
+		for _, c := range m.sources {
+			if c.time.After(cut) {
+				r.Confirmed++
+			}
+		}
+	}
 	r.Cases = len(l.cases)
 	for _, c := range l.cases {
 		if c.Verdict == VerdictTP {

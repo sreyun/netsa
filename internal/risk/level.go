@@ -127,7 +127,7 @@ func CompromiseEvidence(category string) bool { return compromiseEvidence[catego
 
 // Finalize 按固定优先级收敛命中的最终等级：
 //
-//  1. 分类底线：低于底线的抬到下限（防漏配）；
+//  1. 分类底线：低于底线的抬到下限（防漏配）；自学习下调的命中最多低于底线一级；
 //  2. 严重级准入：
 //     - 成功利用（Result=success）且分类可升级 → 严重；
 //     - 失陷迹象类（带外、远控、挖矿、主机事件）按规则声明，最高可到严重；
@@ -152,8 +152,14 @@ func Finalize(h *model.Hit) {
 		sev = model.SevCritical
 	}
 	// 底线只用于防止告警被漏配降级；仅打标签的观察不生成告警，不按底线抬升，
-	// 否则空 UA、未到达服务的探测等弱特征永远到不了信息级，等级调整计数也会被这类常态流量淹没
-	if f := catFloor[h.Category]; sev < f && !h.TagOnly {
+	// 否则空 UA、未到达服务的探测等弱特征永远到不了信息级，等级调整计数也会被这类常态流量淹没。
+	// 自学习按分析员结论下调的命中最多低于底线一级（不低于低危）：底线防的是规则作者写错等级，
+	// 而反复的人工误报结论是更直接的证据；若仍按底线抬回，注入类规则（底线即高危）的校准就完全不生效
+	f := catFloor[h.Category]
+	if h.Learned < 0 && f > model.SevLow {
+		f--
+	}
+	if sev < f && !h.TagOnly {
 		sev = f
 	}
 

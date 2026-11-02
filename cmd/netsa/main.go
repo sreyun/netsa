@@ -49,7 +49,7 @@ import (
 
 // version 是构建版本号。默认值用于本地构建；镜像构建通过
 // -ldflags "-X main.version=<tag>" 注入，`netsa version` 与 /api/meta 都会显示注入后的值。
-var version = "1.6.11"
+var version = "1.6.12"
 
 func usage() {
 	fmt.Fprintf(os.Stderr, `netsa %s —— 网络安全态势感知与攻击面分析系统
@@ -202,7 +202,8 @@ func build(cfg *config.Config) (*app, error) {
 	}
 	a.store.PortPublished = a.exposure.Published
 	if a.learn, err = learn.Load(learn.Options{Path: dataFile(cfg, "", "learn.json"), Calibrate: cfg.Learn.CalibrateOn(),
-		MinVerdicts: cfg.Learn.MinVerdicts, MaxPrecision: cfg.Learn.MaxPrecision, Sentinel: cfg.Learn.SentinelOn(), Compliance: cfg.Learn.ComplianceOn()}); err != nil {
+		MinVerdicts: cfg.Learn.MinVerdicts, MaxPrecision: cfg.Learn.MaxPrecision, Sentinel: cfg.Learn.SentinelOn(), Compliance: cfg.Learn.ComplianceOn(),
+		Escalate: cfg.Learn.EscalateOn(), EscalateDays: cfg.Learn.EscalateDays}); err != nil {
 		return nil, err
 	}
 	if a.exposure.Enforcing() {

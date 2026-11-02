@@ -55,7 +55,7 @@ func requiredRole(r *http.Request) string {
 	}
 	// 锁定 / 解锁自学习校准会改变检测等级：只允许管理员；外部模型配置决定事件内容发往哪里（查看也只允许管理员）
 	if strings.HasPrefix(p, "/api/auth/users") || p == "/api/auth/audit" || strings.HasPrefix(p, "/api/audit") || strings.HasPrefix(p, "/api/auth/tokens") ||
-		strings.HasPrefix(p, "/api/compliance") || strings.HasPrefix(p, "/api/learn/rules") || strings.HasPrefix(p, "/api/ai/") {
+		strings.HasPrefix(p, "/api/compliance") || strings.HasPrefix(p, "/api/learn/rules") || p == "/api/learn/policy" || strings.HasPrefix(p, "/api/ai/") {
 		return auth.RoleAdmin
 	}
 	// 原始日志可能包含 Cookie、令牌、个人信息等敏感内容：检索与导出需要运营分析员权限

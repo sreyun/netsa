@@ -251,6 +251,9 @@ type Hit struct {
 	TagOnly bool
 	// Vuln 为关联到的目标资产上未修复的漏洞（CVE / 名称）
 	Vuln string
+	// Learned 是自学习对本次命中的调整：-1 按分析员的误报结论下调一级，+1 来源曾被确认为攻击、升级一级。
+	// 等级裁决据此放宽分类底线（下调的命中最多低于底线一级），见 risk.Finalize
+	Learned int8
 }
 
 // AssetRef 是事件目标资产的摘要。

@@ -227,8 +227,9 @@ func (m *Manager) Add(r Rule, days int) (Rule, error) {
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if len(m.rules) >= 1000 {
-		return Rule{}, errors.New("抑制规则数量已达上限（1000 条）")
+	m.pruneLocked(r.Created)
+	if m.activeLocked(r.Created) >= maxRules { // 已过期的规则不占用名额
+		return Rule{}, fmt.Errorf("生效中的抑制规则数量已达上限（%d 条）", maxRules)
 	}
 	nr := r
 	m.rules = append(m.rules, &nr)
@@ -289,14 +290,52 @@ func (m *Manager) Count() int {
 	return len(m.rules)
 }
 
-// Flush 保存抑制计数（计数变化时，由后台任务定期调用）。
+// Flush 保存抑制计数（计数变化时，由后台任务定期调用），并清理过期已久的规则。
 func (m *Manager) Flush() error {
-	if m == nil || !m.dirty.Swap(false) {
+	if m == nil {
 		return nil
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	pruned := m.pruneLocked(m.now())
+	if !m.dirty.Swap(false) && !pruned {
+		return nil
+	}
 	return m.saveLocked()
+}
+
+const (
+	maxRules = 1000
+	// expiredKeep 是过期规则继续保留的时间：便于在界面上核对「为什么最近又开始告警」，之后自动清理
+	expiredKeep = 30 * 24 * time.Hour
+)
+
+// pruneLocked 删除过期超过 expiredKeep 的规则，返回是否有删除（调用方持写锁）。
+// 不清理时过期规则会一直占用 1000 条的名额，并在每次匹配时被遍历。
+func (m *Manager) pruneLocked(now time.Time) bool {
+	kept := m.rules[:0]
+	for _, r := range m.rules {
+		if r.Expires.IsZero() || now.Before(r.Expires.Add(expiredKeep)) {
+			kept = append(kept, r)
+		}
+	}
+	if len(kept) == len(m.rules) {
+		return false
+	}
+	clear(m.rules[len(kept):])
+	m.rules = kept
+	m.reindex()
+	return true
+}
+
+func (m *Manager) activeLocked(now time.Time) int {
+	n := 0
+	for _, r := range m.rules {
+		if r.Expires.IsZero() || now.Before(r.Expires) {
+			n++
+		}
+	}
+	return n
 }
 
 func (m *Manager) saveLocked() error {

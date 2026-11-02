@@ -4,7 +4,7 @@
 
 // ---------------- 通用 ----------------
 const STATUS = { open: '待处理', investigating: '处置中', resolved: '已处置', false_positive: '误报', ignored: '忽略' };
-const OPS_MODALS = ['incModal', 'supModal', 'tfModal', 'tokModal', 'sndModal', 'assetModal', 'impModal', 'aiModal'];
+const OPS_MODALS = ['incModal', 'supModal', 'tfModal', 'tokModal', 'sndModal', 'assetModal', 'impModal', 'aiModal', 'lpModal'];
 let tfForced = false;
 function openModal(id) { rememberFocus(); $('#' + id).hidden = false; }
 function closeModal(id) {
@@ -938,7 +938,8 @@ $('#auVerify').addEventListener('click', () => ntBusy($('#auVerify'), async () =
 }));
 
 // ---------------- 自学习 ----------------
-const LN_CHANGE = { calibrate: '自动下调', restore: '恢复', calibrate_ctx: '目标级下调', restore_ctx: '目标级恢复', pin: '锁定', unpin: '解锁', apply: '采纳建议', dismiss: '忽略建议' };
+const LN_CHANGE = { calibrate: '自动下调', restore: '恢复', calibrate_ctx: '目标级下调', restore_ctx: '目标级恢复', pin: '锁定', unpin: '解锁', apply: '采纳建议', dismiss: '忽略建议', policy: '策略调整' };
+let lnPolicy = null;
 const LN_ANOM = { new_net: '新地址登录', odd_hour: '非常用时段', login_fail: '登录失败暴增', bulk_export: '批量导出', sensitive: '高危变更' };
 async function loadLearn() {
   const { enabled, report: r, ai_status: aiStatus } = await api('/api/learn');
@@ -946,7 +947,8 @@ async function loadLearn() {
   const lastComp = (r.compliance || []).slice(-1)[0];
   $('#lnKpis').innerHTML = [
     ['研判样本', num(r.cases), `确认攻击 ${num(r.tp)} · 误报 ${num(r.fp)}`],
-    ['自动校准', num(r.calibrated + r.ctx_total), r.options.calibrate ? `规则 ${num(r.calibrated)} 条 · 目标级 ${num(r.ctx_total)} 处` : '已关闭'],
+    ['自动生效', num(r.applied.rule + r.applied.target + r.applied.escalated),
+      enabled ? `下调 ${num(r.applied.rule + r.applied.target)} · 升级 ${num(r.applied.escalated)} 次（${esc(fmtShort(r.applied.since))} 启动以来）` : '未启用自学习'],
     ['待确认建议', num(r.suggestions.length), '采纳后创建误报抑制'],
     ['平台安全异常', num(r.anomalies.length), r.options.sentinel ? '最近 100 条' : '已关闭'],
     ['合规符合率', lastComp ? Math.round(lastComp.rate * 100) + '%' : '-', lastComp ? `不符合 ${num(lastComp.fail)} 项 · ${esc(fmtShort(lastComp.time))}` : (r.options.compliance ? '启动后约 2 分钟首次自检' : '已关闭')],
@@ -962,13 +964,19 @@ async function loadLearn() {
     ? `<table class="table"><tbody>${r.anomalies.map((a) => `<tr><td class="nowrap muted">${esc(fmtShort(a.time))}</td><td class="nowrap">${badge(a.severity)} ${esc(LN_ANOM[a.kind] || a.kind)}</td>
         <td><b>${esc(a.title)}</b><div class="muted">${esc(a.detail)}</div></td></tr>`).join('')}</tbody></table>`
     : `<div class="muted">${r.options.sentinel ? '未发现异常。账号登录满 5 次后开始按“新地址”判断，满 20 次后按“非常用时段”判断。' : '已关闭（learn.sentinel: false）'}</div>`;
+  // 当前生效的策略：自学习结果自动作用于检测（下调 / 升级），误报抑制始终需要人工采纳
+  const pol = r.policy;
+  lnPolicy = pol;
+  $('#lnPolicy').innerHTML = `自动生效策略：自动校准 <b>${pol.calibrate ? '开启' : '关闭'}</b>（规则级 ${num(r.calibrated)} 条：样本 ≥ ${num(pol.min_verdicts)}、准确率 ≤ ${Math.round(pol.max_precision * 100)}%；目标级 ${num(r.ctx_total)} 处：误报 ≥ ${num(r.options.ctx_min_fp)} 次）`
+    + ` · 确认攻击源复现升级 <b>${pol.escalate ? '开启' : '关闭'}</b>（${num(pol.escalate_days)} 天内，当前 ${num(r.confirmed)} 个来源）`
+    + ` · <span>${r.policy_ui ? `界面设置（${esc(pol.updated_by)}，${esc(fmtShort(pol.updated))}）` : '来自配置文件 learn 段'}</span>`;
   const pct = (s) => (s.precision < 0 ? '-' : Math.round(s.precision * 100) + '%');
   $('#lnRules').innerHTML = `<thead><tr><th>规则</th><th>确认攻击</th><th>误报</th><th>准确率</th><th>状态</th><th></th></tr></thead><tbody>${r.rules.map((s) => `<tr>
       <td class="mono">${esc(s.rule)}</td><td>${num(s.tp)}</td><td>${num(s.fp)}</td><td>${pct(s)}</td>
       <td>${s.pinned ? '<span class="chip">已锁定</span>' : s.calibrated ? '<span class="lv-medium">已自动下调一级</span>' : '<span class="muted">正常</span>'}</td>
       <td>${isAdmin() ? `<button type="button" class="btn" data-ln="${s.pinned ? 'unpin' : 'pin'}" data-rule="${esc(s.rule)}">${s.pinned ? '解锁' : '锁定'}</button>` : ''}</td></tr>`).join('') || empty(6, '暂无研判样本：在“事件处置”中把事件处置为已处置或误报后开始学习')}</tbody>`;
   $('#lnCtxIntro').textContent = r.options.calibrate
-    ? `规则整体准确率正常、只在个别目标上被研判为误报 ≥ ${r.options.ctx_min_fp} 次且从未确认为攻击时，只下调该目标上的命中一级（不低于攻击分类底线）；该目标出现确认的攻击或锁定规则后自动恢复`
+    ? `规则整体准确率正常、只在个别目标上被研判为误报 ≥ ${r.options.ctx_min_fp} 次且从未确认为攻击时，只下调该目标上的命中一级（最多低于攻击分类底线一级，利用成功仍为严重）；该目标出现确认的攻击或锁定规则后自动恢复`
     : '已关闭（learn.calibrate: false）';
   const more = r.ctx_total > r.contexts.length ? `<tr><td colspan="5" class="muted">另有 ${num(r.ctx_total - r.contexts.length)} 处未列出</td></tr>` : '';
   $('#lnCtx').innerHTML = `<thead><tr><th>规则</th><th>目标</th><th>误报</th><th>相关事件</th><th></th></tr></thead><tbody>${r.contexts.map((c) => `<tr>
@@ -1012,6 +1020,33 @@ $('#tab-learn').addEventListener('click', (e) => {
   ntBusy(b, async () => {
     try { await api(url, 'POST', {}); } catch (err) { alert(err.message); }
     loadLearn().catch(console.error);
+  });
+});
+
+// ---------------- 自学习策略（管理员） ----------------
+$('#lnPolicyEdit').addEventListener('click', () => {
+  const p = lnPolicy || {};
+  $('#lpCalib').checked = !!p.calibrate;
+  $('#lpMin').value = p.min_verdicts || 5;
+  $('#lpPrec').value = Math.round((p.max_precision || 0.2) * 100);
+  $('#lpEsc').checked = !!p.escalate;
+  $('#lpDays').value = p.escalate_days || 30;
+  setMsg('#lpMsg', '');
+  openModal('lpModal');
+  $('#lpCalib').focus();
+});
+$('#lpForm').addEventListener('submit', (e) => {
+  e.preventDefault();
+  const f = {
+    calibrate: $('#lpCalib').checked, min_verdicts: parseInt($('#lpMin').value, 10) || 0,
+    max_precision: (parseFloat($('#lpPrec').value) || 0) / 100, escalate: $('#lpEsc').checked, escalate_days: parseInt($('#lpDays').value, 10) || 0,
+  };
+  ntBusy($('#lpSave'), async () => {
+    try {
+      await api('/api/learn/policy', 'PUT', f);
+      closeModal('lpModal');
+      loadLearn().catch(console.error);
+    } catch (err) { setMsg('#lpMsg', err.message); }
   });
 });
 

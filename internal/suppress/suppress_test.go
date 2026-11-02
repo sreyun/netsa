@@ -85,3 +85,46 @@ func BenchmarkFilterNoMatch(b *testing.B) {
 		m.Filter(ev, hits)
 	}
 }
+
+// 过期规则不占用名额，过期 30 天后自动清理并落盘。
+func TestExpiredPrune(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "suppressions.json")
+	m, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	m.now = func() time.Time { return now }
+	for i := 0; i < maxRules; i++ {
+		if _, err := m.Add(Rule{RuleID: "r", Target: "/t" + string(rune('a'+i%26)), Reason: "x"}, 1); err != nil {
+			t.Fatalf("第 %d 条: %v", i, err)
+		}
+	}
+	if _, err := m.Add(Rule{RuleID: "r", Target: "/x", Reason: "x"}, 1); err == nil {
+		t.Fatal("生效中的规则达到上限时应拒绝")
+	}
+	// 2 天后全部过期：不再占用名额，但仍保留在列表中供核对
+	now = now.Add(48 * time.Hour)
+	if _, err := m.Add(Rule{RuleID: "r", Target: "/new", Reason: "x"}, 0); err != nil {
+		t.Fatalf("过期规则不应占用名额: %v", err)
+	}
+	if m.Count() != maxRules+1 {
+		t.Fatalf("过期规则应暂时保留: %d", m.Count())
+	}
+	ev := &model.Event{Kind: model.KindWeb, SrcIP: "198.51.100.1", URI: "/ta"}
+	if got := m.Filter(ev, []model.Hit{hit("r", "SQL注入")}); len(got) != 1 {
+		t.Fatal("过期规则不应再抑制")
+	}
+	// 过期满 30 天：定期保存时清理
+	now = now.Add(31 * 24 * time.Hour)
+	if err := m.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	if m.Count() != 1 {
+		t.Fatalf("应清理过期已久的规则: %d", m.Count())
+	}
+	m2, err := Load(path)
+	if err != nil || m2.Count() != 1 {
+		t.Fatalf("清理结果应落盘: %v %d", err, m2.Count())
+	}
+}

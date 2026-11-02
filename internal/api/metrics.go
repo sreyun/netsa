@@ -110,6 +110,17 @@ func (s *Server) metrics(w http.ResponseWriter, r *http.Request) {
 		p.metric("netsa_exposure_learned", "gauge", "根据会话证据自动识别的对外服务数", float64(s.Exposure.LearnedCount()))
 	}
 
+	// 自学习结果在检测中自动生效的次数：rule / target 为按误报结论下调，escalate 为确认攻击源复现升级
+	if s.Learn != nil {
+		ap := s.Learn.AppliedStats()
+		for _, kv := range []struct {
+			kind string
+			n    int64
+		}{{"rule", ap.Rule}, {"target", ap.Target}, {"escalate", ap.Escalated}} {
+			p.metric("netsa_learn_applied_total", "counter", "自学习结果自动作用于检测命中的次数", float64(kv.n), "kind", kv.kind)
+		}
+	}
+
 	// 等级裁决：规则声明与最终判定不一致的次数（按 原等级→最终等级 统计）。
 	// 持续出现 critical→high 说明规则把未成功的利用写成了严重；high→critical 说明成功升级在生效。
 	for _, a := range risk.Adjustments() {

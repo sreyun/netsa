@@ -138,6 +138,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/learn", s.learnReport)
 	mux.HandleFunc("POST /api/learn/suggestions/{id}/{action}", s.learnSuggestion)
 	mux.HandleFunc("POST /api/learn/rules/{rule}/{action}", s.learnPin)
+	mux.HandleFunc("PUT /api/learn/policy", s.learnPolicy)
 	mux.HandleFunc("GET /api/stream", func(w http.ResponseWriter, r *http.Request) { s.Broker.Serve(w, r, s.sessionAlive(r)) })
 	mux.HandleFunc("GET /api/export/blocklist", s.blocklist)
 	mux.HandleFunc("GET /api/report", s.report)
