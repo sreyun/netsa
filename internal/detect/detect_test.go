@@ -414,3 +414,104 @@ func TestEnumerationSameSize(t *testing.T) {
 		t.Fatalf("返回不同数据的遍历应告警: %d", n)
 	}
 }
+
+// 普通的相对路径不是目录穿越；越出根目录、编码过或写在参数里的 ../ 仍然是。
+func TestHarmlessDotDot(t *testing.T) {
+	e, err := NewEngine("", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for uri, want := range map[string]bool{
+		"/assets/../assets/app.js":  false,
+		"/a/b/../c/./d.css":         false,
+		"/css/../fonts/x.woff2?v=3": false,
+		"/../etc/hosts":             true,
+		"/a/../../etc/hosts":        true,
+		"/a/%2e%2e/b":               true,
+		"/a/..%2fb":                 true,
+		"/a/../b?f=../../c":         true,
+		"/a/..;/b/../c":             true,
+	} {
+		_, got := hitIDs(e.Inspect(web("GET", uri, 200, "Mozilla/5.0")))["trav-dotdot"]
+		if got != want {
+			t.Errorf("%s: 目录穿越=%v，期望 %v", uri, got, want)
+		}
+	}
+}
+
+// 只被提到、没有可执行内容的特征降为低危；带参数或属性的写法照常告警。
+func TestInertProse(t *testing.T) {
+	e, err := NewEngine("", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range []struct {
+		uri, rule string
+		weak      bool
+	}{
+		{"/s?q=how+to+use+%3Cscript%3E+tag", "xss-script", true},
+		{"/f?title=why+does+eval()+fail", "code-php", true},
+		{"/s?a=1&q=difference+between+exec()+and+eval()&b=2", "code-php", true},
+		{"/s?q=<script>", "xss-script", false},
+		{"/s?q=<script>alert(1)</script>", "xss-script", false},
+		{"/s?q=hello+world+<script>alert(1)</script>+more+words", "xss-script", false},
+		{"/s?q=read+this+<script+src=//x.example/a.js>+now", "xss-script", false},
+		{"/s?q=please+run+system('id')+for+me", "code-php", false},
+		{"/s?q=eval($_POST[x])", "code-php", false},
+		{"/s?q=run+phpinfo()+now", "code-php", false},
+	} {
+		h, ok := hitIDs(e.Inspect(web("GET", c.uri, 200, "Mozilla/5.0")))[c.rule]
+		if !ok {
+			t.Errorf("%s 应命中 %s", c.uri, c.rule)
+			continue
+		}
+		if h.Weak != c.weak || (c.weak && h.Severity != model.SevLow) {
+			t.Errorf("%s: weak=%v severity=%s，期望 weak=%v", c.uri, h.Weak, h.Severity, c.weak)
+		}
+	}
+}
+
+// 响应码之外的证据：PUT 创建了脚本文件、设备放行时自身的判断。
+func TestEngineProof(t *testing.T) {
+	e, err := NewEngine("", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if h := hitIDs(e.Inspect(web("PUT", "/x.jsp", 201, "Mozilla/5.0")))["cve-put-upload"]; !h.Proven || h.Severity != model.SevCritical {
+		t.Errorf("PUT 201: %+v", h)
+	}
+	if h := hitIDs(e.Inspect(web("PUT", "/x.jsp", 200, "Mozilla/5.0")))["cve-put-upload"]; h.Proven || h.Severity != model.SevHigh {
+		t.Errorf("PUT 200: %+v", h)
+	}
+	if h := hitIDs(e.Inspect(web("GET", "/a?id=1+union+select+1", 200, "Mozilla/5.0")))["sqli-union"]; h.Proven || h.Severity != model.SevHigh || h.Result != model.ResultSuccess {
+		t.Errorf("只有 200 的注入: %+v", h)
+	}
+	dev := func(action string) model.Hit {
+		return deviceThreatHit(&model.Event{Kind: model.KindFirewall, Format: "fg", Threat: "Log4j RCE", ThreatSeverity: "critical", Action: action})
+	}
+	if h := dev(model.ActionAllow); !h.Proven {
+		t.Errorf("设备放行: %+v", h)
+	}
+	if h := dev(model.ActionDeny); h.Proven {
+		t.Errorf("设备拦截: %+v", h)
+	}
+}
+
+// 超长 UTF-8 编码与 PROCEDURE ANALYSE、括号里的子查询都不能漏。
+func TestEvasionsDetected(t *testing.T) {
+	e, err := NewEngine("", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for uri, rule := range map[string]string{
+		"/v?f=..%c0%af..%c0%afetc/passwd":       "trav-dotdot",
+		"/v?f=%c0%ae%c0%ae/%c0%ae%c0%ae/secret": "trav-dotdot",
+		"/v?f=..%e0%80%af..%e0%80%afsecret":     "trav-dotdot",
+		"/i?id=1+procedure+analyse()":           "sqli-error",
+		"/i?id=1'+AnD+(SeLeCt+1+FrOm+dual)=1--": "sqli-bool",
+	} {
+		if _, ok := hitIDs(e.Inspect(web("GET", uri, 200, "Mozilla/5.0")))[rule]; !ok {
+			t.Errorf("%s 应命中 %s", uri, rule)
+		}
+	}
+}

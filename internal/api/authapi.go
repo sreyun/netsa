@@ -2,8 +2,10 @@ package api
 
 import (
 	"context"
+	"crypto/subtle"
 	"encoding/json"
 	"errors"
+	"log"
 	"net"
 	"net/http"
 	"strconv"
@@ -13,6 +15,7 @@ import (
 	"netsa/internal/audit"
 	"netsa/internal/auth"
 	"netsa/internal/qr"
+	"netsa/internal/sso"
 )
 
 const sessionCookie = "netsa_session"
@@ -27,7 +30,7 @@ func sessionOf(r *http.Request) *auth.Session {
 
 // publicPaths 不需要登录即可访问（登录页及其资源、登录接口）。
 var publicPaths = map[string]bool{
-	"/login.html": true, "/login.js": true, "/login.css": true, "/api/auth/login": true, "/api/auth/login/2fa": true, "/api/auth/session": true,
+	"/api/auth/oidc/start": true, "/api/auth/oidc/callback": true, "/login.html": true, "/login.js": true, "/login.css": true, "/api/auth/login": true, "/api/auth/login/2fa": true, "/api/auth/session": true,
 }
 
 // mustChangeAllowed 是使用初始密码登录、尚未修改密码时仍可访问的接口。
@@ -52,6 +55,14 @@ func requiredRole(r *http.Request) string {
 	}
 	if !strings.HasPrefix(p, "/api/") {
 		return auth.RoleViewer
+	}
+	// 备份包含密码哈希和模型密钥；对接状态包含内部系统的地址
+	if strings.HasPrefix(p, "/api/admin") || strings.HasPrefix(p, "/api/integrations") {
+		return auth.RoleAdmin
+	}
+	// 封禁申请由分析员提交（名单中有处置原因），审批与解除由管理员进行（/api/block/{id}/...，见最后的默认值）
+	if p == "/api/block" {
+		return auth.RoleAnalyst
 	}
 	// 锁定 / 解锁自学习校准会改变检测等级：只允许管理员；外部模型配置决定事件内容发往哪里（查看也只允许管理员）
 	if strings.HasPrefix(p, "/api/auth/users") || p == "/api/auth/audit" || strings.HasPrefix(p, "/api/audit") || strings.HasPrefix(p, "/api/auth/tokens") ||
@@ -431,7 +442,11 @@ func (s *Server) authTokenDelete(w http.ResponseWriter, r *http.Request) {
 func (s *Server) authSession(w http.ResponseWriter, r *http.Request) {
 	sess := sessionOf(r)
 	if sess == nil { // 未登录不视为错误（登录页据此判断），避免浏览器控制台出现 401 报错
-		writeJSON(w, map[string]any{"authenticated": false, "auth_enabled": true})
+		res := map[string]any{"authenticated": false, "auth_enabled": true}
+		if s.OIDC != nil {
+			res["oidc"] = s.OIDC.DisplayName()
+		}
+		writeJSON(w, res)
 		return
 	}
 	writeJSON(w, sessionView(sess, s.Auth != nil))
@@ -582,4 +597,73 @@ func statusFor(err error) int {
 		return http.StatusForbidden
 	}
 	return http.StatusBadRequest
+}
+
+const oidcStateCookie = "netsa_oidc_state"
+
+// oidcStart 跳转到身份提供方。state 写入只用于回调路径的 Cookie，回调时与参数比对，把登录绑定到发起它的浏览器。
+func (s *Server) oidcStart(w http.ResponseWriter, r *http.Request) {
+	if s.OIDC == nil || s.Auth == nil {
+		http.NotFound(w, r)
+		return
+	}
+	redirect, state, err := s.OIDC.Start(r.Context())
+	if err != nil {
+		log.Printf("[oidc] %v", err)
+		http.Redirect(w, r, "/login.html#sso_error=unavailable", http.StatusFound)
+		return
+	}
+	http.SetCookie(w, &http.Cookie{Name: oidcStateCookie, Value: state, Path: "/api/auth/oidc", HttpOnly: true, SameSite: http.SameSiteLaxMode, MaxAge: 600,
+		Secure: r.TLS != nil || strings.EqualFold(r.Header.Get("X-Forwarded-Proto"), "https")})
+	http.Redirect(w, r, redirect, http.StatusFound)
+}
+
+// oidcCallback 处理身份提供方的回调：校验 state 与 ID Token，签发平台会话。
+func (s *Server) oidcCallback(w http.ResponseWriter, r *http.Request) {
+	if s.OIDC == nil || s.Auth == nil {
+		http.NotFound(w, r)
+		return
+	}
+	fail := func(reason string) {
+		http.Redirect(w, r, "/login.html#sso_error="+reason, http.StatusFound)
+	}
+	http.SetCookie(w, &http.Cookie{Name: oidcStateCookie, Value: "", Path: "/api/auth/oidc", HttpOnly: true, SameSite: http.SameSiteLaxMode, MaxAge: -1})
+	q := r.URL.Query()
+	c, err := r.Cookie(oidcStateCookie)
+	state := q.Get("state")
+	if err != nil || state == "" || subtle.ConstantTimeCompare([]byte(c.Value), []byte(state)) != 1 {
+		fail("state")
+		return
+	}
+	if e := q.Get("error"); e != "" || q.Get("code") == "" {
+		log.Printf("[oidc] 身份提供方返回错误: %q", clip(e, 80))
+		fail("idp")
+		return
+	}
+	id, err := s.OIDC.Finish(r.Context(), state, q.Get("code"))
+	switch {
+	case errors.Is(err, sso.ErrDenied):
+		fail("denied")
+		return
+	case err != nil:
+		log.Printf("[oidc] 登录失败: %v", err)
+		s.audit(r, "单点登录", "", err)
+		fail("invalid")
+		return
+	}
+	sess, token, err := s.Auth.ExternalLogin(id.Username, id.Role, s.clientIP(r), r.UserAgent())
+	if err != nil {
+		log.Printf("[oidc] %v", err)
+		fail("conflict")
+		return
+	}
+	s.setCookie(w, r, token, sess.Expires)
+	http.Redirect(w, r, "/", http.StatusFound)
+}
+
+func clip(s string, n int) string {
+	if len(s) > n {
+		return s[:n]
+	}
+	return s
 }

@@ -15,6 +15,17 @@
 | `GET /api/incidents?status=active|closed|open…&severity=&assignee=me&overdue=1&q=` | 安全事件列表与各状态数量（含 `alerts` 告警条数与 `hits` 命中次数） |
 | `GET /api/exposure` | 对外发布服务清单（DNAT 映射）、兜底端口与已过滤的探测次数 |
 | `GET /api/incidents/{id}`、`POST /api/incidents/{id}`、`POST /api/incidents/bulk` | 事件详情 / 处置（`status`、`assignee`、`note`；批量时附 `ids`，运营分析员以上）、`GET /api/incidents/assignees` 可指派的负责人 |
+| `GET /api/block`、`POST /api/block` | 封禁记录、提交封禁申请（运营分析员以上） |
+| `POST /api/block/{id}/approve`、`reject`、`release` | 审批、驳回、解除封禁（管理员） |
+| `GET /api/block/edl` | 生效中的封禁地址（纯文本，每行一个），供防火墙拉取 |
+| `GET /api/rules/managed`、`POST /api/rules/managed`、`DELETE /api/rules/managed/{id}` | 页面维护的规则 |
+| `POST /api/rules/test` | 用样本试运行规则（不保存） |
+| `POST /api/rules/packs`、`DELETE /api/rules/packs/{name}` | 安装、卸载签名规则包 |
+| `POST /api/rules/sigma` | 转换 Sigma 规则（`{"yaml":"…","apply":false}`，`apply` 为 true 时导入） |
+| `GET /api/integrations` | 外部系统对接状态（管理员） |
+| `GET /api/admin/backup` | 下载状态备份（管理员） |
+| `GET /api/auth/oidc/start`、`GET /api/auth/oidc/callback` | 单点登录 |
+| `POST /api/incidents/ai-batch` | 把事件加入后台研判队列（`{"ids":[…]}`，最多 500 个，运营分析员以上） |
 | `POST /api/incidents/{id}/ai` | 对事件执行 AI 研判，结论写入处置记录（运营分析员以上） |
 | `GET /api/learn`、`POST /api/learn/suggestions/{id}/apply|dismiss`、`POST /api/learn/rules/{rule}/pin|unpin`、`PUT /api/learn/policy` | 自学习状态（规则 / 目标级校准、确认攻击源、自动生效次数、模型一致率、建议、进化日志）、采纳或忽略建议、锁定规则与修改策略（管理员） |
 | `GET /api/ai/settings`、`PUT /api/ai/settings`、`POST /api/ai/test`、`POST /api/ai/models` | 外部模型配置（协议、地址、名称、密钥、启用；响应不含密钥）、连接测试与读取模型列表（管理员） |

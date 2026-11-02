@@ -12,6 +12,21 @@ jobs:
   go:
     name: go · fmt / vet / race test
     runs-on: ubuntu-latest
+    # 告警归档的集成测试需要真实的 PostgreSQL
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_PASSWORD: ci-only-pw-73
+          POSTGRES_DB: netsa_test
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      NETSA_TEST_PG_URL: postgres://postgres:ci-only-pw-73@localhost:5432/netsa_test?sslmode=disable
     steps:
       - uses: actions/checkout@v4
 
@@ -53,6 +68,36 @@ jobs:
       # 依赖与标准库的已知漏洞：只报告代码实际调用到的漏洞，发现即失败（升级依赖或工具链后再提交）
       - name: govulncheck
         run: go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 ./...
+
+  # 前端回归：登录、事件处置、封禁审批、规则运营；所有页面渲染攻击者控制的日志内容时不能产生 XSS
+  e2e:
+    name: web · e2e
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.27.x'
+          cache: true
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: 安装 Playwright
+        working-directory: test/e2e
+        run: |
+          npm ci
+          npx playwright install --with-deps chromium
+      - name: 运行
+        working-directory: test/e2e
+        run: npx playwright test
+      - name: 保存失败现场
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report
+          path: test/e2e/test-results
+          if-no-files-found: ignore
 
   web:
     name: web · syntax

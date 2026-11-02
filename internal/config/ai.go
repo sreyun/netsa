@@ -28,6 +28,8 @@ type AIConfig struct {
 	Desensitize *bool `yaml:"desensitize"`
 	// AutoTriage 新出现的高危及以上事件自动研判（结果写入事件处置记录，默认关闭）
 	AutoTriage bool `yaml:"auto_triage"`
+	// AutoTriageMedium 自动研判的范围扩大到中危事件（模型调用量会明显增加，默认关闭）
+	AutoTriageMedium bool `yaml:"auto_triage_medium"`
 }
 
 // DesensitizeOn 返回是否发送前脱敏（未配置时默认开启）。

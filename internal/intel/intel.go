@@ -66,6 +66,7 @@ type DB struct {
 	mu    sync.RWMutex
 	lists []*list
 	tor   map[netip.Addr]bool
+	feeds feeds
 }
 
 // Load 加载配置中的黑名单文件（每行一个 IP 或 CIDR，# 开头为注释）。

@@ -169,3 +169,6 @@ body {
 .two-back { margin-top: 10px; background: none; border: 0; color: #8fe9ff; cursor: pointer; font-size: 13px; padding: 4px 0; align-self: center; font-family: inherit; }
 .two-back:hover { text-decoration: underline; }
 #otp { letter-spacing: 3px; font-family: ui-monospace, Consolas, monospace; }
+
+.sso-btn { display: block; margin-top: 10px; text-align: center; text-decoration: none; background: transparent; }
+.sso-btn[hidden] { display: none; }

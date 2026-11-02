@@ -152,6 +152,7 @@ go build -o bin/netsa ./cmd/netsa
 | [安全維運](../operations.md) | 事件處置、告警推播、原始日誌、資產弱點、報表合規、帳號稽核、監控指標、告警歸檔 |
 | [設定參考](../configuration.md) | 常用設定項與執行注意事項 |
 | [API](../api.md) | REST 介面一覽 |
+| [對接外部系統](../integrations.md) | LDAP / OIDC 單一登入、SIEM 轉發、聯動封禁、工單與處置劇本、STIX / TAXII / MISP 情資、Sigma 與簽章規則包 |
 | [開發與發布](../development.md) | 本機測試、程式碼結構、映像建置與發布 |
 
 ## 開發

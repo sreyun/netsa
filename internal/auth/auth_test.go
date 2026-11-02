@@ -247,3 +247,75 @@ func TestSetPasswordReload(t *testing.T) {
 		t.Fatalf("应使用命令行重置后的密码: %v", err)
 	}
 }
+
+// 外部账号：本地账号优先、不能用本地密码登录、角色随映射变化、不能接管同名本地账号。
+func TestExternalAccounts(t *testing.T) {
+	m, initial, err := New(Options{File: filepath.Join(t.TempDir(), "users.json"), TTL: time.Hour})
+	if err != nil {
+		t.Fatal(err)
+	}
+	calls := 0
+	role := "analyst"
+	m.SetExternalAuth(func(user, password string) (string, error) {
+		calls++
+		if password != "dir-pass" {
+			return "", ErrBadCredentials
+		}
+		return role, nil
+	})
+	sess, _, err := m.Login("alice", "dir-pass", "1.1.1.1", "ua")
+	if err != nil || sess.Role != "analyst" || sess.MustChange {
+		t.Fatalf("首次 LDAP 登录应自动创建账号: %+v %v", sess, err)
+	}
+	if _, _, err := m.Login("alice", "wrong", "1.1.1.2", "ua"); !errors.Is(err, ErrBadCredentials) {
+		t.Fatalf("错误密码: %v", err)
+	}
+	// 本地账号优先：目录服务里的同名账号不能接管本地管理员
+	before := calls
+	if _, _, err := m.Login("admin", "dir-pass", "1.1.1.3", "ua"); !errors.Is(err, ErrBadCredentials) || calls != before {
+		t.Fatalf("本地账号不走外部认证: %v calls=%d", err, calls)
+	}
+	if _, _, err := m.Login("admin", initial, "1.1.1.3", "ua"); err != nil {
+		t.Fatalf("本地账号: %v", err)
+	}
+	// 角色降低时吊销已签发的会话
+	_, token, _ := m.Login("alice", "dir-pass", "1.1.1.1", "ua")
+	role = "viewer"
+	if s, _, _ := m.Login("alice", "dir-pass", "1.1.1.1", "ua"); s.Role != "viewer" {
+		t.Fatalf("角色应更新: %+v", s)
+	}
+	if _, _, ok := m.Verify(token); ok {
+		t.Fatal("角色降低后旧会话应失效")
+	}
+	// 外部账号不能改本地密码；停用外部认证后不能登录
+	if _, err := m.ChangePassword("alice", "dir-pass", "new-password-123"); !errors.Is(err, ErrExternalAccount) {
+		t.Fatalf("外部账号改密码: %v", err)
+	}
+	m.SetExternalAuth(nil)
+	if _, _, err := m.Login("alice", "dir-pass", "1.1.1.9", "ua"); !errors.Is(err, ErrBadCredentials) {
+		t.Fatalf("停用后不能登录: %v", err)
+	}
+	// 单点登录不能接管同名的本地或 LDAP 账号
+	if _, _, err := m.ExternalLogin("admin", "admin", "1.1.1.4", "ua"); err == nil {
+		t.Fatal("不能接管本地账号")
+	}
+	if _, _, err := m.ExternalLogin("alice", "admin", "1.1.1.4", "ua"); err == nil {
+		t.Fatal("不能接管 LDAP 账号")
+	}
+	if s, _, err := m.ExternalLogin("bob@example.com", "viewer", "1.1.1.4", "ua"); err != nil || s.Role != "viewer" {
+		t.Fatalf("单点登录: %+v %v", s, err)
+	}
+	if _, _, err := m.ExternalLogin("<script>", "viewer", "1.1.1.4", "ua"); err == nil {
+		t.Fatal("非法账号名应拒绝")
+	}
+	if _, _, err := m.ExternalLogin("carol", "root", "1.1.1.4", "ua"); err == nil {
+		t.Fatal("非法角色应拒绝")
+	}
+	var found bool
+	for _, u := range m.Users() {
+		found = found || u.Name == "bob@example.com" && u.External == "oidc"
+	}
+	if !found {
+		t.Fatalf("账号列表应显示外部来源: %+v", m.Users())
+	}
+}

@@ -47,7 +47,7 @@ func TestLearnAppliedEndToEnd(t *testing.T) {
 	in <- []*model.Event{
 		web("198.51.100.50", "/api/search?q=1%20union%20select%201,2", 403), // 反复误报的接口：下调
 		web("198.51.100.51", "/api/order?id=1%20union%20select%201,2", 403), // 其他接口：不受影响
-		web("198.51.100.52", "/api/search?q=1%20union%20select%20pwd", 200), // 成功利用：仍为严重
+		web("198.51.100.52", "/api/search?q=1%20union%20select%20pwd", 200), // 只有 200：校准仍然生效，不算成功证据
 		web("203.0.113.77", "/.git/config", 404),                            // 已确认的攻击来源复现：升级
 	}
 	close(in)
@@ -68,8 +68,8 @@ func TestLearnAppliedEndToEnd(t *testing.T) {
 	if a := find("198.51.100.51"); a.Severity != model.SevHigh {
 		t.Fatalf("其他接口不受影响: %s", a.Severity)
 	}
-	if a := find("198.51.100.52"); a.Severity != model.SevCritical {
-		t.Fatalf("成功利用应仍为严重: %s %s", a.Severity, a.Result)
+	if a := find("198.51.100.52"); a.Severity != model.SevMedium {
+		t.Fatalf("只有响应码不应越过校准: %s %s", a.Severity, a.Result)
 	}
 	if a := find("203.0.113.77"); a.Severity != model.SevHigh || !strings.Contains(a.Evidence, "曾被分析员确认为攻击") {
 		t.Fatalf("已确认的攻击来源复现应升级一级: %s %s", a.Severity, a.Evidence)

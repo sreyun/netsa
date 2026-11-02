@@ -1,0 +1,11 @@
+{
+  "name": "netsa-e2e",
+  "private": true,
+  "description": "netsa 前端端到端回归（不随产品发布）",
+  "scripts": {
+    "test": "playwright test"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.49.0"
+  }
+}

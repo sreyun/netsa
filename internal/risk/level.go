@@ -129,11 +129,11 @@ func CompromiseEvidence(category string) bool { return compromiseEvidence[catego
 //
 //  1. 分类底线：低于底线的抬到下限（防漏配）；自学习下调的命中最多低于底线一级；
 //  2. 严重级准入：
-//     - 成功利用（Result=success）且分类可升级 → 严重；
+//     - 成功利用且有第二份证据（Proven）→ 严重；只有 2xx 响应的「疑似成功」最高高危：
+//     应用忽略参数、单页应用、统一错误页都会返回 200，响应码不足以证明攻击得手；
 //     - 失陷迹象类（带外、远控、挖矿、主机事件）按规则声明，最高可到严重；
 //  3. 结果封顶：已拦截 / 请求失败 / 后端异常 → 不超过高危（未成功就不构成「严重」）；
-//     未拦截（passed）保留规则声明，但只有可升级分类才允许停在严重；
-//  4. 标签命中：仅打标签的观察不超过低危。
+//  4. 标签命中与自由文本中的弱特征：不超过低危。
 //
 // 判定顺序即优先级：结果封顶在成功升级之后，保证「已拦截」永远不会因规则声明为
 // critical 而继续标为严重；标签命中不参与底线抬升且最后封顶，保证 tag_only 规则不会因分类底线反弹。
@@ -156,23 +156,23 @@ func Finalize(h *model.Hit) {
 	// 自学习按分析员结论下调的命中最多低于底线一级（不低于低危）：底线防的是规则作者写错等级，
 	// 而反复的人工误报结论是更直接的证据；若仍按底线抬回，注入类规则（底线即高危）的校准就完全不生效
 	f := catFloor[h.Category]
-	if h.Learned < 0 && f > model.SevLow {
+	if (h.Learned < 0 || h.Disproven) && f > model.SevLow {
 		f--
 	}
-	if sev < f && !h.TagOnly {
+	if sev < f && !h.TagOnly && !h.Weak {
 		sev = f
 	}
 
 	// 2. 严重级准入
 	switch {
-	case h.Result == model.ResultSuccess && successEscalates[h.Category]:
+	case h.Result == model.ResultSuccess && successEscalates[h.Category] && h.Proven:
 		sev = model.SevCritical
 	case h.Result == model.ResultSuccess && h.Category == "敏感文件探测" && sev < model.SevHigh:
 		// 敏感文件能取到 200：资源确实可访问，属于「已验证的暴露面」，按高危处置但不判定失陷
 		sev = model.SevHigh
-	case sev >= model.SevCritical && !compromiseEvidence[h.Category] &&
-		h.Result != model.ResultSuccess && h.Result != model.ResultPassed:
-		// 既没有成功证据，也不是「未拦截」：不构成严重
+	case sev >= model.SevCritical && !compromiseEvidence[h.Category] && !h.Proven &&
+		(h.Result != model.ResultSuccess || successEscalates[h.Category]):
+		// 没有第二份证据：不构成严重。非 Web 攻击分类的成功（如暴力破解后登录成功）由日志直接证明，不受此限
 		sev = model.SevHigh
 	}
 
@@ -185,7 +185,7 @@ func Finalize(h *model.Hit) {
 	}
 
 	// 4. 仅打标签的观察不参与告警分级
-	if h.TagOnly && sev > model.SevLow {
+	if (h.TagOnly || h.Weak) && sev > model.SevLow {
 		sev = model.SevLow
 	}
 	h.Severity = sev
@@ -228,11 +228,15 @@ func Describe(h *model.Hit, before model.Severity) string {
 	switch {
 	case h.Severity > before:
 		if h.Severity == model.SevCritical && h.Result == model.ResultSuccess {
-			return "响应表明利用成功，升为严重"
+			return "有证据证明利用成功，升为严重"
 		}
 		return "按攻击分类底线抬升"
 	case h.TagOnly:
 		return "仅打标签，不计入告警分级"
+	case h.Weak:
+		return "特征只出现在普通文字中，最高按低危处置"
+	case h.Result == model.ResultSuccess:
+		return "只有响应码，不足以确认攻击成功，最高按高危处置"
 	case h.Result == model.ResultBlocked:
 		return "已被拦截，最高按高危处置"
 	case h.Result == model.ResultFailed || h.Result == model.ResultError:

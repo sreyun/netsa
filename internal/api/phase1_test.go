@@ -245,7 +245,7 @@ func TestIncidentAndSuppressionAPI(t *testing.T) {
 	h := s.Handler()
 	for i, ip := range []string{"203.0.113.1", "203.0.113.2", "203.0.113.3"} {
 		st.Record(&model.Event{Kind: model.KindWeb, SrcIP: ip, URI: "/x", Time: time.Now()},
-			[]model.Hit{{RuleID: "r1", Name: "SQL 注入", Category: "SQL注入", Severity: model.Severity(2 + i%3), Result: model.ResultPassed}})
+			[]model.Hit{{RuleID: "r1", Name: "SQL 注入", Category: "SQL注入", Severity: model.Severity(2 + i%3), Result: model.ResultPassed, Proven: true}})
 	}
 	var list struct {
 		Incidents []store.IncidentView

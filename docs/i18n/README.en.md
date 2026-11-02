@@ -152,6 +152,7 @@ The detailed documents below are written in Simplified Chinese.
 | [Security operations](../operations.md) | Incident handling, notifications, raw logs, assets and vulnerabilities, reports and compliance, accounts and audit, metrics, alert archiving |
 | [Configuration reference](../configuration.md) | Common settings and operational notes |
 | [API](../api.md) | REST API overview |
+| [External integrations](../integrations.md) | LDAP / OIDC single sign-on, SIEM forwarding, firewall blocking, tickets and playbooks, STIX / TAXII / MISP intel, Sigma and signed rule packs |
 | [Development and release](../development.md) | Local testing, code structure, image build and release |
 
 ## Development

@@ -34,6 +34,8 @@ type Settings struct {
 	Thinking    string `json:"thinking,omitempty"`    // 思考模式：auto / off / on
 	Desensitize bool   `json:"desensitize"`
 	AutoTriage  bool   `json:"auto_triage"`
+	// AutoTriageMedium 自动研判的范围扩大到中危事件
+	AutoTriageMedium bool `json:"auto_triage_medium,omitempty"`
 	// NoDowngrade 关闭「模型高置信判为误报时下调事件等级」（默认开启）
 	NoDowngrade bool      `json:"no_downgrade,omitempty"`
 	UpdatedBy   string    `json:"updated_by,omitempty"`
@@ -136,7 +138,7 @@ func New(cfg config.AIConfig, getenv func(string) string) *Client {
 		c.envKey = strings.TrimSpace(getenv(c.keyEnv))
 	}
 	c.set = normalize(Settings{Enabled: cfg.Enabled, BaseURL: cfg.BaseURL, Model: cfg.Model, KeyFromEnv: true, TimeoutSec: int(cfg.Timeout / time.Second),
-		MaxPerHour: cfg.MaxPerHour, Desensitize: cfg.DesensitizeOn(), AutoTriage: cfg.AutoTriage})
+		MaxPerHour: cfg.MaxPerHour, Desensitize: cfg.DesensitizeOn(), AutoTriage: cfg.AutoTriage, AutoTriageMedium: cfg.AutoTriageMedium})
 	return c
 }
 
@@ -226,6 +228,16 @@ func (c *Client) AutoTriage() bool {
 	return c.set.Enabled && c.set.AutoTriage
 }
 
+// AutoTriageMedium 返回自动研判的范围是否包含中危事件。
+func (c *Client) AutoTriageMedium() bool {
+	if c == nil {
+		return false
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.set.AutoTriageMedium
+}
+
 // AutoDowngrade 返回模型高置信判为误报时是否下调事件等级。
 func (c *Client) AutoDowngrade() bool {
 	if c == nil {
@@ -294,25 +306,26 @@ func (c *Client) Status() Status {
 
 // View 是界面展示的配置（不含密钥）。
 type View struct {
-	Enabled     bool      `json:"enabled"`
-	Protocol    string    `json:"protocol"`
-	BaseURL     string    `json:"base_url"`
-	Model       string    `json:"model"`
-	KeySet      bool      `json:"key_set"`
-	KeySource   string    `json:"key_source"`         // ui：界面填写；env：环境变量；空：未设置
-	KeyHint     string    `json:"key_hint,omitempty"` // 界面填写的密钥末 4 位，便于核对是否填对
-	KeyEnv      string    `json:"key_env"`
-	MaxPerHour  int       `json:"max_per_hour"`
-	MaxTokens   int       `json:"max_tokens"`
-	TimeoutSec  int       `json:"timeout_sec"`
-	Thinking    string    `json:"thinking"`
-	Desensitize bool      `json:"desensitize"`
-	AutoTriage  bool      `json:"auto_triage"`
-	NoDowngrade bool      `json:"no_downgrade"`
-	FromUI      bool      `json:"from_ui"` // 配置来自界面（否则来自配置文件 ai 段）
-	Persist     bool      `json:"persist"` // 界面配置会保存到文件；否则重启后恢复为配置文件中的值
-	UpdatedBy   string    `json:"updated_by,omitempty"`
-	Updated     time.Time `json:"updated,omitzero"`
+	Enabled          bool      `json:"enabled"`
+	Protocol         string    `json:"protocol"`
+	BaseURL          string    `json:"base_url"`
+	Model            string    `json:"model"`
+	KeySet           bool      `json:"key_set"`
+	KeySource        string    `json:"key_source"`         // ui：界面填写；env：环境变量；空：未设置
+	KeyHint          string    `json:"key_hint,omitempty"` // 界面填写的密钥末 4 位，便于核对是否填对
+	KeyEnv           string    `json:"key_env"`
+	MaxPerHour       int       `json:"max_per_hour"`
+	MaxTokens        int       `json:"max_tokens"`
+	TimeoutSec       int       `json:"timeout_sec"`
+	Thinking         string    `json:"thinking"`
+	Desensitize      bool      `json:"desensitize"`
+	AutoTriage       bool      `json:"auto_triage"`
+	AutoTriageMedium bool      `json:"auto_triage_medium"`
+	NoDowngrade      bool      `json:"no_downgrade"`
+	FromUI           bool      `json:"from_ui"` // 配置来自界面（否则来自配置文件 ai 段）
+	Persist          bool      `json:"persist"` // 界面配置会保存到文件；否则重启后恢复为配置文件中的值
+	UpdatedBy        string    `json:"updated_by,omitempty"`
+	Updated          time.Time `json:"updated,omitzero"`
 }
 
 // View 返回界面展示的配置。
@@ -322,7 +335,7 @@ func (c *Client) View() View {
 	s := c.set
 	v := View{Enabled: s.Enabled, Protocol: s.Protocol, BaseURL: s.BaseURL, Model: s.Model, KeyEnv: c.keyEnv, MaxPerHour: s.MaxPerHour, MaxTokens: s.MaxTokens,
 		TimeoutSec: s.TimeoutSec, Thinking: s.Thinking, Desensitize: s.Desensitize,
-		AutoTriage: s.AutoTriage, NoDowngrade: s.NoDowngrade, FromUI: c.fromUI, Persist: c.path != "", UpdatedBy: s.UpdatedBy, Updated: s.Updated}
+		AutoTriage: s.AutoTriage, AutoTriageMedium: s.AutoTriageMedium, NoDowngrade: s.NoDowngrade, FromUI: c.fromUI, Persist: c.path != "", UpdatedBy: s.UpdatedBy, Updated: s.Updated}
 	switch {
 	case s.APIKey != "":
 		v.KeySet, v.KeySource = true, "ui"
@@ -338,19 +351,20 @@ func (c *Client) View() View {
 // Update 是界面提交的配置。api_key 留空表示保持原值；clear_key 表示不再使用任何密钥
 // （清除界面保存的密钥，也不再使用环境变量中的密钥），适用于不需要密钥的内网模型。
 type Update struct {
-	Enabled     bool   `json:"enabled"`
-	Protocol    string `json:"protocol"`
-	BaseURL     string `json:"base_url"`
-	Model       string `json:"model"`
-	APIKey      string `json:"api_key"`
-	ClearKey    bool   `json:"clear_key"`
-	MaxPerHour  int    `json:"max_per_hour"`
-	MaxTokens   int    `json:"max_tokens"`
-	TimeoutSec  int    `json:"timeout_sec"`
-	Thinking    string `json:"thinking"`
-	Desensitize bool   `json:"desensitize"`
-	AutoTriage  bool   `json:"auto_triage"`
-	NoDowngrade bool   `json:"no_downgrade"`
+	Enabled          bool   `json:"enabled"`
+	Protocol         string `json:"protocol"`
+	BaseURL          string `json:"base_url"`
+	Model            string `json:"model"`
+	APIKey           string `json:"api_key"`
+	ClearKey         bool   `json:"clear_key"`
+	MaxPerHour       int    `json:"max_per_hour"`
+	MaxTokens        int    `json:"max_tokens"`
+	TimeoutSec       int    `json:"timeout_sec"`
+	Thinking         string `json:"thinking"`
+	Desensitize      bool   `json:"desensitize"`
+	AutoTriage       bool   `json:"auto_triage"`
+	AutoTriageMedium bool   `json:"auto_triage_medium"`
+	NoDowngrade      bool   `json:"no_downgrade"`
 }
 
 // ErrKeyRebind 表示模型地址的主机变更后沿用了原密钥。
@@ -368,7 +382,7 @@ func hostOf(base string) string {
 // 主机变更且沿用原密钥时拒绝：否则拿到管理会话的人只需改一下地址就能把密钥发到自己的服务器上。
 func (c *Client) mergeLocked(u Update) (Settings, error) {
 	s := Settings{Enabled: u.Enabled, Protocol: u.Protocol, BaseURL: u.BaseURL, Model: u.Model, APIKey: c.set.APIKey, KeyFromEnv: c.set.KeyFromEnv,
-		MaxPerHour: u.MaxPerHour, MaxTokens: u.MaxTokens, TimeoutSec: u.TimeoutSec, Thinking: u.Thinking, Desensitize: u.Desensitize, AutoTriage: u.AutoTriage, NoDowngrade: u.NoDowngrade}
+		MaxPerHour: u.MaxPerHour, MaxTokens: u.MaxTokens, TimeoutSec: u.TimeoutSec, Thinking: u.Thinking, Desensitize: u.Desensitize, AutoTriage: u.AutoTriage, AutoTriageMedium: u.AutoTriageMedium, NoDowngrade: u.NoDowngrade}
 	if s.TimeoutSec == 0 {
 		s.TimeoutSec = c.set.TimeoutSec
 	}

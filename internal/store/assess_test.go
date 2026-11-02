@@ -170,7 +170,7 @@ func TestAssessment(t *testing.T) {
 
 	// 高置信失陷：WebShell 交互成功
 	s.Record(&model.Event{Kind: model.KindWeb, SrcIP: "198.51.100.66", Host: "a.com", Method: "POST", URI: "/upload/x.php", Status: 200, Bytes: 80, Time: now},
-		[]model.Hit{{RuleID: "webshell", Name: "WebShell 交互", Category: detect.CatWebShell, Severity: model.SevCritical, Phase: model.PhasePersistence, Result: model.ResultSuccess}})
+		[]model.Hit{{RuleID: "webshell", Name: "WebShell 交互", Category: detect.CatWebShell, Severity: model.SevCritical, Phase: model.PhasePersistence, Result: model.ResultSuccess, Proven: true}})
 	a = s.Assess(full)
 	if a.Score > 35 || a.Grade != "E" || len(a.Compromised) != 1 || a.Compromised[0].Confidence != "high" || a.ActionCount["P0"] < 3 {
 		t.Fatalf("高置信失陷: %d %s %+v", a.Score, a.Grade, a.Compromised)
@@ -191,7 +191,7 @@ func TestOverviewSituation(t *testing.T) {
 	now := time.Now()
 	hit := func(ip string, at time.Time, cat string, sev model.Severity, res string) {
 		s.Record(&model.Event{Kind: model.KindWeb, SrcIP: ip, Method: "GET", URI: "/x", Status: 200, Time: at},
-			[]model.Hit{{RuleID: "r" + sev.String(), Name: "r", Category: cat, Severity: sev, Phase: model.PhaseExploit, Result: res}})
+			[]model.Hit{{RuleID: "r" + sev.String(), Name: "r", Category: cat, Severity: sev, Phase: model.PhaseExploit, Result: res, Proven: res == model.ResultSuccess}})
 	}
 	hit("198.51.100.1", now.Add(-90*time.Minute), detect.CatXSS, model.SevMedium, model.ResultBlocked)
 	hit("198.51.100.1", now.Add(-80*time.Minute), detect.CatXSS, model.SevMedium, model.ResultBlocked)

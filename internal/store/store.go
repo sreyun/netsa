@@ -3,6 +3,7 @@ package store
 
 import (
 	"math"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -202,37 +203,39 @@ type Totals struct {
 
 // Store 是线程安全的态势状态库。
 type Store struct {
-	mu         sync.RWMutex
-	maxIPs     int
-	maxAlerts  int
-	perRule    int
-	retention  time.Duration
-	ips        map[string]*IPProfile
-	alerts     []*model.Alert
-	alertHead  int
-	nextID     uint64
-	buckets    map[int64]*Bucket
-	totals     Totals
-	categories map[string]int64
-	rules      map[string]int64
-	ruleNames  map[string]string
-	sevCount   [5]int64
-	phases     map[string]int64
-	results    map[string]int64
-	minTime    time.Time
-	maxTime    time.Time
-	surf       *surface
-	ruleBits   map[string]int       // 规则 ID → 指纹位下标（同源关联分析用）
-	scores     []ScorePoint         // 安全评分历史（每小时一次）
-	incidents  map[uint64]*Incident // 安全事件（同一来源的告警合并处置）
-	incByKey   map[string]uint64    // 来源 IP → 最近的事件
-	nextInc    uint64
-	agg        *aggregate          // 总览增量统计（国家/省份/城市/等级/目标/近 1 小时）
-	days       map[string]*DayStat // 按自然日的汇总（周报 / 月报）
-	curDay     *DayStat
-	dayStart   int64
-	dayEnd     int64
-	loc        *time.Location
+	mu          sync.RWMutex
+	maxIPs      int
+	maxAlerts   int
+	perRule     int
+	retention   time.Duration
+	ips         map[string]*IPProfile
+	alerts      []*model.Alert
+	alertHead   int
+	nextID      uint64
+	buckets     map[int64]*Bucket
+	totals      Totals
+	categories  map[string]int64
+	rules       map[string]int64
+	ruleNames   map[string]string
+	sevCount    [5]int64
+	phases      map[string]int64
+	results     map[string]int64
+	minTime     time.Time
+	maxTime     time.Time
+	surf        *surface
+	ruleBits    map[string]int       // 规则 ID → 指纹位下标（同源关联分析用）
+	scores      []ScorePoint         // 安全评分历史（每小时一次）
+	incidents   map[uint64]*Incident // 安全事件（同一来源的告警合并处置）
+	incByKey    map[string]uint64    // 来源 IP → 最近的事件
+	journal     *os.File             // 处置记录预写日志，见 journal.go
+	journalPath string
+	nextInc     uint64
+	agg         *aggregate          // 总览增量统计（国家/省份/城市/等级/目标/近 1 小时）
+	days        map[string]*DayStat // 按自然日的汇总（周报 / 月报）
+	curDay      *DayStat
+	dayStart    int64
+	dayEnd      int64
+	loc         *time.Location
 
 	// GeoLookup / IntelMatch 在创建新画像时调用。
 	GeoLookup  func(ip string) *geo.Info
@@ -519,7 +522,7 @@ func (s *Store) recordLocked(ev *model.Event, hits []model.Hit) RecordResult {
 			// 同一规则在节流窗口内的重复命中：仍然计入「命中」，但不生成告警。
 			// 事件里单独累计，避免出现「命中 10 次、告警 6 条」却无处解释的口径差异。
 			s.muteIncidentLocked(ev.SrcIP, incidentHit{
-				rule: h.RuleID, category: h.Category, phase: h.Phase, result: h.Result,
+				rule: h.RuleID, category: h.Category, phase: h.Phase, result: h.Result, proven: h.Proven,
 				target: truncate(ev.Target(), 300), asset: ev.Asset, at: ev.Time,
 			})
 		}
@@ -608,7 +611,7 @@ func (s *Store) newAlert(ev *model.Event, h *model.Hit, p *IPProfile) *model.Ale
 	a := &model.Alert{
 		ID: s.nextID, Time: ev.Time, Kind: ev.Kind, SrcIP: ev.SrcIP, RuleID: h.RuleID, Name: h.Name,
 		Category: h.Category, Severity: h.Severity, Phase: h.Phase, Result: h.Result, Target: truncate(ev.Target(), 300),
-		Method: ev.Method, Status: ev.Status, Evidence: h.Evidence, UA: truncate(ev.UA, 200), Source: ev.Source,
+		Method: ev.Method, Status: ev.Status, Evidence: h.Evidence, UA: truncate(ev.UA, 200), Source: ev.Source, Proven: h.Proven,
 	}
 	if r := ev.Asset; r != nil {
 		a.Asset, a.AssetLevel, a.Owner = r.Name, r.Level, r.Owner

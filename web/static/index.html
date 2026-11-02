@@ -239,9 +239,13 @@
       <button type="button" class="btn" data-bulk="resolved">标记已处置</button>
       <button type="button" class="btn" data-bulk="false_positive">标记误报</button>
       <button type="button" class="btn" data-bulk="ignored">忽略</button>
+      <button type="button" class="btn" data-bulk="ai" id="incBulkAI" hidden>AI 研判</button>
       <button type="button" class="btn" data-bulk="clear">取消选择</button>
     </div>
     <div class="panel"><div class="table-wrap"><table class="table" id="incTable"></table></div><div class="pager" id="incPager"></div></div>
+    <div class="panel" id="blockPanel" hidden><h3>联动封禁 <small id="blockInfo"></small></h3>
+      <div class="nt-help">分析员提交申请，管理员审批后生效，到期自动解除。防火墙通过 <code>/api/block/edl</code> 拉取生效名单。内网地址和保护名单不能封禁。</div>
+      <div class="table-wrap"><table class="table" id="blockTable"></table></div></div>
     <div class="panel"><h3>误报抑制规则 <small id="supCount"></small></h3>
       <div class="nt-help">命中抑制规则的攻击不产生告警、不计入攻击统计与威胁评分，只累计抑制次数；可在告警列表或事件详情中对误报的告警点击“标记误报”生成规则。</div>
       <div class="table-wrap"><table class="table" id="supTable"></table></div></div>
@@ -360,6 +364,16 @@
     <div class="panel"><h3>API 令牌 <small id="tokCount">供 SOAR、工单系统、Prometheus 等以 Authorization: Bearer 调用接口</small>
       <button type="button" class="btn primary" id="tokAdd" style="margin-left:auto">＋ 创建令牌</button></h3>
       <div class="table-wrap"><table class="table" id="tokTable"></table></div></div>
+    <div class="panel"><h3>规则运营 <small id="ruleCount"></small>
+      <button type="button" class="btn" id="ruleSigma" style="margin-left:auto">导入 Sigma</button>
+      <button type="button" class="btn" id="rulePack">安装规则包</button>
+      <button type="button" class="btn primary" id="ruleAdd">＋ 添加规则</button></h3>
+      <div class="nt-help">保存后立即生效，不需要重启。匹配的是解码、转小写后的文本，表达式不支持回溯和环视。</div>
+      <div class="table-wrap"><table class="table" id="ruleTable"></table></div>
+      <div class="table-wrap"><table class="table" id="packTable"></table></div></div>
+    <div class="panel"><h3>对接状态 <small>配置说明见 docs/integrations.md</small>
+      <a class="btn" id="backupDl" href="/api/admin/backup" style="margin-left:auto" title="下载状态备份。其中有密码哈希和模型密钥，请妥善保管">下载备份</a></h3>
+      <div class="table-wrap"><table class="table" id="intTable"></table></div></div>
     <div class="panel"><h3>操作审计 <small id="auditInfo">登录（含失败与锁定）、配置变更、事件处置、数据检索与导出；记录以哈希链防篡改</small></h3>
       <div class="toolbar">
         <input id="auSearch" placeholder="搜索账号 / IP / 操作 / 详情">
@@ -582,7 +596,8 @@
       <label class="field"><span class="flabel">调用超时（秒）</span><input id="aiTimeout" type="number" min="10" max="1800" step="10"></label>
       <label class="inline"><input type="checkbox" id="aiDesens"> 发送前脱敏（内网地址、口令 / 令牌、手机号、证件号、邮箱；攻击来源公网地址保留）</label>
       <label class="inline"><input type="checkbox" id="aiAuto"> 新出现的高危及以上事件自动研判（结论写入事件处置记录）</label>
-      <label class="inline"><input type="checkbox" id="aiDowngrade"> 模型高置信判为误报时下调事件等级一级（有疑似成功、失陷迹象、涉及核心资产的事件不下调；事件保持待处理，可撤销）</label>
+      <label class="inline"><input type="checkbox" id="aiAutoMedium"> 自动研判也包含中危事件（模型调用量会明显增加）</label>
+      <label class="inline"><input type="checkbox" id="aiDowngrade"> 模型高置信判为误报时下调事件等级一级（有证据证明成功、有失陷迹象、涉及核心资产的事件不下调；事件保持待处理，可撤销）</label>
       <div class="hint" id="aiNote"></div>
       <div class="form-msg" id="aiMsg" role="status"></div>
     </div>

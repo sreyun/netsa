@@ -35,6 +35,7 @@ type item struct {
 // Pipeline 是事件处理流水线：多个 worker 并行做无状态检测，单个聚合协程做有状态分析与入库。
 type Pipeline struct {
 	Engine      *detect.Engine
+	engine      atomic.Pointer[detect.Engine] // 热更新后的引擎，优先于 Engine
 	Behavior    *detect.Behavior
 	Store       *store.Store
 	Geo         *geo.Resolver
@@ -83,6 +84,17 @@ func (p *Pipeline) whitelisted(ip string) bool {
 
 // Processed 返回已处理事件数。
 func (p *Pipeline) Processed() int64 { return p.processed.Load() }
+
+// SetEngine 替换检测引擎（规则变更后热更新），不影响正在处理的批次。
+func (p *Pipeline) SetEngine(e *detect.Engine) { p.engine.Store(e) }
+
+// CurrentEngine 返回正在使用的检测引擎。
+func (p *Pipeline) CurrentEngine() *detect.Engine {
+	if e := p.engine.Load(); e != nil {
+		return e
+	}
+	return p.Engine
+}
 
 // Run 启动流水线，in 关闭且全部处理完成后关闭返回的通道；ctx 取消时立即停止。
 // 输入为事件批次：worker 并行完成真实 IP 还原与特征检测，聚合协程按批写入状态库（每批只加一次锁）。
@@ -159,7 +171,7 @@ func (p *Pipeline) inspect(ev *model.Event) item {
 	it := item{ev: ev}
 	if p.RealIP != nil {
 		if h := p.RealIP.Apply(ev); h != nil {
-			h.Result = p.Engine.Result(ev)
+			h.Result = p.CurrentEngine().Result(ev)
 			it.hits = append(it.hits, *h)
 		}
 	}
@@ -168,7 +180,7 @@ func (p *Pipeline) inspect(ev *model.Event) item {
 		it.whitelisted, it.hits = true, nil
 		return it
 	}
-	it.hits = append(it.hits, p.Engine.Inspect(ev)...)
+	it.hits = append(it.hits, p.CurrentEngine().Inspect(ev)...)
 	return it
 }
 
@@ -302,11 +314,12 @@ func (p *Pipeline) enrichAssets(ev *model.Event, hits []model.Hit) []model.Hit {
 		}
 		switch {
 		case exact:
-			// 精确命中：目标确实存在该漏洞。是否达到「严重」交由统一策略判断——
+			// 精确命中：目标确实存在该漏洞，这是响应码之外的第二份证据。是否达到「严重」交由统一策略判断——
 			// 已拦截的探测只到高危，未拦截且分类可判定成功的才升为严重。
 			// 已拦截、或响应表明请求失败（如 404：利用的路径不存在、防火墙会话无应答）的不改判为成功
 			if h.Result != model.ResultBlocked && h.Result != model.ResultFailed {
 				h.Result = model.ResultSuccess
+				h.Proven = true
 			}
 			if h.Severity < model.SevHigh {
 				h.Severity = model.SevHigh

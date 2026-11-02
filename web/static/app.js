@@ -131,7 +131,7 @@ const fmtTime = (t) => {
 };
 const fmtShort = (t) => (zero(t) ? '-' : fmtTime(t).slice(5));
 const badge = (lv) => `<span class="badge lv-${esc(lv)} bg-${esc(lv)}">${esc(LV[lv] || lv)}</span>`;
-const resTag = (r) => `<span class="res-${esc(r)} nowrap">${esc(RESULT[r] || r)}</span>`;
+const resTag = (r, proven) => `<span class="res-${esc(r)} nowrap"${proven ? ' title="有响应码之外的证据，如响应明显大于接口基线、目标确有该漏洞"' : ''}>${esc(proven ? '成功（有证据）' : RESULT[r] || r)}</span>`;
 const scoreBar = (s, lv) => `<span class="scorebar"><i style="width:${Math.min(100, s)}%;background:${LV_COLOR[lv] || '#888'}"></i></span><b>${Math.round(s)}</b>`;
 const ipLink = (ip) => `<span class="ip clickable" data-ip="${esc(ip)}">${esc(ip)}</span>`;
 const empty = (cols, text = '暂无数据') => `<tr><td colspan="${cols}" class="empty">${esc(text)}</td></tr>`;
@@ -892,7 +892,7 @@ async function loadAlerts() {
     <td><b>${esc(a.name)}</b><div class="muted">${esc(a.category)} · ${esc(PHASE[a.phase] || a.phase)}</div></td>
     <td>${ipLink(a.src_ip)}<div class="muted">${esc(a.location || '')}</div></td>
     <td class="mono">${a.method ? esc(a.method) + ' ' : ''}${esc(a.target)}${a.status ? ` <span class="muted">[${a.status}]</span>` : ''}${assetLine(a)}</td>
-    <td>${resTag(a.result)}</td><td class="evidence">${esc(a.evidence)}</td>
+    <td>${resTag(a.result, a.proven)}</td><td class="evidence">${esc(a.evidence)}</td>
     <td class="nowrap">${a.incident_id ? `<button type="button" class="btn link" data-al="inc" data-i="${i}" title="打开所属的安全事件">事件 #${a.incident_id}</button>` : ''}
       ${ops ? `<button type="button" class="btn" data-al="fp" data-i="${i}" title="生成误报抑制规则，之后同类命中不再告警">标记误报</button>` : ''}
       ${ops && meta.rawlog ? `<button type="button" class="btn" data-al="raw" data-i="${i}" title="检索该来源前后 5 分钟的原始日志">原始日志</button>` : ''}</td></tr>`).join('');
@@ -1760,6 +1760,10 @@ function renderUserMenu() {
 // 按角色显示操作入口（服务端同样按角色校验，这里只是避免显示无权使用的按钮）
 function applyRoles() {
   $$('.need-admin').forEach((el) => { el.hidden = !isAdmin(); });
+  // 未开启登录时也要能进入系统管理（规则运营、对接状态），账号相关的操作没有意义
+  $('#tabSystem').hidden = !isAdmin();
+  $('#userAdd').hidden = !me.auth;
+  $('#tokAdd').hidden = !me.auth;
   $$('.need-analyst').forEach((el) => { if (!canOperate()) el.hidden = true; });
   $$('.need-admin-enable input').forEach((el) => { el.disabled = !isAdmin(); });
   renderNav(currentTab); // 无权访问的页面从菜单中隐藏后，同步分组与二级菜单
@@ -1933,7 +1937,7 @@ const loaders = {
   surface: () => loadSurface().catch(console.error),
   assess: () => loadAssess().catch(console.error),
   notify: () => loadNotify().catch(console.error),
-  system: () => loadSystem().catch(console.error),
+  system: () => { loadSystem().catch(console.error); if (isAdmin()) loadRuleOps().catch(console.error); },
   sources: () => loadSources().catch(console.error),
 };
 

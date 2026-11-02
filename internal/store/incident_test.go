@@ -154,8 +154,9 @@ func TestIncidentAIDowngrade(t *testing.T) {
 	s := newTestStore()
 	now := time.Now()
 	rec := func(ip, rule, cat string, sev model.Severity, result string, at time.Duration) uint64 {
-		res := s.Record(&model.Event{Kind: model.KindWeb, SrcIP: ip, Method: "GET", URI: "/a?" + rule, Status: 403, Time: now.Add(at)},
-			[]model.Hit{attackHit(rule, cat, sev, result)})
+		h := attackHit(rule, cat, sev, result)
+		h.Proven = result == model.ResultSuccess
+		res := s.Record(&model.Event{Kind: model.KindWeb, SrcIP: ip, Method: "GET", URI: "/a?" + rule, Status: 403, Time: now.Add(at)}, []model.Hit{h})
 		return res.Alerts[0].IncidentID
 	}
 	id := rec("203.0.113.1", "r1", "SQL注入", model.SevHigh, model.ResultBlocked, 0)
@@ -193,7 +194,7 @@ func TestIncidentAIDowngrade(t *testing.T) {
 		sev           model.Severity
 		result        string
 	}{
-		{"疑似成功", "203.0.113.3", "SQL注入", model.SevHigh, model.ResultSuccess},
+		{"有证据的成功", "203.0.113.3", "SQL注入", model.SevHigh, model.ResultSuccess},
 		{"严重", "203.0.113.4", "带外探测", model.SevCritical, model.ResultPassed},
 		{"失陷迹象", "203.0.113.5", "恶意外连", model.SevHigh, model.ResultPassed},
 		{"低危", "203.0.113.6", "扫描器", model.SevLow, model.ResultPassed},
@@ -201,6 +202,12 @@ func TestIncidentAIDowngrade(t *testing.T) {
 		if _, ok := s.AIDowngrade(rec(c.ip, "r1", c.cat, c.sev, c.result, 0), "x"); ok {
 			t.Errorf("%s 的事件不应下调", c.name)
 		}
+	}
+	// 只有响应码的疑似成功可以下调：模型结论正是用来判断这种情况的
+	unproven := attackHit("r1", "SQL注入", model.SevHigh, model.ResultSuccess)
+	idw := s.Record(&model.Event{Kind: model.KindWeb, SrcIP: "203.0.113.8", Method: "GET", URI: "/a", Status: 200, Time: now}, []model.Hit{unproven}).Alerts[0].IncidentID
+	if _, ok := s.AIDowngrade(idw, "x"); !ok {
+		t.Error("只有响应码的事件应可下调")
 	}
 	// 重启后保持
 	path := filepath.Join(t.TempDir(), "s.json.gz")

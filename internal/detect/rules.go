@@ -154,10 +154,10 @@ const (
 var builtinRules = []Rule{
 	// ---------------- SQL 注入 ----------------
 	rule("sqli-union", "UNION联合查询注入", CatSQLi, "high", ex, "uri", `\bunion\s+(all\s+|distinct\s+)?\(?\s*select\b`),
-	rule("sqli-bool", "布尔盲注", CatSQLi, "high", ex, "uri", `['"\)]\s*(and|or|xor|&&|\|\|)\s*['"\(]?\s*\w+\s*['"\)]?\s*(=|<|>|\blike\b|\brlike\b|\bregexp\b)\s*['"\(]?\s*\w+`),
+	rule("sqli-bool", "布尔盲注", CatSQLi, "high", ex, "uri", `['"\)]\s*(and|or|xor|&&|\|\|)\s*['"\(]?\s*\w+\s*['"\)]?\s*(=|<|>|\blike\b|\brlike\b|\bregexp\b)\s*['"\(]?\s*\w+|['"\)\d]\s*(and|or|xor|&&|\|\|)\s*\(\s*select\b`),
 	rule("sqli-bool-num", "数字型布尔注入", CatSQLi, "high", ex, "uri", `[=\s]\d+\s+(and|or|xor)\s+\d+\s*(=|<|>)\s*\d+`),
 	rule("sqli-time", "时间盲注", CatSQLi, "high", ex, "uri", `\b(sleep|pg_sleep)\s*\(\s*\d|\bbenchmark\s*\(\s*\d|waitfor\s+delay\s+['"]|dbms_pipe\.receive_message|dbms_lock\.sleep`),
-	rule("sqli-error", "报错注入", CatSQLi, "high", ex, "uri", `\b(extractvalue|updatexml|geometrycollection|multipoint|polygon|linestring|exp)\s*\(.*(select|concat|0x7e|~)|floor\s*\(\s*rand\s*\(`),
+	rule("sqli-error", "报错注入", CatSQLi, "high", ex, "uri", `\b(extractvalue|updatexml|geometrycollection|multipoint|polygon|linestring|exp)\s*\(.*(select|concat|0x7e|~)|floor\s*\(\s*rand\s*\(|\bprocedure\s+analyse\s*\(`),
 	rule("sqli-schema", "数据库元数据探测", CatSQLi, "high", ex, "uri", `\b(information_schema|mysql\.(user|db)|pg_(catalog|shadow|user)|sqlite_master|sys\.(objects|tables|databases)|sysobjects|syscolumns|all_tables|user_tables|msysobjects)\b`),
 	rule("sqli-danger", "危险数据库操作(写文件/执行命令)", CatSQLi, "critical", ex, "uri", `\b(xp_cmdshell|sp_oacreate|sp_configure)\b|load_file\s*\(|into\s+(out|dump)file\b|\blo_import\b|copy\s+\S+\s+from\s+program\b`),
 	rule("sqli-stacked", "堆叠查询注入", CatSQLi, "high", ex, "uri", `['"\d\)]\s*;\s*(drop|alter|create|truncate|insert|update|delete|exec|execute|declare|shutdown)\b`),

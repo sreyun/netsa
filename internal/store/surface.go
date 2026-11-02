@@ -33,31 +33,51 @@ type Endpoint struct {
 	sens       *sensitiveRule      // 敏感资源分类缓存
 	classified bool
 	// 正常（非攻击）2xx 响应大小的均值与方差（Welford 算法），用于复核攻击请求的“疑似成功”研判
-	normN          int64
-	normMean, norm float64
+	NormN    int64   `json:"norm_n,omitempty"`
+	NormMean float64 `json:"norm_mean,omitempty"`
+	NormVar  float64 `json:"norm_var,omitempty"`
 }
 
 // observeNormal 记录一次正常响应的大小。
 func (ep *Endpoint) observeNormal(bytes int64) {
-	ep.normN++
+	ep.NormN++
 	x := float64(bytes)
-	d := x - ep.normMean
-	ep.normMean += d / float64(ep.normN)
-	ep.norm += d * (x - ep.normMean)
+	d := x - ep.NormMean
+	ep.NormMean += d / float64(ep.NormN)
+	ep.NormVar += d * (x - ep.NormMean)
 }
 
 // baselineMatches 判断攻击请求的响应是否就是该接口的正常页面：要求接口的正常响应大小稳定
 // （至少 5 个样本、变异系数不超过 10%），且本次响应与均值相差不超过 5% 或 2 个标准差。
 // 响应大小本身波动较大的接口无法据此判断，保留原研判，宁可多报也不漏掉真实的攻击成功。
 func (ep *Endpoint) baselineMatches(bytes int64) bool {
-	if ep == nil || ep.normN < 5 || bytes <= 0 || ep.normMean <= 0 {
+	if ep == nil || ep.NormN < 5 || bytes <= 0 || ep.NormMean <= 0 {
 		return false
 	}
-	std := math.Sqrt(ep.norm / float64(ep.normN-1))
-	if std/ep.normMean > 0.1 {
+	std := math.Sqrt(ep.NormVar / float64(ep.NormN-1))
+	if std/ep.NormMean > 0.1 {
 		return false
 	}
-	return math.Abs(float64(bytes)-ep.normMean) <= math.Max(0.05*ep.normMean, 2*std)
+	return math.Abs(float64(bytes)-ep.NormMean) <= math.Max(0.05*ep.NormMean, 2*std)
+}
+
+// baselineExceeded 判断响应是否明显大于稳定的接口基线：比正常响应多出至少一半、4 个标准差和 512 字节。
+// 只看变大：读到文件、拖出数据都会让响应变大，而错误提示页通常更小，不能作为成功证据。
+func (ep *Endpoint) baselineExceeded(bytes int64) bool {
+	if ep == nil || ep.NormN < 5 || ep.NormMean <= 0 {
+		return false
+	}
+	std := math.Sqrt(ep.NormVar / float64(ep.NormN-1))
+	if std/ep.NormMean > 0.1 {
+		return false
+	}
+	return float64(bytes)-ep.NormMean >= math.Max(math.Max(0.5*ep.NormMean, 4*std), 512)
+}
+
+// hasHomeBaseline 判断是否已学到站点首页的正常响应：只有学到之后，才能确认一个 200 不是兜底页面。
+func (sf *surface) hasHomeBaseline(host string) bool {
+	ep := sf.Endpoints[host+" /"]
+	return ep != nil && ep.NormN >= 5
 }
 
 // Service 是从防火墙日志中观测到的网络服务（目的 IP:端口）。

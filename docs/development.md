@@ -28,6 +28,22 @@ go test -race -short ./...     # 需要 CGO 与 C 编译器（gcc）
   go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 ./...
   ```
 
+- 改动规则或定级后跑一遍评测（`go test ./internal/eval` 已包含在测试中，门槛不达标时 CI 失败）：
+
+  ```bash
+  go run ./cmd/netsa eval -v
+  ```
+
+  样本在 `internal/eval/corpus/web.tsv`，每条标注“正常 / 攻击”和期望等级。内置样本是手工构造的回归基线，不代表真实流量的准确率；现场脱敏日志可以按同样格式整理后用 `-corpus` 指定。新增样本时先运行一次、记下结果再调整规则，否则样本就失去了验证作用。
+
+- 前端回归（登录、事件处置、封禁审批、规则运营，以及所有页面渲染攻击者控制的内容时不产生 XSS）用 Playwright，CI 同样执行：
+
+  ```bash
+  cd test/e2e && npm ci && npx playwright install chromium && npx playwright test
+  ```
+
+- 权限矩阵：`internal/api/authz_matrix_test.go` 列出了每条路由需要的角色。新增路由时这个测试会失败，请确认谁应该能访问后再加进去。
+
 - 测试用例中的中文名称请写成结构体字段（`[]struct{ name string; … }`），不要用作 map 的键：gofmt 按字符数对齐 map 的值，编辑器里看起来错位，手工对齐后 `gofmt -l` 就会失败。
 - 前端为原生 JavaScript，CI 只做语法检查：`for f in web/static/*.js; do node --check "$f"; done`。
 
@@ -57,6 +73,13 @@ internal/alert/       钉钉 / 企业微信 / 飞书 / Webhook 告警推送（�
 internal/mailer/      SMTP 发信（周报、月报、合规报告）
 internal/qr/          二维码生成（绑定身份验证器）
 internal/demo/        演示日志生成器（simulate 命令）
+internal/eval/        带标注样本的检出率与误报评测（eval 命令）
+internal/backup/      状态目录的备份与恢复
+internal/sso/         LDAP 与 OpenID Connect 登录
+internal/forward/     SIEM 转发（CEF / JSON / RFC 5424）
+internal/block/       联动封禁（申请、审批、到期解除）
+internal/playbook/    处置剧本与工单对接
+internal/rulemgr/     页面维护的规则、签名规则包、Sigma 转换
 internal/config/      配置加载、默认值与校验
 internal/model/       流水线公共数据结构
 internal/safe/        异常保护（单条畸形数据不影响服务）
@@ -72,16 +95,16 @@ docs/                 使用与开发文档（images/ 为 README 截图，i18n/ 
 
 | 触发 | 行为 |
 |---|---|
-| 创建 tag `v1.6.14` | 构建 + 启动自检 + 推送：`1.6.14`、`1.6`、`1`、`latest`、`sha-xxxxxxx` |
-| 创建预发布 tag `v1.6.14-rc1` | 只推 `1.6.14-rc1`、`sha-xxxxxxx`，不动 `latest` / `1.6` / `1` |
+| 创建 tag `v1.7.0` | 构建 + 启动自检 + 推送：`1.7.0`、`1.6`、`1`、`latest`、`sha-xxxxxxx` |
+| 创建预发布 tag `v1.7.0-rc1` | 只推 `1.7.0-rc1`、`sha-xxxxxxx`，不动 `latest` / `1.6` / `1` |
 | 推送 `master` / Pull Request | 不构建镜像（质量门禁由 `ci` 工作流负责） |
 | 手动触发（workflow_dispatch） | 填写要发布的 tag 与是否更新 `latest`；按该 tag 检出源码，版本与内容严格对应 |
 
 发布流程：
 
 ```bash
-git tag v1.6.14
-git push origin v1.6.14
+git tag v1.7.0
+git push origin v1.7.0
 ```
 
 需要在仓库 **Settings → Secrets and variables → Actions** 配置两个 Secret：
@@ -107,9 +130,9 @@ printf '%s' "$AK" | openssl dgst -binary -sha256 -hmac "$SK" | od -An -vtx1 | tr
 | `GOPROXY` | `https://goproxy.cn,direct` | 构建时的 Go 模块代理 |
 
 ```bash
-docker pull swr.cn-east-3.myhuaweicloud.com/sreyun/netsa:1.6.14
+docker pull swr.cn-east-3.myhuaweicloud.com/sreyun/netsa:1.7.0
 docker run -d --name netsa -p 8080:8080 -p 5514:5514/udp -v netsa-state:/app/state \
-  swr.cn-east-3.myhuaweicloud.com/sreyun/netsa:1.6.14
+  swr.cn-east-3.myhuaweicloud.com/sreyun/netsa:1.7.0
 ```
 
 - **版本随 tag 注入**：构建时通过 `-ldflags "-X main.version=<tag>"` 写入二进制，`netsa version` 与 `/api/meta` 显示的就是发布版本；本地 `docker build` 不传该参数，仍使用源码中的默认版本。

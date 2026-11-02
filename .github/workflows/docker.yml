@@ -197,6 +197,39 @@ jobs:
           provenance: false
           sbom: false
 
+      # 以下三步给交付物加上可追溯信息。它们不决定镜像能否发布（镜像已经推送），失败只在摘要里提示，
+      # 查看对应步骤的日志即可。SWR 对 OCI 附件支持不完整，SBOM 作为构建产物保存，不推送到镜像仓库。
+      - name: 漏洞扫描
+        id: trivy
+        continue-on-error: true
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: netsa:smoke
+          format: table
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          output: trivy.txt
+          exit-code: "1"
+
+      - name: 生成 SBOM
+        id: sbom
+        continue-on-error: true
+        uses: anchore/sbom-action@v0
+        with:
+          image: netsa:smoke
+          format: spdx-json
+          artifact-name: netsa-${{ steps.meta.outputs.version }}.spdx.json
+          upload-release-assets: false
+
+      - name: 保存扫描报告
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: netsa-${{ steps.meta.outputs.version }}-trivy
+          path: trivy.txt
+          if-no-files-found: ignore
+
       - name: Summary
         run: |
           {
@@ -207,6 +240,8 @@ jobs:
             echo '```'
             echo
             echo "架构：\`${PLATFORMS}\`　版本：\`${{ steps.meta.outputs.version }}\`"
+            echo
+            echo "漏洞扫描：${{ steps.trivy.outcome }}　SBOM：${{ steps.sbom.outcome }}（见本次运行的 Artifacts）"
             echo
             echo "拉取：\`docker pull ${SWR_REGISTRY}/${SWR_NAMESPACE}/${IMAGE_NAME}:${{ steps.meta.outputs.version }}\`"
           } >> "$GITHUB_STEP_SUMMARY"

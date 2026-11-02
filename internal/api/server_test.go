@@ -375,7 +375,7 @@ func TestAssessmentAPI(t *testing.T) {
 	s, st := testServer(t, "", "")
 	h := s.Handler()
 	st.Record(&model.Event{Kind: model.KindWeb, SrcIP: "198.51.100.40", Host: "a.com", Method: "POST", URI: "/up/x.php", Status: 200, Bytes: 10, Time: time.Now()},
-		[]model.Hit{{RuleID: "ws", Name: "ws", Category: "WebShell后门", Severity: model.SevCritical, Phase: model.PhasePersistence, Result: model.ResultSuccess}})
+		[]model.Hit{{RuleID: "ws", Name: "ws", Category: "WebShell后门", Severity: model.SevCritical, Phase: model.PhasePersistence, Result: model.ResultSuccess, Proven: true}})
 	var a store.Assessment
 	rec := get(h, "/api/assessment")
 	if err := json.Unmarshal(rec.Body.Bytes(), &a); err != nil || rec.Code != 200 {

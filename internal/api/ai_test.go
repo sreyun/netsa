@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -315,5 +316,60 @@ func TestTriageDowngrade(t *testing.T) {
 	triage(id4)
 	if st.Incident(id4).Severity != model.SevHigh {
 		t.Fatal("不可靠的模型不应下调")
+	}
+}
+
+// 批量研判：加入队列（去重、忽略不存在的事件），由后台任务按每轮上限消费，失败不影响其他事件。
+func TestIncidentAIBatch(t *testing.T) {
+	llm := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"choices":[{"message":{"content":"{\"verdict\":\"uncertain\",\"confidence\":50,\"summary\":\"证据不足\"}"}}]}`))
+	}))
+	defer llm.Close()
+	s, st := testServer(t, "", "")
+	s.Learn, _ = learn.Load(learn.Options{})
+	s.AI = ai.New(config.AIConfig{Enabled: true, BaseURL: llm.URL + "/v1", Model: "m", MaxPerHour: 100}, nil)
+	var ids []uint64
+	for i := 0; i < 5; i++ {
+		r := st.Record(&model.Event{Kind: model.KindWeb, SrcIP: "203.0.113." + strconv.Itoa(i+1), Method: "GET", URI: "/x", Status: 403, Time: time.Now()},
+			[]model.Hit{{RuleID: "r1", Name: "SQL 注入", Category: "SQL注入", Severity: model.SevHigh, Phase: model.PhaseExploit, Result: model.ResultBlocked}})
+		ids = append(ids, r.Alerts[0].IncidentID)
+	}
+	h := s.Handler()
+	body, _ := json.Marshal(map[string]any{"ids": append(append([]uint64{}, ids...), ids[0], 99999)})
+	rec := do(h, http.MethodPost, "/api/incidents/ai-batch", string(body), nil)
+	var res struct{ Queued, Pending int }
+	decode(t, rec.Body.Bytes(), &res)
+	if rec.Code != 200 || res.Queued != 5 || res.Pending != 5 {
+		t.Fatalf("加入队列: %d %s", rec.Code, rec.Body.String())
+	}
+	if rec := do(h, http.MethodPost, "/api/incidents/ai-batch", `{"ids":[]}`, nil); rec.Code != 400 {
+		t.Fatalf("空列表应报错: %d", rec.Code)
+	}
+	// 自动研判关闭时也会消费队列，每轮最多 3 个
+	s.aiTick(context.Background())
+	waitAIIdle(t, s)
+	if got := len(s.aiQueue); got != 2 {
+		t.Fatalf("每轮最多 3 个，剩余应为 2: %d", got)
+	}
+	s.aiTick(context.Background())
+	waitAIIdle(t, s)
+	if got := len(s.aiQueue); got != 0 {
+		t.Fatalf("队列应已清空: %d", got)
+	}
+	for _, id := range ids {
+		if d := st.Incident(id); len(d.Notes) == 0 {
+			t.Errorf("事件 #%d 应写入研判记录", id)
+		}
+	}
+}
+
+func waitAIIdle(t *testing.T, s *Server) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for s.aiBusy.Load() {
+		if time.Now().After(deadline) {
+			t.Fatal("研判未结束")
+		}
+		time.Sleep(5 * time.Millisecond)
 	}
 }

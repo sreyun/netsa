@@ -7,6 +7,9 @@ import (
 	"unicode/utf8"
 )
 
+// overlongUTF8 还原 . / \ 的超长 UTF-8 编码（如 %c0%af），这是绕过目录穿越检测的常见写法，合法请求不会出现。
+var overlongUTF8 = strings.NewReplacer("\xc0\xae", ".", "\xc0\xaf", "/", "\xc1\x9c", "\\", "\xe0\x80\xae", ".", "\xe0\x80\xaf", "/")
+
 // Normalize 对 URL 做多轮解码与归一化，抵抗双重编码、%u 编码、注释混淆等绕过手法。
 func Normalize(s string) string {
 	if s == "" {
@@ -22,6 +25,9 @@ func Normalize(s string) string {
 			break
 		}
 		s = d
+	}
+	if strings.Contains(s, "\xc0") || strings.Contains(s, "\xc1") || strings.Contains(s, "\xe0\x80") {
+		s = overlongUTF8.Replace(s)
 	}
 	if strings.ContainsRune(s, '&') {
 		s = html.UnescapeString(s)

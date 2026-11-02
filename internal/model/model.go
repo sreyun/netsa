@@ -254,6 +254,13 @@ type Hit struct {
 	// Learned 是自学习对本次命中的调整：-1 按分析员的误报结论下调一级，+1 来源曾被确认为攻击、升级一级。
 	// 等级裁决据此放宽分类底线（下调的命中最多低于底线一级），见 risk.Finalize
 	Learned int8
+	// Proven 表示响应码之外还有第二份证据证明攻击成功（目标确有该漏洞、响应明显大于接口基线、脚本交互等）。
+	// 只凭 2xx 判定的“疑似成功”最高到高危，有第二份证据才升为严重，见 risk.Finalize
+	Proven bool
+	// Disproven 表示复核确认响应只是兜底页面（单页应用、统一错误页），分类底线放宽一级
+	Disproven bool
+	// Weak 表示特征只出现在自由文本里，没有可执行的内容（如搜索“<script> 标签的用法”）：不按分类底线抬升，最高低危
+	Weak bool
 }
 
 // AssetRef 是事件目标资产的摘要。
@@ -289,4 +296,5 @@ type Alert struct {
 	AssetLevel string    `json:"asset_level,omitempty"` // 目标资产重要性：core / important / normal
 	Owner      string    `json:"owner,omitempty"`       // 资产负责人
 	Vuln       string    `json:"vuln,omitempty"`        // 关联的未修复漏洞
+	Proven     bool      `json:"proven,omitempty"`      // 有响应码之外的第二份成功证据
 }

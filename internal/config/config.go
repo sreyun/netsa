@@ -38,6 +38,11 @@ type Config struct {
 	Learn          LearnConfig    `yaml:"learn"`
 	AI             AIConfig       `yaml:"ai"`
 	Storage        StorageConfig  `yaml:"storage"`
+	// 对接外部系统（说明见 docs/integrations.md）
+	Forward   []ForwardConfig  `yaml:"forward"`
+	Block     BlockConfig      `yaml:"block"`
+	Tickets   []TicketConfig   `yaml:"tickets"`
+	Playbooks []PlaybookConfig `yaml:"playbooks"`
 }
 
 type ServerConfig struct {
@@ -65,6 +70,9 @@ type ServerConfig struct {
 	// Pprof 开启 /debug/pprof 性能剖析接口（仅管理员，默认关闭）。用于排查 CPU / 内存 / 协程问题，
 	// 剖析期间会带来额外开销，排障结束后建议关闭。
 	Pprof bool `yaml:"pprof"`
+	// LDAP / OIDC 外部账号登录（说明见 docs/integrations.md）
+	LDAP LDAPConfig `yaml:"ldap"`
+	OIDC OIDCConfig `yaml:"oidc"`
 }
 
 // AuthEnabled 返回是否需要登录（默认开启）。
@@ -240,6 +248,8 @@ type OnlineConfig struct {
 type IntelConfig struct {
 	Blocklists []BlocklistConfig `yaml:"blocklists"`
 	TorExitURL string            `yaml:"tor_exit_url"` // 为空则不拉取
+	// Feeds 在线情报源：STIX / TAXII 2.1 / MISP / 文本列表
+	Feeds []IntelFeedConfig `yaml:"feeds"`
 }
 
 type BlocklistConfig struct {
@@ -248,7 +258,9 @@ type BlocklistConfig struct {
 }
 
 type DetectConfig struct {
-	RulesFile       string     `yaml:"rules_file"`
+	RulesFile string `yaml:"rules_file"`
+	// RulePackKeys 信任的规则包公钥（base64），为空时不能安装规则包
+	RulePackKeys    []string   `yaml:"rule_pack_keys"`
 	Whitelist       []string   `yaml:"whitelist"`
 	SuccessMinBytes int64      `yaml:"success_min_bytes"`
 	AlertsPerRule   int        `yaml:"alerts_per_rule"` // 同一 IP 同一规则在节流窗口内最多生成的告警数
@@ -346,11 +358,17 @@ type ArchiveConfig struct {
 }
 
 type StorageConfig struct {
-	Snapshot  string        `yaml:"snapshot"`
-	Interval  time.Duration `yaml:"interval"`
-	MaxIPs    int           `yaml:"max_ips"`
-	MaxAlerts int           `yaml:"max_alerts"`
-	Retention time.Duration `yaml:"retention"` // 时间序列保留时长
+	// BackupDir 定时备份的目录，为空表示不启用（也可以用 netsa backup 手动备份）
+	BackupDir string `yaml:"backup_dir"`
+	// BackupInterval 定时备份的间隔（默认 24h）
+	BackupInterval time.Duration `yaml:"backup_interval"`
+	// BackupKeep 保留最近几个定时备份（默认 7）
+	BackupKeep int           `yaml:"backup_keep"`
+	Snapshot   string        `yaml:"snapshot"`
+	Interval   time.Duration `yaml:"interval"`
+	MaxIPs     int           `yaml:"max_ips"`
+	MaxAlerts  int           `yaml:"max_alerts"`
+	Retention  time.Duration `yaml:"retention"` // 时间序列保留时长
 }
 
 // Default 返回带默认值的配置。
@@ -461,6 +479,9 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("time_correction 只能为 auto 或 off: %q", c.TimeCorrection)
 	}
 	if err := c.Learn.validate(); err != nil {
+		return err
+	}
+	if err := c.validateIntegrations(); err != nil {
 		return err
 	}
 	if err := c.AI.validate(); err != nil {

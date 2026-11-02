@@ -112,6 +112,7 @@ async function loadIncidents() {
 function renderIncBulk() {
   $('#incSel').textContent = inc.sel.size;
   $('#incBulk').hidden = !canOperate() || inc.sel.size === 0;
+  $('#incBulkAI').hidden = !(meta.ai && meta.ai.enabled);
 }
 $('#incPager').addEventListener('click', (e) => {
   const b = e.target.closest('[data-pg]');
@@ -145,6 +146,15 @@ $('#incBulk').addEventListener('click', async (e) => {
   const act = b.dataset.bulk;
   const ids = [...inc.sel];
   if (act === 'clear') { inc.sel.clear(); loadIncidents().catch(console.error); return; }
+  if (act === 'ai') {
+    try {
+      const r = await api('/api/incidents/ai-batch', 'POST', { ids });
+      alert(`已加入研判队列 ${r.queued} 个事件（队列中共 ${r.pending} 个）。后台每分钟最多研判 ${r.per_tick} 个，受每小时调用上限限制，结论写入各事件的处置记录。`);
+      inc.sel.clear();
+    } catch (err) { alert(err.message); }
+    loadIncidents().catch(console.error);
+    return;
+  }
   const body = {};
   if (act === 'assign') {
     const names = (await loadAssignees()).map((a) => a.name);
@@ -176,12 +186,12 @@ async function openIncident(id) {
   const notes = (d.notes_list || []).slice().reverse().map((n) => `<li><span class="muted nowrap">${esc(fmtShort(n.time))}</span> <b>${esc(n.user)}</b>
     ${n.action ? `<span class="tl-act">${esc(n.action)}</span>` : ''}${n.text ? `<div class="tl-text">${esc(n.text)}</div>` : ''}</li>`).join('');
   const alerts = (d.alert_list || []).map((a, k) => `<tr><td class="nowrap muted">${esc(fmtShort(a.time))}</td><td>${badge(a.severity)} ${esc(a.name)}</td>
-    <td class="mono">${a.method ? esc(a.method) + ' ' : ''}${esc(a.target)}${assetLine(a)}</td><td>${resTag(a.result)}</td><td class="evidence">${esc(a.evidence)}</td>
+    <td class="mono">${a.method ? esc(a.method) + ' ' : ''}${esc(a.target)}${assetLine(a)}</td><td>${resTag(a.result, a.proven)}</td><td class="evidence">${esc(a.evidence)}</td>
     <td class="nowrap">${canOperate() ? `<button type="button" class="btn" data-ia="fp" data-k="${k}">标记误报</button>` : ''}${canOperate() && meta.rawlog ? ` <button type="button" class="btn" data-ia="raw" data-k="${k}">原始日志</button>` : ''}</td></tr>`).join('');
   $('#incBody').innerHTML = `
     <div class="inc-head"><b>${esc(d.title)}</b></div>
     <div class="kv">
-      <div class="k">来源</div><div>${ipLink(d.key)} <span class="muted">${esc(d.location || '')}</span></div>
+      <div class="k">来源</div><div>${ipLink(d.key)} <span class="muted">${esc(d.location || '')}</span> <button type="button" class="btn sm" id="incBlock" hidden>申请封禁</button></div>
       <div class="k">时间</div><div>${esc(fmtTime(d.first_seen))} ~ ${esc(fmtTime(d.last_seen))}</div>
       <div class="k">告警</div><div>${num(d.alerts)} 条${d.muted ? ` <span class="muted">（累计命中 ${num(d.hits)} 次，其中 ${num(d.muted)} 次同类命中按规则节流未生成告警）</span>` : d.hits && d.hits !== d.alerts ? ` <span class="muted">（累计命中 ${num(d.hits)} 次）</span>` : ''}${d.success ? ` · <span class="res-success">疑似成功 ${d.success} 次</span>` : ''}</div>
       <div class="k">攻击类型</div><div>${(d.categories || []).map((c) => `<span class="chip">${esc(c)}</span>`).join('') || '-'}</div>
@@ -210,6 +220,8 @@ async function openIncident(id) {
   $('#incNote').value = '';
   setMsg('#incMsg', '');
   $('#incAI').hidden = !(meta.ai && meta.ai.enabled && canOperate());
+  const blockBtn = $('#incBlock');
+  if (blockBtn) blockBtn.hidden = !(meta.block && canOperate());
   $('#incAIBox').hidden = true;
   openModal('incModal');
 }
@@ -223,6 +235,20 @@ $('#incBody').addEventListener('click', (e) => {
       loadIncidents().catch(console.error);
     } catch (err) { setMsg('#incMsg', err.message); }
   });
+});
+// 申请封禁：提交后等待管理员审批
+$('#incBody').addEventListener('click', async (e) => {
+  if (e.target.id !== 'incBlock') return;
+  const d = inc.cur;
+  const reason = prompt(`申请封禁 ${d.key}，请填写原因（审批人会看到）：`, `事件 #${d.id} ${d.title}`);
+  if (reason === null) return;
+  const hours = prompt('封禁时长（小时），到期自动解除：', '24');
+  if (hours === null) return;
+  try {
+    const it = await api('/api/block', 'POST', { ip: d.key, reason, ttl_hours: parseFloat(hours) || 0, incident_id: d.id });
+    alert(it.status === 'active' ? `${it.ip} 已在封禁中` : `已提交封禁申请 #${it.id}，等待管理员审批`);
+    loadBlockPanel().catch(console.error);
+  } catch (err) { alert(err.message); }
 });
 // AI 研判：结论写入处置记录并在对话框中展示（模型输出按纯文本展示）
 const AI_VERDICT = { attack: ['真实攻击', 'lv-high'], false_positive: ['疑似误报', 'nt-on'], uncertain: ['无法判断', 'muted'] };
@@ -1110,6 +1136,7 @@ async function openAIForm() {
   $('#aiTimeout').value = v.timeout_sec || 120;
   $('#aiDesens').checked = v.desensitize;
   $('#aiAuto').checked = v.auto_triage;
+  $('#aiAutoMedium').checked = v.auto_triage_medium;
   $('#aiDowngrade').checked = !v.no_downgrade;
   const who = v.updated_by ? `最近由 ${esc(v.updated_by)} 于 ${esc(fmtShort(v.updated))} 修改。` : (v.from_ui ? '' : '当前值来自配置文件 ai 段。');
   $('#aiNote').innerHTML = (v.persist
@@ -1123,7 +1150,7 @@ function aiCollect() {
   return {
     enabled: $('#aiEnabled').checked, base_url: $('#aiBase').value.trim(), model: $('#aiModel').value.trim(),
     api_key: $('#aiClear').checked ? '' : $('#aiKey').value.trim(), clear_key: $('#aiClear').checked,
-    max_per_hour: parseInt($('#aiMax').value, 10) || 30, desensitize: $('#aiDesens').checked, auto_triage: $('#aiAuto').checked,
+    max_per_hour: parseInt($('#aiMax').value, 10) || 30, desensitize: $('#aiDesens').checked, auto_triage: $('#aiAuto').checked, auto_triage_medium: $('#aiAutoMedium').checked,
     protocol: $('#aiProto').value, thinking: $('#aiThinking').value, max_tokens: parseInt($('#aiTokens').value, 10) || 0,
     timeout_sec: parseInt($('#aiTimeout').value, 10) || 120, no_downgrade: !$('#aiDowngrade').checked,
   };
@@ -1192,7 +1219,148 @@ setInterval(() => { if (!document.hidden && currentTab !== 'incidents') refreshI
 setTimeout(refreshIncBadge, 1500);
 // 只看超时：#tab=incidents&overdue=1（超时提醒消息中的链接）
 const _incLoader = loaders.incidents;
+// ---------------- 联动封禁 ----------------
+const BLOCK_STATUS = { pending: '待审批', active: '生效中', rejected: '已驳回', released: '已解除', expired: '已到期' };
+async function loadBlockPanel() {
+  const panel = $('#blockPanel');
+  panel.hidden = !(meta.block && canOperate());
+  if (panel.hidden) return;
+  const r = await api('/api/block');
+  $('#blockInfo').textContent = `待审批 ${num(r.pending)} · 生效中 ${num(r.active)}${r.webhook_failed ? ` · Webhook 失败 ${num(r.webhook_failed)} 次` : ''}`;
+  const rows = (r.items || []).map((x) => {
+    let acts = '';
+    if (isAdmin() && x.status === 'pending') acts = `<button class="btn sm" data-bk="approve" data-id="${x.id}">批准</button> <button class="btn sm" data-bk="reject" data-id="${x.id}">驳回</button>`;
+    if (isAdmin() && x.status === 'active') acts = `<button class="btn sm" data-bk="release" data-id="${x.id}">解除</button>`;
+    return `<tr><td class="mono">${ipLink(x.ip)}</td><td>${esc(BLOCK_STATUS[x.status] || x.status)}</td><td class="evidence">${esc(x.reason)}${x.note ? `<div class="muted">${esc(x.note)}</div>` : ''}</td>
+      <td>${esc(x.requested_by)}</td><td>${esc(x.decided_by || '-')}</td><td class="nowrap">${x.status === 'active' ? esc(fmtShort(x.expires)) : '-'}</td><td class="nowrap">${acts}</td></tr>`;
+  }).join('');
+  $('#blockTable').innerHTML = `<thead><tr><th>地址</th><th>状态</th><th>原因</th><th>申请人</th><th>审批人</th><th>到期时间</th><th></th></tr></thead><tbody>${rows || '<tr><td colspan="7" class="muted">暂无记录</td></tr>'}</tbody>`;
+}
+$('#blockTable').addEventListener('click', async (e) => {
+  const b = e.target.closest('[data-bk]');
+  if (!b) return;
+  const act = b.dataset.bk;
+  let body = {};
+  if (act !== 'approve') {
+    const note = prompt(act === 'reject' ? '驳回原因：' : '解除原因：', '');
+    if (note === null) return;
+    body = { note };
+  }
+  try {
+    await api(`/api/block/${b.dataset.id}/${act}`, 'POST', body);
+  } catch (err) { alert(err.message); }
+  loadBlockPanel().catch(console.error);
+});
+
+// ---------------- 规则运营与对接状态 ----------------
+async function loadRuleOps() {
+  const r = await api('/api/rules/managed');
+  const rules = r.rules || [];
+  $('#ruleCount').textContent = `托管规则 ${num(rules.length)} 条`;
+  $('#ruleTable').innerHTML = `<thead><tr><th>ID</th><th>名称</th><th>分类</th><th>等级</th><th>匹配范围</th><th>表达式</th><th>来源</th><th></th></tr></thead><tbody>${rules.map((x) => `<tr>
+    <td class="mono">${esc(x.id)}</td><td>${esc(x.name)}</td><td>${esc(x.category)}</td><td>${badge(x.severity)}</td><td>${esc(x.target)}</td><td class="mono evidence">${esc(x.pattern)}</td><td>${esc(x.source)}</td>
+    <td class="nowrap">${String(x.source).startsWith('pack:') ? '' : `<button class="btn sm" data-rule-edit="${esc(x.id)}">修改</button> <button class="btn sm" data-rule-del="${esc(x.id)}">删除</button>`}</td></tr>`).join('') || '<tr><td colspan="8" class="muted">还没有自定义规则</td></tr>'}</tbody>`;
+  ruleOps.rules = rules;
+  const packs = r.packs || [];
+  $('#packTable').hidden = !packs.length;
+  $('#packTable').innerHTML = `<thead><tr><th>规则包</th><th>序号</th><th>规则数</th><th>签名密钥</th><th>安装时间</th><th></th></tr></thead><tbody>${packs.map((p) => `<tr><td>${esc(p.name)}</td><td>${num(p.serial)}</td><td>${num(p.rules)}</td><td class="mono">${esc(p.key_id)}</td><td>${esc(fmtShort(p.updated))}</td><td><button class="btn sm" data-pack-del="${esc(p.name)}">卸载</button></td></tr>`).join('')}</tbody>`;
+  const s = await api('/api/integrations');
+  const row = (name, state, detail) => `<tr><td>${esc(name)}</td><td>${esc(state)}</td><td class="evidence">${esc(detail)}</td></tr>`;
+  const items = [
+    row('LDAP 登录', s.sso.ldap ? '已启用' : '未配置', ''),
+    row('单点登录（OIDC）', s.sso.oidc ? '已启用' : '未配置', ''),
+    row('定时备份', s.backup.dir ? '已启用' : '未配置', s.backup.dir ? '' : '可配置 storage.backup_dir，或用 netsa backup 手动备份'),
+    row('处置剧本', s.playbooks.enabled ? `${num(s.playbooks.count)} 个` : '未配置', s.playbooks.enabled ? `已执行 ${num(s.playbooks.runs)} 次，工单系统 ${num(s.playbooks.tickets)} 个` : ''),
+  ];
+  for (const f of s.forward || []) items.push(row(`SIEM 转发：${f.name}`, f.connected ? '已连接' : '未连接', `${f.protocol} ${f.address} ${f.format}，已发送 ${num(f.sent)}，丢弃 ${num(f.dropped)}${f.last_error ? `；最近错误：${f.last_error}` : ''}`));
+  for (const f of s.intel || []) items.push(row(`情报源：${f.name}`, f.last_error ? '更新失败' : (f.updated && !zero(f.updated) ? '正常' : '等待更新'), `${f.type}，${num(f.addrs)} 个 IP、${num(f.nets)} 个网段${f.last_error ? `；最近错误：${f.last_error}` : ''}`));
+  $('#intTable').innerHTML = `<thead><tr><th>对接项</th><th>状态</th><th>详情</th></tr></thead><tbody>${items.join('')}</tbody>`;
+}
+const ruleOps = { rules: [] };
+function promptRule(cur) {
+  const id = prompt('规则 ID（字母、数字、下划线、点、短横线）：', cur?.id || '');
+  if (!id) return null;
+  const name = prompt('规则名称：', cur?.name || '');
+  if (name === null) return null;
+  const pattern = prompt('匹配表达式（RE2 正则）：', cur?.pattern || '');
+  if (!pattern) return null;
+  const target = prompt('匹配范围（uri / path / ua / referer / any）：', cur?.target || 'uri');
+  if (target === null) return null;
+  const severity = prompt('等级（info / low / medium / high / critical）：', cur?.severity || 'medium');
+  if (severity === null) return null;
+  const category = prompt('攻击分类（分类决定等级底线，可留空）：', cur?.category || '');
+  if (category === null) return null;
+  return { id: id.trim(), name, pattern, target: target.trim(), severity: severity.trim(), category: category.trim() };
+}
+async function saveRule(rule) {
+  const sample = prompt('输入一条样本先试运行（可留空跳过），例如 /index.php?id=1：', '');
+  if (sample) {
+    const t = await api('/api/rules/test', 'POST', { ...rule, sample });
+    if (!confirm(t.matched ? `样本命中：${t.evidence}\n\n确定保存？` : '样本没有命中这条规则，仍要保存吗？')) return;
+  }
+  await api('/api/rules/managed', 'POST', rule);
+}
+$('#ruleAdd').addEventListener('click', async () => {
+  const rule = promptRule(null);
+  if (!rule) return;
+  try { await saveRule(rule); loadRuleOps().catch(console.error); } catch (err) { alert(err.message); }
+});
+$('#ruleTable').addEventListener('click', async (e) => {
+  const ed = e.target.closest('[data-rule-edit]');
+  const del = e.target.closest('[data-rule-del]');
+  try {
+    if (ed) {
+      const rule = promptRule(ruleOps.rules.find((x) => x.id === ed.dataset.ruleEdit));
+      if (rule) await saveRule(rule);
+    } else if (del && confirm(`删除规则 ${del.dataset.ruleDel}？`)) {
+      await api(`/api/rules/managed/${encodeURIComponent(del.dataset.ruleDel)}`, 'DELETE');
+    } else return;
+    loadRuleOps().catch(console.error);
+  } catch (err) { alert(err.message); }
+});
+$('#packTable').addEventListener('click', async (e) => {
+  const del = e.target.closest('[data-pack-del]');
+  if (!del || !confirm(`卸载规则包 ${del.dataset.packDel}？其中的规则将不再生效。`)) return;
+  try {
+    await api(`/api/rules/packs/${encodeURIComponent(del.dataset.packDel)}`, 'DELETE');
+    loadRuleOps().catch(console.error);
+  } catch (err) { alert(err.message); }
+});
+// 从本地文件读取内容：规则包和 Sigma 规则都可能很长，不适合粘贴到输入框
+function pickFile(accept) {
+  return new Promise((resolve) => {
+    const input = document.createElement('input');
+    input.type = 'file';
+    input.accept = accept;
+    input.addEventListener('change', () => { input.files[0] ? input.files[0].text().then(resolve) : resolve(null); });
+    input.click();
+  });
+}
+$('#rulePack').addEventListener('click', async () => {
+  const text = await pickFile('.json');
+  if (text === null) return;
+  try {
+    const st = await api('/api/rules/packs', 'POST', JSON.parse(text));
+    alert(`已安装规则包 ${st.name}（序号 ${st.serial}，${st.rules} 条规则）`);
+    loadRuleOps().catch(console.error);
+  } catch (err) { alert(err.message); }
+});
+$('#ruleSigma').addEventListener('click', async () => {
+  const text = await pickFile('.yml,.yaml');
+  if (text === null) return;
+  try {
+    const pre = await api('/api/rules/sigma', 'POST', { yaml: text, apply: false });
+    const skipped = (pre.skipped || []).slice(0, 10).map((s) => `· ${s.title}：${s.reason}`).join('\n');
+    if (!(pre.rules || []).length) { alert(`没有可以转换的规则。\n${skipped}`); return; }
+    if (!confirm(`可以转换 ${pre.rules.length} 条，跳过 ${(pre.skipped || []).length} 条。\n${skipped}\n\n确定导入？`)) return;
+    const res = await api('/api/rules/sigma', 'POST', { yaml: text, apply: true });
+    alert(`已导入 ${res.applied} 条规则`);
+    loadRuleOps().catch(console.error);
+  } catch (err) { alert(err.message); }
+});
+
 loaders.incidents = () => {
   if (hashParams.get('overdue') === '1') { hashParams.delete('overdue'); $('#incOverdue').checked = true; segSet('#incStatus', 's', 'active'); }
+  loadBlockPanel().catch(console.error);
   return _incLoader();
 };

@@ -24,15 +24,21 @@ import (
 	"netsa/internal/assets"
 	"netsa/internal/audit"
 	"netsa/internal/auth"
+	"netsa/internal/block"
 	"netsa/internal/config"
 	"netsa/internal/detect"
 	"netsa/internal/exposure"
+	"netsa/internal/forward"
 	"netsa/internal/geo"
 	"netsa/internal/ingest"
+	"netsa/internal/intel"
 	"netsa/internal/learn"
 	"netsa/internal/model"
 	"netsa/internal/pipeline"
+	"netsa/internal/playbook"
 	"netsa/internal/rawlog"
+	"netsa/internal/rulemgr"
+	"netsa/internal/sso"
 	"netsa/internal/store"
 	"netsa/internal/suppress"
 )
@@ -57,26 +63,33 @@ func extendDeadline(w http.ResponseWriter, d time.Duration) {
 
 // Server 是 HTTP 服务。
 type Server struct {
-	Cfg      *config.Config
-	Store    *store.Store
-	Ingest   *ingest.Manager
-	Pipeline *pipeline.Pipeline
-	Geo      *geo.Resolver
-	Engine   *detect.Engine
-	RDAP     *geo.RDAPClient // 为 nil 表示禁用
-	Static   fs.FS
-	Version  string
-	Broker   *Broker
-	Notifier *alert.Notifier
-	Auth     *auth.Manager     // 为 nil 表示未开启登录
-	Archive  *archive.Archive  // 为 nil 表示未启用告警归档
-	Suppress *suppress.Manager // 误报抑制规则
-	RawLog   *rawlog.Store     // 原始日志留存，为 nil 表示未启用
-	Assets   *assets.Manager   // 资产与漏洞
-	Exposure *exposure.Manager // 对外发布服务清单（DNAT 映射），为 nil 表示未启用
-	Learn    *learn.Learner    // 自学习（研判反馈、平台行为基线、合规自检），可为空
-	AI       *ai.Client        // 可选的外部大模型（研判参考），未启用时为 nil
-	Trail    *audit.Trail      // 防篡改审计链
+	Cfg       *config.Config
+	Store     *store.Store
+	Ingest    *ingest.Manager
+	Pipeline  *pipeline.Pipeline
+	Geo       *geo.Resolver
+	Engine    *detect.Engine
+	RDAP      *geo.RDAPClient // 为 nil 表示禁用
+	Static    fs.FS
+	Version   string
+	Broker    *Broker
+	Notifier  *alert.Notifier
+	Auth      *auth.Manager      // 为 nil 表示未开启登录
+	Archive   *archive.Archive   // 为 nil 表示未启用告警归档
+	Suppress  *suppress.Manager  // 误报抑制规则
+	RawLog    *rawlog.Store      // 原始日志留存，为 nil 表示未启用
+	Assets    *assets.Manager    // 资产与漏洞
+	Exposure  *exposure.Manager  // 对外发布服务清单（DNAT 映射），为 nil 表示未启用
+	Learn     *learn.Learner     // 自学习（研判反馈、平台行为基线、合规自检），可为空
+	AI        *ai.Client         // 可选的外部大模型（研判参考），未启用时为 nil
+	Trail     *audit.Trail       // 防篡改审计链
+	OIDC      *sso.OIDC          // 单点登录，未配置时为 nil
+	Rules     *rulemgr.Manager   // 页面维护的规则与规则包
+	Block     *block.Manager     // 联动封禁，未启用时为 nil
+	Forward   *forward.Forwarder // SIEM 转发，未配置时为 nil
+	Playbooks *playbook.Engine   // 处置剧本，未配置时为 nil
+	Intel     *intel.DB          // 情报库
+	StateDir  string             // 状态目录，用于下载备份
 
 	started    time.Time
 	rdapSem    chan struct{}
@@ -87,6 +100,8 @@ type Server struct {
 	lastLearn  time.Time       // 上次按学习窗口刷新校准结果
 	aiBusy     atomic.Bool     // 自动研判进行中
 	aiDone     map[uint64]bool // 已自动研判的事件（只在后台任务中访问）
+	aiQueueMu  sync.Mutex
+	aiQueue    []uint64 // 批量研判队列
 	archHealth archiveHealth
 	sched      reportSchedule
 }
@@ -150,6 +165,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/archive/export", s.archiveExport)
 	// 登录与账号管理
 	mux.HandleFunc("POST /api/auth/login", s.authLogin)
+	mux.HandleFunc("GET /api/auth/oidc/start", s.oidcStart)
+	mux.HandleFunc("GET /api/auth/oidc/callback", s.oidcCallback)
 	mux.HandleFunc("GET /api/auth/session", s.authSession)
 	mux.HandleFunc("POST /api/auth/logout", s.authLogout)
 	mux.HandleFunc("POST /api/auth/password", s.authPassword)
@@ -169,7 +186,21 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/incidents", s.incidents)
 	mux.HandleFunc("GET /api/incidents/assignees", s.incidentAssignees)
 	mux.HandleFunc("GET /api/incidents/{id}", s.incident)
+	mux.HandleFunc("GET /api/rules/managed", s.rulesManaged)
+	mux.HandleFunc("POST /api/rules/managed", s.rulesUpsert)
+	mux.HandleFunc("DELETE /api/rules/managed/{id}", s.rulesDelete)
+	mux.HandleFunc("POST /api/rules/test", s.rulesTest)
+	mux.HandleFunc("POST /api/rules/packs", s.rulesPackInstall)
+	mux.HandleFunc("DELETE /api/rules/packs/{name}", s.rulesPackDelete)
+	mux.HandleFunc("POST /api/rules/sigma", s.rulesSigma)
+	mux.HandleFunc("GET /api/block", s.blockList)
+	mux.HandleFunc("POST /api/block", s.blockRequest)
+	mux.HandleFunc("GET /api/block/edl", s.blockEDL)
+	mux.HandleFunc("POST /api/block/{id}/{action}", s.blockAction)
+	mux.HandleFunc("GET /api/integrations", s.integrations)
+	mux.HandleFunc("GET /api/admin/backup", s.adminBackup)
 	mux.HandleFunc("POST /api/incidents/bulk", s.incidentUpdate)
+	mux.HandleFunc("POST /api/incidents/ai-batch", s.incidentAIBatch)
 	mux.HandleFunc("POST /api/incidents/{id}", s.incidentUpdate)
 	mux.HandleFunc("POST /api/incidents/{id}/ai", s.incidentAI)
 	mux.HandleFunc("GET /api/ai/settings", s.aiSettings)
@@ -324,7 +355,7 @@ func clamp(v, lo, hi int) int {
 
 // ruleStats 统计已加载规则数、本次运行有命中的规则数，以及每条规则的命中次数。
 func (s *Server) ruleStats() (total, hit int, hits map[string]int64) {
-	rules := s.Engine.Rules()
+	rules := s.engine().Rules()
 	hits = s.Store.RuleHits()
 	for _, r := range rules {
 		if hits[r.ID] > 0 {
@@ -347,7 +378,7 @@ func (s *Server) meta(w http.ResponseWriter, r *http.Request) {
 		"proxies":             s.proxyPeers(),
 		"exposure_reach":      s.Exposure.ReachCheck(), "exposure_unreached": s.Exposure.Unreached(), "exposure_learned": s.Exposure.LearnedCount(), "learn": s.Learn != nil, "ai": s.AI.Status(), "exposure_policies": topPolicies(s.Exposure.Policies(), 5),
 		"require_2fa": s.Cfg.Server.Require2FA, "rawlog": s.RawLog != nil, "assets": s.Assets != nil, "audit": s.Trail != nil,
-		"syslog": s.Cfg.Syslog.Enabled, "suppress": s.Suppress != nil, "auth": s.Auth != nil,
+		"syslog": s.Cfg.Syslog.Enabled, "suppress": s.Suppress != nil, "auth": s.Auth != nil, "block": s.Block != nil,
 	})
 }
 
@@ -432,7 +463,7 @@ func (s *Server) sources(w http.ResponseWriter, r *http.Request) {
 	runtime.ReadMemStats(&ms)
 	writeJSON(w, map[string]any{
 		"sources": s.Ingest.Stats(), "processed": s.Pipeline.Processed(), "geo_providers": s.Geo.ProviderNames(),
-		"geo_pending": s.Geo.QueueLen(), "rules": len(s.Engine.Rules()), "syslog": s.Cfg.Syslog, "silence": silenceText(s.Ingest.DefaultSilence),
+		"geo_pending": s.Geo.QueueLen(), "rules": len(s.engine().Rules()), "syslog": s.Cfg.Syslog, "silence": silenceText(s.Ingest.DefaultSilence),
 		"runtime": map[string]any{
 			"uptime": time.Since(s.started).Round(time.Second).String(), "goroutines": runtime.NumGoroutine(),
 			"heap_mb": ms.HeapAlloc >> 20, "sys_mb": ms.Sys >> 20, "go": runtime.Version(),

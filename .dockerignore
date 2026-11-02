@@ -11,3 +11,6 @@ tmp*
 docs
 data/state.json*
 data/*.mmdb
+site/data
+site/.env
+site/docker/certs

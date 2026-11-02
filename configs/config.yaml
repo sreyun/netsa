@@ -176,7 +176,7 @@ intel:
 
 detect:
   # 等级判定：规则里的 severity 只是建议值，最终等级由分类底线 + 响应结果统一裁决
-  # （已拦截 / 失败的利用最高为高危，成功利用与失陷迹象才为严重）。详见 docs/detection.md「威胁等级判定」。
+  # （已拦截 / 失败的利用最高为高危，只有 2xx 响应的疑似成功也最高为高危，有证据的成功利用与失陷迹象才为严重）。详见 docs/detection.md「威胁等级判定」。
   rules_file: ""                 # 自定义规则，例如 configs/rules.example.yaml
   whitelist: []                  # 白名单 IP/网段（只统计流量，不做检测），例如自有监控与扫描器
   success_min_bytes: 1           # 2xx 响应体大于该值才研判为“疑似成功”
@@ -273,6 +273,13 @@ storage:
   max_ips: 200000
   max_alerts: 20000
   retention: 168h                # 趋势数据保留时长
+  # backup_dir: /backup          # 定时备份目录（含密码哈希与模型密钥，请限制访问）；不设置时不启用，也可用 netsa backup 手动备份
+  # backup_interval: 24h         # 备份间隔
+  # backup_keep: 7               # 保留最近几个备份
+
+# 外部系统对接：单点登录（server.ldap / server.oidc）、SIEM 转发（forward）、联动封禁（block）、
+# 工单与处置剧本（tickets / playbooks）、在线情报（intel.feeds）、签名规则包（detect.rule_pack_keys）。
+# 都是可选的，配置示例见 docs/integrations.md。
 
 # 可选：告警归档到 PostgreSQL（≥ 11），用于长期留存与按时间 / IP / 网段 / 规则检索、导出历史告警。
 # 不配置时不依赖任何数据库，行为与之前完全相同。也可通过环境变量 NETSA_ARCHIVE_DSN 设置（优先于此处，避免口令写入配置文件）。
@@ -340,3 +347,4 @@ ai:
   max_per_hour: 30              # 每小时最多调用次数
   desensitize: true             # 发送前脱敏：内网地址、口令 / 令牌类参数与认证头、手机号、身份证号、邮箱；攻击来源公网地址保留
   auto_triage: false            # 新出现的高危及以上事件自动研判
+  auto_triage_medium: false     # 自动研判的范围扩大到中危事件（模型调用量会明显增加）

@@ -84,7 +84,7 @@ func (s *Store) compromisedLocked() []*Compromised {
 		}
 		cat := strings.TrimPrefix(f.Title, "疑似攻击成功: ")
 		// 主机：命中情报的外连与安全设备报出的恶意软件为高置信；仅凭周期性外连判断的为中置信
-		if kind == "host" && f.Severity >= model.SevHigh || kind == "web" && highImpact[cat] {
+		if kind == "host" && f.Severity >= model.SevHigh || kind == "web" && highImpact[cat] && f.Severity >= model.SevCritical {
 			c.Confidence = "high"
 		}
 		if f.Severity > c.Severity {
@@ -154,57 +154,70 @@ func hitOf(hits []model.Hit, cat string) model.Hit {
 
 // verifySuccess 用接口的正常响应基线复核“疑似成功”：攻击请求的响应与该接口正常访问时的响应大小一致
 // （例如注入载荷被忽略、返回的仍是正常页面），说明攻击并未改变应用行为，改判为“未拦截”。
+// 响应与站点首页相同（兜底页面）同样不算成功；响应明显大于稳定的接口基线、或脚本确实发生了交互，
+// 才是响应码之外的第二份证据，等级裁决据此升为严重。
 // 返回的切片为副本，不修改调用方的数据。
 func (s *Store) verifySuccess(ev *model.Event, hits []model.Hit) []model.Hit {
-	var ep *Endpoint
-	looked := false
+	host := ev.Host
+	if host == "" {
+		host = "-"
+	}
+	ep := s.surf.Endpoints[host+" "+normPath(ev.URI)]
 	var out []model.Hit
+	edit := func(i int) *model.Hit {
+		if out == nil {
+			out = append([]model.Hit(nil), hits...)
+		}
+		return &out[i]
+	}
 	for i, h := range hits {
 		if h.Result != model.ResultSuccess {
 			continue
 		}
 		if h.Category == "敏感文件探测" || h.Category == "WebShell后门" {
 			// 敏感文件与 WebShell 以资源存在 / 交互成功为准，不按接口基线复核；但兜底页返回的 200（单页应用、统一错误页）不算
-			host := ev.Host
-			if host == "" {
-				host = "-"
-			}
-			if !s.surf.catchAll(host, normPath(ev.URI), ev.Bytes) {
+			if s.surf.catchAll(host, normPath(ev.URI), ev.Bytes) {
+				e := edit(i)
+				e.Result, e.Proven, e.Disproven = model.ResultPassed, false, true
+				e.Severity = min(e.Severity, model.SevMedium)
+				e.Evidence += "（响应与站点首页或其他探测路径的大小相同，是兜底页面返回的 200，判定为未取到内容）"
 				continue
 			}
-			if out == nil {
-				out = append([]model.Hit(nil), hits...)
+			if h.Category == "WebShell后门" && !h.Proven && s.surf.hasHomeBaseline(host) && webshellInteraction(ev, h.RuleID) {
+				e := edit(i)
+				e.Proven = true
+				e.Evidence += "（响应不同于站点首页，脚本确实发生了交互）"
 			}
-			out[i].Result = model.ResultPassed
-			out[i].Severity = min(out[i].Severity, model.SevMedium)
-			out[i].Evidence += "（响应与站点首页或其他探测路径的大小相同，是兜底页面返回的 200，判定为未取到内容）"
 			continue
 		}
-		if !looked {
-			looked = true
-			host := ev.Host
-			if host == "" {
-				host = "-"
-			}
-			ep = s.surf.Endpoints[host+" "+normPath(ev.URI)]
+		switch {
+		case ep.baselineMatches(ev.Bytes):
+			// 复核为「未成功」：撤销成功判定，等级回落到高危封顶（严重需要第二份证据）。
+			e := edit(i)
+			e.Result, e.Proven = model.ResultPassed, false
+			e.Severity = min(e.Severity, model.SevHigh)
+			e.Evidence += "（响应大小与该接口正常响应一致，判定为未成功）"
+		case s.surf.catchAll(host, normPath(ev.URI), ev.Bytes):
+			e := edit(i)
+			e.Result, e.Proven = model.ResultPassed, false
+			e.Severity = min(e.Severity, model.SevHigh)
+			e.Evidence += "（响应与站点首页或其他探测路径的大小相同，判定为未成功）"
+		case !h.Proven && ep.baselineExceeded(ev.Bytes):
+			e := edit(i)
+			e.Proven = true
+			e.Evidence += fmt.Sprintf("（响应 %d 字节，明显大于该接口正常的约 %.0f 字节，可能已取到额外数据）", ev.Bytes, ep.NormMean)
 		}
-		if !ep.baselineMatches(ev.Bytes) {
-			continue
-		}
-		if out == nil {
-			out = append([]model.Hit(nil), hits...)
-		}
-		// 复核为「未成功」：撤销成功升级，等级回落到高危封顶（严重需要成功或失陷证据）。
-		out[i].Result = model.ResultPassed
-		if out[i].Severity > model.SevHigh {
-			out[i].Severity = model.SevHigh
-		}
-		out[i].Evidence += "（响应大小与该接口正常响应一致，判定为未成功）"
 	}
 	if out == nil {
 		return hits
 	}
 	return out
+}
+
+// webshellInteraction 判断请求是否在与脚本交互：POST 提交、带命令参数，或执行上传目录中的脚本。
+// 只是 GET 访问一个名字可疑的脚本不算，合法脚本也可能叫这个名字。
+func webshellInteraction(ev *model.Event, rule string) bool {
+	return ev.Method == "POST" || rule == "webshell-param" || rule == "webshell-upload"
 }
 
 // hostFinding 把 DNS 与主机认证日志中的失陷迹象记入攻击面发现（疑似失陷资产据此汇总）。

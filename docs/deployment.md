@@ -6,7 +6,7 @@
 
 | 镜像 | 用途 |
 |---|---|
-| `swr.cn-east-3.myhuaweicloud.com/sreyun/netsa:latest` | netsa 主程序（默认）；也可使用版本号标签，如 `:1.6.14` |
+| `swr.cn-east-3.myhuaweicloud.com/sreyun/netsa:latest` | netsa 主程序（默认）；也可使用版本号标签，如 `:1.7.0` |
 | `swr.cn-east-3.myhuaweicloud.com/sreyun/pgvector:pg18` | 可选的告警归档数据库（PostgreSQL 18），只在启用归档时拉取 |
 
 ## 生产部署（Docker Compose）
@@ -82,19 +82,59 @@ docker compose up -d
 
 ```bash
 # 联网机器：按服务器架构拉取（arm64 服务器用 --platform linux/arm64），不启用归档可不拉取 pgvector
-docker pull --platform linux/amd64 swr.cn-east-3.myhuaweicloud.com/sreyun/netsa:1.6.14
+docker pull --platform linux/amd64 swr.cn-east-3.myhuaweicloud.com/sreyun/netsa:1.7.0
 docker pull --platform linux/amd64 swr.cn-east-3.myhuaweicloud.com/sreyun/pgvector:pg18
-docker save -o netsa-images.tar swr.cn-east-3.myhuaweicloud.com/sreyun/netsa:1.6.14 \
+docker save -o netsa-images.tar swr.cn-east-3.myhuaweicloud.com/sreyun/netsa:1.7.0 \
   swr.cn-east-3.myhuaweicloud.com/sreyun/pgvector:pg18
 
 # 服务器：导入后直接启动（不要执行 docker compose pull），.env 中写入相同的镜像标签
 docker load -i netsa-images.tar
-echo 'NETSA_IMAGE=swr.cn-east-3.myhuaweicloud.com/sreyun/netsa:1.6.14' >> .env
+echo 'NETSA_IMAGE=swr.cn-east-3.myhuaweicloud.com/sreyun/netsa:1.7.0' >> .env
 docker compose up -d
 ```
 
 - 也可以把镜像推送到内网私有仓库，再把 `NETSA_IMAGE` / `PG_IMAGE` 改为私有仓库地址。
 - 隔离网络中请在 [configs/docker.yaml](../configs/docker.yaml) 中关闭在线溯源 `geo.online.enabled: false`，由内置的 ip2region 与区划地名库提供离线定位。
+
+## 备份与恢复
+
+状态目录里有事件与处置记录、账号、学习结果、审计链和页面上的配置。备份里有密码哈希和模型密钥，请限制访问。
+
+```bash
+docker compose exec netsa /app/netsa backup -c /app/configs/docker.yaml -o /app/state/backups/manual.tar.gz
+```
+
+- 可以在服务运行时备份。默认不包含原始日志，需要时加 `-rawlog`。
+- 定时备份：配置 `storage.backup_dir`、`backup_interval`（默认 24h）、`backup_keep`（默认保留 7 个）。
+- 管理员也可以在“系统管理 → 对接状态”中下载备份，下载行为写入审计。
+
+恢复前先停止服务，否则退出时的快照会覆盖恢复的内容：
+
+```bash
+docker compose stop netsa
+```
+
+```bash
+docker compose run --rm netsa restore -c /app/configs/docker.yaml -i /app/state/backups/manual.tar.gz -force
+```
+
+```bash
+docker compose start netsa
+```
+
+恢复前会校验备份中每个文件的 SHA-256，校验不通过时不会改动任何文件。请定期演练恢复，并使用相同或更高版本的程序读取备份。
+
+## 数据可靠性
+
+- **处置记录**：分析员和模型对事件的每次修改都先写入预写日志并落盘，进程异常退出（断电、`kill -9`、内存不足）后重放，不会丢失。
+- **其他状态**：快照默认每分钟保存一次（`storage.interval`），异常退出时最多丢失这段时间内新产生的告警和统计。需要长期留存和更高可靠性时启用 PostgreSQL 告警归档和原始日志留存。
+- **高可用**：目前是单实例部署，没有主备切换。
+
+## 容器加固
+
+`docker-compose.yml` 默认去掉全部 Linux 能力、禁止提权、根文件系统只读，只有状态卷和 `/tmp` 可写，并限制内存（`NETSA_MEM_LIMIT`，默认 4g；`NETSA_GOMEMLIMIT` 默认 3400MiB，请设为前者的 85% 左右）和进程数。达到 `storage.max_ips` 上限（默认 20 万）后，存活堆约 1.5 GB，峰值约为其两倍。新增挂载目录时使用卷，不要去掉 `read_only`。
+
+启动日志中的 `[security]` 提示列出了需要在生产环境处理的项目：配置 HTTPS（或放在 HTTPS 反向代理之后）、开启 syslog 发送端白名单。
 
 ## 演示环境
 

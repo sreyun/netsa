@@ -152,6 +152,7 @@ Les documents détaillés ci-dessous sont rédigés en chinois simplifié.
 | [Opérations de sécurité](../operations.md) | Traitement des incidents, notifications, journaux bruts, actifs et vulnérabilités, rapports et conformité, comptes et audit, métriques, archivage des alertes |
 | [Référence de configuration](../configuration.md) | Paramètres courants et remarques d'exploitation |
 | [API](../api.md) | Présentation de l'API REST |
+| [Intégrations externes](../integrations.md) | Authentification unique LDAP / OIDC, transfert vers SIEM, blocage sur pare-feu, tickets et playbooks, renseignement STIX / TAXII / MISP, Sigma et packs de règles signés |
 | [Développement et publication](../development.md) | Tests locaux, structure du code, construction et publication des images |
 
 ## Développement

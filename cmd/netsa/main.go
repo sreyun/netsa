@@ -4,7 +4,10 @@ package main
 import (
 	"bufio"
 	"context"
+	"crypto/ed25519"
+	"crypto/rand"
 	"crypto/tls"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -23,6 +26,8 @@ import (
 	"time"
 	_ "time/tzdata" // 内嵌时区数据，精简容器镜像中也能使用 timezone 配置
 
+	"gopkg.in/yaml.v3"
+
 	"netsa/internal/ai"
 	"netsa/internal/alert"
 	"netsa/internal/api"
@@ -30,10 +35,14 @@ import (
 	"netsa/internal/assets"
 	"netsa/internal/audit"
 	"netsa/internal/auth"
+	"netsa/internal/backup"
+	"netsa/internal/block"
 	"netsa/internal/config"
 	"netsa/internal/demo"
 	"netsa/internal/detect"
+	"netsa/internal/eval"
 	"netsa/internal/exposure"
+	"netsa/internal/forward"
 	"netsa/internal/geo"
 	"netsa/internal/ingest"
 	"netsa/internal/intel"
@@ -41,7 +50,10 @@ import (
 	"netsa/internal/model"
 	"netsa/internal/parser"
 	"netsa/internal/pipeline"
+	"netsa/internal/playbook"
 	"netsa/internal/rawlog"
+	"netsa/internal/rulemgr"
+	"netsa/internal/sso"
 	"netsa/internal/store"
 	"netsa/internal/suppress"
 	"netsa/web"
@@ -49,7 +61,7 @@ import (
 
 // version 是构建版本号。默认值用于本地构建；镜像构建通过
 // -ldflags "-X main.version=<tag>" 注入，`netsa version` 与 /api/meta 都会显示注入后的值。
-var version = "1.6.14"
+var version = "1.7.0"
 
 func usage() {
 	fmt.Fprintf(os.Stderr, `netsa %s —— 网络安全态势感知与攻击面分析系统
@@ -59,6 +71,10 @@ func usage() {
   netsa analyze  [选项] <日志文件...>            离线分析日志（自动识别格式，支持通配符与 .gz）
   netsa simulate -o demo-logs [-live]            生成演示日志
   netsa rules    [-rules custom.yaml]            列出检测规则
+  netsa rulepack keygen|sign                     生成规则包密钥、签名规则包
+  netsa eval     [-corpus samples.tsv] [-v]      用带标注的样本评测检出率与误报
+  netsa backup   -c config.yaml -o backup.tar.gz 备份状态目录（可在运行时执行）
+  netsa restore  -c config.yaml -i backup.tar.gz 恢复状态目录（需先停止服务）
   netsa passwd   -c config.yaml -u admin         重置登录密码（忘记密码时使用）
   netsa hash-password                           生成密码哈希（用于配置文件 server.password）
   netsa version
@@ -83,6 +99,14 @@ func main() {
 		err = cmdSimulate(os.Args[2:])
 	case "rules":
 		err = cmdRules(os.Args[2:])
+	case "backup":
+		err = cmdBackup(os.Args[2:])
+	case "restore":
+		err = cmdRestore(os.Args[2:])
+	case "rulepack":
+		err = cmdRulePack(os.Args[2:])
+	case "eval":
+		err = cmdEval(os.Args[2:])
 	case "passwd":
 		err = cmdPasswd(os.Args[2:])
 	case "hash-password":
@@ -100,23 +124,27 @@ func main() {
 
 // app 是装配好的系统组件。
 type app struct {
-	cfg      *config.Config
-	geo      *geo.Resolver
-	intel    *intel.DB
-	engine   *detect.Engine
-	store    *store.Store
-	notifier *alert.Notifier
-	broker   *api.Broker
-	pipe     *pipeline.Pipeline
-	ingest   *ingest.Manager
-	rdap     *geo.RDAPClient
-	archive  *archive.Archive  // 可选的 PostgreSQL 告警归档
-	suppress *suppress.Manager // 误报抑制规则
-	raw      *rawlog.Store     // 原始日志留存
-	assets   *assets.Manager   // 资产与漏洞
-	exposure *exposure.Manager // 对外发布服务清单（DNAT 映射）
-	learn    *learn.Learner    // 自学习（研判反馈、平台行为基线、合规自检）
-	api      *api.Server
+	cfg       *config.Config
+	geo       *geo.Resolver
+	intel     *intel.DB
+	engine    *detect.Engine
+	store     *store.Store
+	notifier  *alert.Notifier
+	broker    *api.Broker
+	pipe      *pipeline.Pipeline
+	ingest    *ingest.Manager
+	rdap      *geo.RDAPClient
+	archive   *archive.Archive  // 可选的 PostgreSQL 告警归档
+	suppress  *suppress.Manager // 误报抑制规则
+	raw       *rawlog.Store     // 原始日志留存
+	assets    *assets.Manager   // 资产与漏洞
+	exposure  *exposure.Manager // 对外发布服务清单（DNAT 映射）
+	learn     *learn.Learner    // 自学习（研判反馈、平台行为基线、合规自检）
+	rules     *rulemgr.Manager
+	forward   *forward.Forwarder
+	block     *block.Manager
+	playbooks *playbook.Engine
+	api       *api.Server
 }
 
 func build(cfg *config.Config) (*app, error) {
@@ -181,9 +209,13 @@ func build(cfg *config.Config) (*app, error) {
 	if a.intel, err = intel.Load(cfg.Intel); err != nil {
 		return nil, err
 	}
-	if a.engine, err = detect.NewEngine(cfg.Detect.RulesFile, cfg.Detect.SuccessMinBytes); err != nil {
+	// 页面维护的规则与内置规则一起构建引擎；变更后热更新流水线
+	a.rules, err = rulemgr.New(rulemgr.Options{Path: dataFile(cfg, "", "rules-managed.json"), RulesFile: cfg.Detect.RulesFile, MinBytes: cfg.Detect.SuccessMinBytes,
+		Keys: cfg.Detect.RulePackKeys, OnChange: func(e *detect.Engine) { a.pipe.SetEngine(e) }})
+	if err != nil {
 		return nil, err
 	}
+	a.engine = a.rules.Engine()
 	a.store = store.New(cfg.Storage.MaxIPs, cfg.Storage.MaxAlerts, cfg.Detect.AlertsPerRule, cfg.Storage.Retention)
 	a.store.SetLocation(loc)
 	a.store.GeoLookup = a.geo.Lookup
@@ -218,6 +250,27 @@ func build(cfg *config.Config) (*app, error) {
 		Exposure: a.exposure, Learn: a.learn,
 	}
 	a.pipe.SetWhitelist(cfg.Detect.Whitelist)
+	if a.forward, err = forward.New(cfg.Forward, version); err != nil {
+		return nil, err
+	}
+	token := ""
+	if cfg.Block.WebhookTokenEnv != "" {
+		token = os.Getenv(cfg.Block.WebhookTokenEnv)
+	}
+	if a.block, err = block.New(block.Options{Cfg: cfg.Block, Path: dataFile(cfg, "", "block.json"), IsPrivate: geo.IsPrivate, Whitelist: cfg.Detect.Whitelist, Token: token,
+		Audit: func(user, msg string) { a.auditLog(user, "联动封禁", msg) }}); err != nil {
+		return nil, err
+	}
+	var blockFn playbook.BlockFunc
+	if a.block != nil {
+		blockFn = func(ip, reason string, incident uint64, user string) error {
+			_, err := a.block.Request(ip, reason, 0, incident, user)
+			return err
+		}
+	}
+	if a.playbooks, err = playbook.New(cfg.Playbooks, cfg.Tickets, a.store, blockFn); err != nil {
+		return nil, err
+	}
 	a.geo.OnUpdate = a.pipe.OnGeoUpdate
 	a.ingest = ingest.NewManager(20000)
 	silence, _ := config.ParseSilence(cfg.Alert.SourceSilence, 0)
@@ -273,6 +326,9 @@ func (a *app) server(listen string) (*http.Server, error) {
 			log.Printf("[ai] 提示：未设置模型密钥，按无密钥方式调用（适用于内网部署的模型）")
 		}
 	}
+	s.OIDC = sso.NewOIDC(a.cfg.Server.OIDC)
+	s.Rules, s.Block, s.Forward, s.Playbooks, s.Intel = a.rules, a.block, a.forward, a.playbooks, a.intel
+	s.StateDir, _ = stateDir(a.cfg)
 	a.api = s
 	dir := dataFile(a.cfg, a.cfg.Audit.Dir, "audit")
 	if dir == "" {
@@ -297,6 +353,14 @@ func (a *app) server(listen string) (*http.Server, error) {
 			return nil, fmt.Errorf("初始化登录账号失败: %w", err)
 		}
 		s.Auth = m
+		ldapAuth, err := sso.NewLDAP(a.cfg.Server.LDAP)
+		if err != nil {
+			return nil, err
+		}
+		if ldapAuth != nil {
+			m.SetExternalAuth(ldapAuth.Authenticate)
+			log.Printf("[auth] 已启用 LDAP 登录: %s", a.cfg.Server.LDAP.URL)
+		}
 		if initial != "" {
 			log.Printf("[auth] ==================================================")
 			log.Printf("[auth] 已创建管理员账号 admin，初始密码: %s", initial)
@@ -347,6 +411,15 @@ func archiveDSN(cfg *config.Config) string {
 func (a *app) onAlert(al *model.Alert) {
 	a.broker.Publish(al)
 	a.archive.Add(al)
+	a.forward.Send(al)
+	a.playbooks.OnAlert(al)
+}
+
+// auditLog 把后台模块的操作写入审计链。
+func (a *app) auditLog(user, action, detail string) {
+	if a.api != nil && a.api.Trail != nil {
+		a.api.Trail.AppendAudit(auth.Record{Time: time.Now(), User: user, Action: action, Detail: detail, OK: true})
+	}
 }
 
 // usersFile 返回账号文件位置：server.users_file，或 storage.snapshot 所在目录。
@@ -381,8 +454,17 @@ func cmdServe(args []string) error {
 	if err != nil {
 		return err
 	}
+	defer a.store.CloseJournal()
 	if err := a.store.Load(cfg.Storage.Snapshot); err != nil {
 		log.Printf("[store] 加载快照失败（将从空状态开始）: %v", err)
+	}
+	// 快照之后的处置记录（进程异常退出时快照里没有）从预写日志恢复
+	if p := cfg.Storage.Snapshot; p != "" {
+		if n, err := a.store.OpenIncidentJournal(p + ".journal"); err != nil {
+			log.Printf("[store] 打开处置记录日志失败: %v", err)
+		} else if n > 0 {
+			log.Printf("[store] 已从处置记录日志恢复 %d 次事件变更", n)
+		}
 	}
 	// 快照中的定位结果可能来自旧版定位库或旧的自定义网段，按当前库重新定位
 	if n := a.store.RefreshGeo(a.geo.Relocate); n > 0 {
@@ -401,6 +483,8 @@ func cmdServe(args []string) error {
 	go a.reloadGeo(ctx, *cfgPath)
 	go a.notifier.Run(ctx)
 	a.intel.StartTor(ctx, cfg.Intel.TorExitURL)
+	a.intel.StartFeeds(ctx, cfg.Intel.Feeds, dataFile(cfg, "", "intel-feeds"))
+	a.forward.Start(ctx)
 	done := a.pipe.Run(ctx, a.ingest.Out, 0)
 
 	for _, src := range cfg.Sources {
@@ -417,7 +501,11 @@ func cmdServe(args []string) error {
 	if err != nil {
 		return err
 	}
+	securityHints(cfg)
 	go a.api.RunBackground(ctx) // 每小时记录安全评分，每日推送安全日报
+	go a.runBackups(ctx)
+	go a.block.Run(ctx)
+	go a.playbooks.Run(ctx)
 	go func() {
 		log.Printf("[web] 态势感知大屏: %s://%s", a.scheme(), displayAddr(cfg.Server.Listen))
 		if err := a.listen(srv); err != nil && !errors.Is(err, http.ErrServerClosed) {
@@ -845,4 +933,228 @@ func cmdHashPassword(args []string) error {
 	}
 	fmt.Println(auth.HashPassword(pw))
 	return nil
+}
+
+// cmdEval 用带标注的样本跑完整检测流水线，输出检出率与误报。不符合期望等级时返回错误，便于接入 CI。
+func cmdEval(args []string) error {
+	fs := flag.NewFlagSet("eval", flag.ExitOnError)
+	file := fs.String("corpus", "", "样本文件（默认使用内置样本，格式见 internal/eval/corpus/web.tsv）")
+	verbose := fs.Bool("v", false, "列出不符合期望等级的样本")
+	asJSON := fs.Bool("json", false, "输出 JSON")
+	fs.Parse(args)
+	cases, err := eval.Builtin()
+	if *file != "" {
+		cases, err = eval.LoadFile(*file)
+	}
+	if err != nil {
+		return err
+	}
+	rep, err := eval.Run(cases)
+	if err != nil {
+		return err
+	}
+	if *asJSON {
+		enc := json.NewEncoder(os.Stdout)
+		enc.SetIndent("", "  ")
+		if err := enc.Encode(rep); err != nil {
+			return err
+		}
+	} else {
+		rep.Write(os.Stdout, *verbose)
+	}
+	if rep.Violations > 0 {
+		return fmt.Errorf("%d 条样本不符合期望等级", rep.Violations)
+	}
+	return nil
+}
+
+// stateDir 返回状态目录：事件快照所在的目录，其余状态文件都放在这里。
+func stateDir(cfg *config.Config) (string, error) {
+	if cfg.Storage.Snapshot == "" {
+		return "", errors.New("配置中没有 storage.snapshot，无法确定状态目录")
+	}
+	return filepath.Dir(cfg.Storage.Snapshot), nil
+}
+
+// cmdBackup 备份状态目录。
+func cmdBackup(args []string) error {
+	fs := flag.NewFlagSet("backup", flag.ExitOnError)
+	cfgPath := fs.String("c", "configs/config.yaml", "配置文件")
+	out := fs.String("o", "", "备份文件（默认按时间命名，放在当前目录）")
+	raw := fs.Bool("rawlog", false, "同时备份原始日志（可能很大）")
+	fs.Parse(args)
+	cfg, err := config.Load(*cfgPath)
+	if err != nil {
+		return err
+	}
+	dir, err := stateDir(cfg)
+	if err != nil {
+		return err
+	}
+	if *out == "" {
+		*out = backup.ScheduledName(time.Now())
+	}
+	m, err := backup.CreateFile(*out, dir, backup.Options{Version: version, RawLog: *raw})
+	if err != nil {
+		return err
+	}
+	fmt.Printf("已备份 %d 个文件到 %s。备份中有密码哈希和模型密钥，请妥善保管。\n", len(m.Files), *out)
+	return nil
+}
+
+// cmdRestore 恢复状态目录。
+func cmdRestore(args []string) error {
+	fs := flag.NewFlagSet("restore", flag.ExitOnError)
+	cfgPath := fs.String("c", "configs/config.yaml", "配置文件")
+	in := fs.String("i", "", "备份文件")
+	force := fs.Bool("force", false, "状态目录不是空的时覆盖其中的文件")
+	fs.Parse(args)
+	if *in == "" {
+		return errors.New("请用 -i 指定备份文件")
+	}
+	cfg, err := config.Load(*cfgPath)
+	if err != nil {
+		return err
+	}
+	dir, err := stateDir(cfg)
+	if err != nil {
+		return err
+	}
+	f, err := os.Open(*in)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	m, err := backup.Restore(f, dir, *force)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("已恢复 %d 个文件到 %s（备份版本 %s，生成于 %s）。\n", len(m.Files), dir, m.Version, m.Created.Format("2006-01-02 15:04:05"))
+	if m.Version != version {
+		fmt.Printf("提示：当前程序版本是 %s，与备份版本不同。低版本程序读取高版本快照可能失败，请使用相同或更高的版本。\n", version)
+	}
+	return nil
+}
+
+// runBackups 按 storage.backup_dir 定时备份。失败只记录日志并写入指标，不影响服务。
+func (a *app) runBackups(ctx context.Context) {
+	dir := a.cfg.Storage.BackupDir
+	state, err := stateDir(a.cfg)
+	if dir == "" || err != nil {
+		return
+	}
+	interval := a.cfg.Storage.BackupInterval
+	if interval <= 0 {
+		interval = 24 * time.Hour
+	}
+	keep := a.cfg.Storage.BackupKeep
+	if keep <= 0 {
+		keep = 7
+	}
+	tick := time.NewTicker(interval)
+	defer tick.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-tick.C:
+			m, err := backup.CreateFile(filepath.Join(dir, backup.ScheduledName(time.Now())), state, backup.Options{Version: version})
+			if err != nil {
+				log.Printf("[backup] 定时备份失败: %v", err)
+				continue
+			}
+			log.Printf("[backup] 已备份 %d 个文件到 %s", len(m.Files), dir)
+			if err := backup.Rotate(dir, keep); err != nil {
+				log.Printf("[backup] 清理旧备份失败: %v", err)
+			}
+		}
+	}
+}
+
+// securityHints 启动时提示不安全的部署方式，方便在交付时发现。
+func securityHints(cfg *config.Config) {
+	if cfg.Server.TLSCert == "" {
+		log.Printf("[security] 提示：管理页面未启用 HTTPS（server.tls_cert）；生产环境请配置证书或放在 HTTPS 反向代理之后")
+	}
+	if cfg.Syslog.Enabled && !cfg.Syslog.Allowlist {
+		log.Printf("[security] 提示：syslog 未开启发送端白名单（syslog.allowlist）；任何能访问该端口的主机都可以写入日志")
+	}
+}
+
+// cmdRulePack 生成规则包密钥、签名规则包。私钥只在签发规则包的机器上使用，不需要放到部署环境。
+func cmdRulePack(args []string) error {
+	if len(args) == 0 {
+		return errors.New("用法: netsa rulepack keygen -o pack.key | netsa rulepack sign -key pack.key -in rules.yaml -name 名称 -serial 序号 -o pack.json")
+	}
+	switch args[0] {
+	case "keygen":
+		fs := flag.NewFlagSet("rulepack keygen", flag.ExitOnError)
+		out := fs.String("o", "", "私钥文件")
+		fs.Parse(args[1:])
+		if *out == "" {
+			return errors.New("请用 -o 指定私钥文件")
+		}
+		pub, priv, err := ed25519.GenerateKey(rand.Reader)
+		if err != nil {
+			return err
+		}
+		f, err := os.OpenFile(*out, os.O_CREATE|os.O_WRONLY|os.O_EXCL, 0o600)
+		if err != nil {
+			return fmt.Errorf("创建私钥文件（不会覆盖已有文件）: %w", err)
+		}
+		defer f.Close()
+		if _, err := f.WriteString(base64.StdEncoding.EncodeToString(priv) + "\n"); err != nil {
+			return err
+		}
+		fmt.Printf("私钥已保存到 %s，请妥善保管。\n把公钥写入 detect.rule_pack_keys：\n%s\n", *out, base64.StdEncoding.EncodeToString(pub))
+		return nil
+	case "sign":
+		fs := flag.NewFlagSet("rulepack sign", flag.ExitOnError)
+		keyFile := fs.String("key", "", "私钥文件")
+		in := fs.String("in", "", "规则文件（YAML，格式同 detect.rules_file）")
+		name := fs.String("name", "", "规则包名称")
+		serial := fs.Int64("serial", 0, "序号，必须比已安装的版本大")
+		out := fs.String("o", "", "输出文件")
+		fs.Parse(args[1:])
+		if *keyFile == "" || *in == "" || *name == "" || *serial <= 0 || *out == "" {
+			return errors.New("请指定 -key、-in、-name、-serial 和 -o")
+		}
+		raw, err := os.ReadFile(*keyFile)
+		if err != nil {
+			return err
+		}
+		key, err := base64.StdEncoding.DecodeString(strings.TrimSpace(string(raw)))
+		if err != nil || len(key) != ed25519.PrivateKeySize {
+			return errors.New("私钥文件无效")
+		}
+		data, err := os.ReadFile(*in)
+		if err != nil {
+			return err
+		}
+		var file detect.RulesFile
+		if err := yaml.Unmarshal(data, &file); err != nil {
+			return fmt.Errorf("解析规则文件: %w", err)
+		}
+		if len(file.Rules) == 0 {
+			return errors.New("规则文件中没有规则")
+		}
+		// 签名前确认每条规则都能编译，避免发布一个所有部署都装不上的规则包
+		if _, err := detect.NewEngineWith("", file.Rules, 1); err != nil {
+			return err
+		}
+		p := rulemgr.Pack{Name: *name, Serial: *serial, Rules: file.Rules}
+		if err := rulemgr.Sign(&p, ed25519.PrivateKey(key)); err != nil {
+			return err
+		}
+		body, err := json.MarshalIndent(p, "", "  ")
+		if err != nil {
+			return err
+		}
+		if err := os.WriteFile(*out, body, 0o644); err != nil {
+			return err
+		}
+		fmt.Printf("已生成规则包 %s：%d 条规则，序号 %d\n", *out, len(p.Rules), p.Serial)
+		return nil
+	}
+	return fmt.Errorf("未知子命令 %q", args[0])
 }

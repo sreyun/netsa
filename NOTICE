@@ -1,0 +1,13 @@
+netsa
+Copyright 2026 The netsa Authors
+
+This product is licensed under the Apache License, Version 2.0.
+See the LICENSE file for the full license text.
+
+Third-party components included in this product are distributed under
+their own licenses. The complete dependency list is recorded in go.mod
+and go.sum; each module's license terms are available in its source
+distribution.
+
+"netsa" and the netsa logo are trademarks of the project maintainers.
+The Apache License does not grant permission to use these marks.

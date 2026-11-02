@@ -39,7 +39,8 @@ type User struct {
 	MustChange bool      `json:"must_change"` // 使用初始 / 重置的密码，登录后必须先修改
 	Gen        int       `json:"gen"`         // 令牌代数：修改密码、删除账号后递增，使已签发的登录令牌失效
 	LastLogin  time.Time `json:"last_login"`
-	Source     string    `json:"-"` // config：来自配置文件（只读）；local：账号文件
+	External   string    `json:"external,omitempty"` // 外部账号的来源：ldap / oidc（不能用本地密码登录）
+	Source     string    `json:"-"`                  // config：来自配置文件（只读）；local：账号文件
 	// 双因素认证（TOTP）
 	TOTPSecret  string   `json:"totp_secret,omitempty"`
 	TOTPPending string   `json:"totp_pending,omitempty"` // 绑定中、尚未验证的密钥
@@ -58,6 +59,7 @@ type UserView struct {
 	Source     string    `json:"source"`
 	TwoFactor  bool      `json:"two_factor"`
 	Recovery   int       `json:"recovery_left,omitempty"` // 剩余恢复码数量
+	External   string    `json:"external,omitempty"`      // 外部账号的来源
 }
 
 // Session 是一个已登录的会话。
@@ -119,6 +121,7 @@ type failure struct {
 // Manager 管理账号、会话令牌、登录失败锁定与审计。
 type Manager struct {
 	mu      sync.Mutex
+	ext     ExternalAuth // 外部账号的密码认证（LDAP），可为空
 	opt     Options
 	users   map[string]*User
 	key     []byte               // 会话令牌签名密钥
@@ -346,16 +349,30 @@ func (m *Manager) Login(user, password, ip, agent string) (*Session, string, err
 	}
 	u := m.users[user]
 	var hash string
+	external := ""
 	if u != nil {
-		hash = u.Hash
+		hash, external = u.Hash, u.External
 	}
+	ext := m.ext
 	m.mu.Unlock()
 
 	// 哈希计算耗时较长，在锁外进行；账号不存在时同样计算一次，避免通过响应时间探测账号
 	ok := false
-	if u != nil {
+	extRole := ""
+	switch {
+	case u != nil && external == "":
 		ok = VerifyPassword(hash, password)
-	} else {
+	case ext != nil && (u == nil || external == extSourceLDAP) && validExternalName(user):
+		// 本地账号优先，避免目录服务里的同名账号接管本地管理员
+		role, err := ext(user, password)
+		if err != nil {
+			if !errors.Is(err, ErrBadCredentials) {
+				log.Printf("[auth] 外部认证失败（%s）: %v", user, err)
+			}
+		} else {
+			ok, extRole = true, role
+		}
+	default:
 		VerifyPassword(dummyHash(), password)
 	}
 
@@ -370,6 +387,10 @@ func (m *Manager) Login(user, password, ip, agent string) (*Session, string, err
 		return nil, "", ErrBadCredentials
 	}
 	delete(m.fails, "p:"+user+"|"+ip)
+	if extRole != "" {
+		u = m.upsertExternalLocked(user, extRole, extSourceLDAP, now)
+		return m.finishLoginLocked(u, ip, agent, now, "LDAP")
+	}
 	u = m.users[user]
 	if u == nil { // 校验期间账号被删除
 		return nil, "", ErrBadCredentials
@@ -394,7 +415,7 @@ func (m *Manager) finishLoginLocked(u *User, ip, agent string, now time.Time, re
 // sessionLocked 构造账号的会话信息（调用方持锁）。
 func (m *Manager) sessionLocked(u *User, id string, auth, exp time.Time) *Session {
 	return &Session{User: u.Name, Role: u.Role, MustChange: u.MustChange, TwoFactor: u.TOTPSecret != "",
-		MustEnroll: m.opt.Require2FA && u.TOTPSecret == "" && u.Source != "config", ID: id, AuthTime: auth, Expires: exp, Via: "session"}
+		MustEnroll: m.opt.Require2FA && u.TOTPSecret == "" && u.Source != "config" && u.External == "", ID: id, AuthTime: auth, Expires: exp, Via: "session"}
 }
 
 // Login2FA 用口令验证后得到的挑战凭据与双因素验证码（或恢复码）完成登录。验证码错误同样计入登录失败锁定。
@@ -669,6 +690,10 @@ func (m *Manager) ChangePassword(user, current, next string) (string, error) {
 		m.mu.Unlock()
 		return "", ErrNoUser
 	}
+	if u.External != "" {
+		m.mu.Unlock()
+		return "", ErrExternalAccount
+	}
 	if u.Source == "config" {
 		m.mu.Unlock()
 		return "", ErrReadOnly
@@ -709,7 +734,7 @@ func (m *Manager) Users() []UserView {
 	out := make([]UserView, 0, len(m.users))
 	for _, u := range m.users {
 		out = append(out, UserView{Name: u.Name, Role: u.Role, Created: u.Created, Changed: u.Changed, MustChange: u.MustChange, LastLogin: u.LastLogin, Source: u.Source,
-			TwoFactor: u.TOTPSecret != "", Recovery: len(u.Recovery)})
+			TwoFactor: u.TOTPSecret != "", Recovery: len(u.Recovery), External: u.External})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
 	return out
@@ -973,4 +998,59 @@ func (m *Manager) SetAuditSink(sink AuditSink) {
 	m.mu.Lock()
 	m.opt.Audit = sink
 	m.mu.Unlock()
+}
+
+// 外部账号。账号在首次登录时自动创建，角色每次登录时按组映射更新；本地密码是随机值，无法用于登录。
+const (
+	extSourceLDAP = "ldap"
+	extSourceOIDC = "oidc"
+)
+
+// ErrExternalAccount 表示操作只适用于本地账号。
+var ErrExternalAccount = errors.New("这是外部账号，请在身份提供方修改密码")
+
+// ExternalAuth 校验外部账号的用户名和密码，返回平台角色。
+type ExternalAuth func(user, password string) (role string, err error)
+
+// SetExternalAuth 设置密码登录的外部认证（LDAP）：本地账号不存在时才使用。
+func (m *Manager) SetExternalAuth(f ExternalAuth) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.ext = f
+}
+
+func validExternalName(name string) bool { return nameRe.MatchString(name) }
+
+// upsertExternalLocked 创建或更新外部账号（调用方持锁）。角色降低时吊销已签发的会话。
+func (m *Manager) upsertExternalLocked(name, role, source string, now time.Time) *User {
+	u := m.users[name]
+	if u == nil {
+		u = &User{Name: name, Hash: HashPassword(randomID() + randomID()), Role: role, Created: now, Changed: now, Source: "local", External: source}
+		m.users[name] = u
+		return u
+	}
+	if u.Role != role {
+		if roleRank(role) < roleRank(u.Role) {
+			m.bump(u)
+		}
+		u.Role = role
+	}
+	return u
+}
+
+// ExternalLogin 为已通过身份提供方校验的账号签发会话（OIDC）。同名的本地账号不能被外部身份接管。
+func (m *Manager) ExternalLogin(name, role, ip, agent string) (*Session, string, error) {
+	if !validExternalName(name) || !ValidRole(role) {
+		return nil, "", fmt.Errorf("外部账号名 %q 或角色不符合要求", clipUTF8(name, 64))
+	}
+	now := m.now()
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.reloadIfChanged()
+	if u := m.users[name]; u != nil && u.External != extSourceOIDC {
+		m.recordLocked(name, ip, agent, false, "外部身份与同名的本地账号冲突")
+		return nil, "", fmt.Errorf("账号 %s 已存在，不能用单点登录接管", name)
+	}
+	u := m.upsertExternalLocked(name, role, extSourceOIDC, now)
+	return m.finishLoginLocked(u, ip, agent, now, "单点登录")
 }

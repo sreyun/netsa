@@ -64,6 +64,22 @@ func (s *Server) metrics(w http.ResponseWriter, r *http.Request) {
 	p := &promWriter{seen: map[string]bool{}}
 	p.metric("netsa_build_info", "gauge", "版本信息", 1, "version", s.Version)
 	p.metric("netsa_uptime_seconds", "gauge", "运行时长（秒）", time.Since(s.started).Seconds())
+	for _, f := range s.Forward.Stats() {
+		p.metric("netsa_forward_sent_total", "counter", "转发到 SIEM 的告警数", float64(f.Sent), "target", f.Name)
+		p.metric("netsa_forward_dropped_total", "counter", "因队列已满未能转发的告警数", float64(f.Dropped), "target", f.Name)
+		p.metric("netsa_forward_failed_total", "counter", "转发失败次数", float64(f.Failed), "target", f.Name)
+	}
+	if s.Block != nil {
+		pending, active := s.Block.Counts()
+		p.metric("netsa_block_pending", "gauge", "待审批的封禁申请数", float64(pending))
+		p.metric("netsa_block_active", "gauge", "生效中的封禁数", float64(active))
+		p.metric("netsa_block_webhook_failed_total", "counter", "封禁 Webhook 推送失败次数", float64(s.Block.WebhookFailed()))
+	}
+	if s.Playbooks != nil {
+		runs, dropped := s.Playbooks.Stats()
+		p.metric("netsa_playbook_runs_total", "counter", "处置剧本执行次数", float64(runs))
+		p.metric("netsa_playbook_dropped_total", "counter", "因队列已满未能处理的事件数", float64(dropped))
+	}
 	p.metric("netsa_events_processed_total", "counter", "已处理的日志事件数", float64(s.Pipeline.Processed()))
 
 	for _, st := range s.Ingest.Stats() {

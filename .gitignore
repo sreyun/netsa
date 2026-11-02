@@ -8,3 +8,16 @@ data/*.mmdb
 build.log
 .workbuddy/
 *.new
+
+# 官网线索数据（含个人信息，不入库）
+site/data/
+
+# 官网部署：环境变量与证书
+site/.env
+site/docker/certs/*.pem
+site/docker/certs/*.key
+
+# 端到端回归
+test/e2e/node_modules/
+test/e2e/test-results/
+test/e2e/.e2e-state/

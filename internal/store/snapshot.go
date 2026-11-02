@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -63,6 +64,7 @@ func (s *Store) Save(path string) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err
 	}
+	mark := s.journalMark()
 	tmp := path + ".tmp"
 	// 快照包含攻击源画像等敏感安全数据，仅允许服务账号读取
 	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
@@ -77,7 +79,14 @@ func (s *Store) Save(path string) error {
 		os.Remove(tmp)
 		return err
 	}
-	return os.Rename(tmp, path)
+	if err := os.Rename(tmp, path); err != nil {
+		return err
+	}
+	// 快照已经包含 mark 之前的处置记录，可以丢弃；失败也不影响数据，重放时按更新时间跳过
+	if err := s.compactJournal(mark); err != nil {
+		log.Printf("[store] 整理处置记录日志失败: %v", err)
+	}
+	return nil
 }
 
 func (s *Store) writeSnapshot(f io.Writer, compress bool) error {
@@ -337,6 +346,7 @@ func (s *Store) Load(path string) error {
 		}
 		inc.ID = id
 		inc.ensureMaps()
+		inc.migrateGrade(time.Now())
 		if id > s.nextInc {
 			s.nextInc = id
 		}

@@ -150,7 +150,9 @@ go build -o bin/netsa ./cmd/netsa
 | [安全运营](docs/operations.md) | 事件处置、告警推送、原始日志、资产漏洞、报表合规、账号审计、监控指标、告警归档 |
 | [配置参考](docs/configuration.md) | 常用配置项与运行注意事项 |
 | [API](docs/api.md) | REST 接口一览 |
+| [对接外部系统](docs/integrations.md) | LDAP / OIDC 单点登录、SIEM 转发、联动封禁、工单与处置剧本、STIX / TAXII / MISP 情报、Sigma 与签名规则包 |
 | [开发与发布](docs/development.md) | 本地测试、代码结构、镜像构建与发布 |
+| [更新记录](docs/CHANGELOG.md) | 影响使用的变化 |
 
 ## 开发
 
@@ -182,3 +184,13 @@ docker run --rm -v "$PWD":/src -w /src golang:1.27-alpine sh -c 'apk add --no-ca
 提交代码前请先通过上面的检查，CI 还会运行竞态测试和 `govulncheck`。
 
 如果 netsa 对你有帮助，请点一个 **Star**，让更多需要它的人看到。
+
+## 许可证
+
+本项目采用 [Apache License 2.0](LICENSE) 发布：可以自由地用于商业目的、修改与再分发，只需保留版权声明、许可文本与 [NOTICE](NOTICE) 文件。
+
+- 软件按「现状」提供，不附带任何明示或暗示的担保；
+- 许可不授予商标使用权，`netsa` 名称与标识不包含在授权范围内；
+- 第三方依赖遵循各自许可，完整列表见 `go.mod` 与 `go.sum`。
+
+规则与情报订阅、部署交付、等保测评支撑等商业服务由维护方另行提供，不影响开源版依据 Apache-2.0 的使用权利。

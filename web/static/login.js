@@ -14,8 +14,25 @@ const home = () => location.replace('/' + (location.hash || ''));
 // 已登录（或未开启登录认证）时直接进入大屏
 fetch('/api/auth/session', { headers: { Accept: 'application/json' } })
   .then((r) => (r.ok ? r.json() : null))
-  .then((s) => { if (s && s.authenticated) home(); })
+  .then((s) => {
+    if (s && s.authenticated) { home(); return; }
+    if (s && s.oidc) { $('#ssoName').textContent = s.oidc; $('#ssoBtn').hidden = false; }
+  })
   .catch(() => {});
+
+// 单点登录失败时身份提供方回调会带上原因（只取固定的枚举值，不显示地址栏里的任意文字）
+const SSO_ERRORS = {
+  unavailable: '暂时无法连接身份提供方，请稍后重试或使用账号密码登录',
+  state: '登录请求已失效，请重新登录', idp: '身份提供方拒绝了本次登录', invalid: '身份校验失败，请重新登录',
+  denied: '账号没有平台访问权限，请联系管理员', conflict: '平台已有同名的本地账号，不能用单点登录接管',
+};
+{
+  const m = /^#sso_error=(\w+)$/.exec(location.hash);
+  if (m) {
+    msg.textContent = SSO_ERRORS[m[1]] || '单点登录失败';
+    history.replaceState(null, '', location.pathname);
+  }
+}
 
 $('#togglePw').addEventListener('click', (e) => {
   const show = pw.type === 'password';

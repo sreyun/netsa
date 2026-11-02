@@ -152,6 +152,7 @@ go build -o bin/netsa ./cmd/netsa
 | [보안 운영](../operations.md) | 인시던트 처리, 경보 알림, 원본 로그, 자산과 취약점, 보고서와 규정 준수, 계정과 감사, 모니터링 지표, 경보 보관 |
 | [설정 참고](../configuration.md) | 자주 쓰는 설정 항목과 운영 시 주의 사항 |
 | [API](../api.md) | REST API 목록 |
+| [외부 시스템 연동](../integrations.md) | LDAP / OIDC 싱글 사인온, SIEM 전달, 방화벽 연동 차단, 티켓과 플레이북, STIX / TAXII / MISP 인텔리전스, Sigma 및 서명된 규칙 팩 |
 | [개발과 릴리스](../development.md) | 로컬 테스트, 코드 구조, 이미지 빌드와 릴리스 |
 
 ## 개발

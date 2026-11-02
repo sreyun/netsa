@@ -107,9 +107,11 @@ func TestLevelFollowsAlertSeverity(t *testing.T) {
 		[]model.Hit{attackHit("log4shell", "表达式注入", model.SevCritical, model.ResultBlocked)})
 	s.Record(&model.Event{Kind: model.KindWeb, SrcIP: "203.0.113.3", Method: "GET", URI: "/c", Status: 404, Time: now},
 		[]model.Hit{attackHit("xss", "XSS", model.SevMedium, model.ResultPassed)})
-	// 未拦截且响应可判定成功：达到严重
+	// 未拦截且有第二份证据：达到严重
+	sqli := attackHit("sqli", "SQL注入", model.SevHigh, model.ResultSuccess)
+	sqli.Proven = true
 	s.Record(&model.Event{Kind: model.KindWeb, SrcIP: "203.0.113.4", Method: "GET", URI: "/d", Status: 200, Time: now},
-		[]model.Hit{attackHit("sqli", "SQL注入", model.SevHigh, model.ResultSuccess)})
+		[]model.Hit{sqli})
 	for ip, want := range map[string]model.Severity{
 		"203.0.113.1": model.SevHigh, "203.0.113.2": model.SevHigh,
 		"203.0.113.3": model.SevMedium, "203.0.113.4": model.SevCritical,
@@ -292,14 +294,18 @@ func TestCriticalFloorRequiresEvidence(t *testing.T) {
 	s := newTestStore()
 	now := time.Now()
 	// 未拦截但无成功证据的设备告警：告警本身仍是严重，攻击源等级只到高危
+	dev := attackHit("dev-1", "设备威胁告警", model.SevCritical, model.ResultPassed)
+	dev.Proven = true
 	s.Record(&model.Event{Kind: model.KindWeb, SrcIP: "203.0.113.10", Method: "GET", URI: "/a", Status: 200, Time: now},
-		[]model.Hit{attackHit("dev-1", "设备威胁告警", model.SevCritical, model.ResultPassed)})
+		[]model.Hit{dev})
 	if p := s.Profile("203.0.113.10"); p.MaxSev != model.SevCritical || p.Level != model.SevHigh {
 		t.Fatalf("单条无佐证的严重告警应封顶高危: max=%s level=%s", p.MaxSev, p.Level)
 	}
-	// 成功利用：攻击源达到严重
+	// 有证据的成功利用：攻击源达到严重
+	sqli := attackHit("sqli", "SQL注入", model.SevHigh, model.ResultSuccess)
+	sqli.Proven = true
 	s.Record(&model.Event{Kind: model.KindWeb, SrcIP: "203.0.113.11", Method: "GET", URI: "/b", Status: 200, Time: now},
-		[]model.Hit{attackHit("sqli", "SQL注入", model.SevHigh, model.ResultSuccess)})
+		[]model.Hit{sqli})
 	if p := s.Profile("203.0.113.11"); p.Level != model.SevCritical {
 		t.Fatalf("成功利用应达到严重: %s", p.Level)
 	}

@@ -654,3 +654,5 @@ pre.cmd { background: #050b18; border: 1px solid var(--border); padding: 8px 10p
 .ai-box ul { margin: 2px 0 6px 18px; padding: 0; }
 .ai-verdict { margin: 4px 0 6px; }
 @media (max-width: 900px) { .ln-kpis { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+
+.btn.sm { padding: 2px 8px; font-size: 12px; }

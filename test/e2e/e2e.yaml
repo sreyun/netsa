@@ -1,0 +1,25 @@
+# 端到端回归专用的配置：账号与地址只用于测试实例。
+server:
+  listen: "127.0.0.1:18099"
+  username: admin
+  password: "E2e-admin-pass-1"
+home:
+  name: "测试"
+  lat: 31.23
+  lon: 121.47
+syslog:
+  enabled: true
+  tcp: "127.0.0.1:15599"
+  udp: "127.0.0.1:15599"
+geo:
+  reverse_dns: false
+  online:
+    enabled: false
+block:
+  enabled: true
+  allow_self_approve: true
+detect:
+  alerts_per_rule: 50
+storage:
+  snapshot: ".e2e-state/state.json.gz"
+  interval: 1m

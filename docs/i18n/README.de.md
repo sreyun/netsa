@@ -152,6 +152,7 @@ Die folgenden ausführlichen Dokumente sind in vereinfachtem Chinesisch verfasst
 | [Sicherheitsbetrieb](../operations.md) | Vorfallbearbeitung, Benachrichtigungen, Rohlogs, Assets und Schwachstellen, Berichte und Compliance, Konten und Audit, Metriken, Alarmarchivierung |
 | [Konfigurationsreferenz](../configuration.md) | Häufige Einstellungen und Betriebshinweise |
 | [API](../api.md) | Überblick über die REST-API |
+| [Externe Integrationen](../integrations.md) | LDAP / OIDC Single Sign-on, SIEM-Weiterleitung, Firewall-Sperren, Tickets und Playbooks, STIX / TAXII / MISP Threat Intelligence, Sigma und signierte Regelpakete |
 | [Entwicklung und Veröffentlichung](../development.md) | Lokale Tests, Codestruktur, Erstellung und Veröffentlichung von Images |
 
 ## Entwicklung

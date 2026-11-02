@@ -68,6 +68,7 @@
       <div class="caps-hint" id="capsHint" hidden>大写锁定已开启</div>
       <div class="msg" id="loginMsg" role="alert"></div>
       <button type="submit" id="loginBtn" class="login-btn"><span>登 录</span></button>
+      <a id="ssoBtn" class="login-btn sso-btn" href="/api/auth/oidc/start" hidden><span id="ssoName">单点登录</span></a>
     </form>
     <form id="twoForm" class="login-form" autocomplete="off" novalidate hidden>
       <p class="two-tip">该账号已启用双因素认证，请输入身份验证器（如 Microsoft / Google Authenticator、阿里云 / 腾讯身份验证器）中显示的 6 位动态口令，或一个恢复码。</p>

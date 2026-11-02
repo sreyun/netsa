@@ -73,10 +73,11 @@ type Incident struct {
 	Severity   model.Severity `json:"severity"`
 	Status     string         `json:"status"`
 	Assignee   string         `json:"assignee,omitempty"`
-	Alerts     int            `json:"alerts"`  // 生成的告警条数（受 detect.alerts_per_rule 节流）
-	Hits       int            `json:"hits"`    // 命中次数：含被规则节流、未生成告警的重复命中
-	Muted      int            `json:"muted"`   // 其中未生成告警的命中数（Hits - Alerts）
-	Success    int            `json:"success"` // 疑似攻击成功的告警数
+	Alerts     int            `json:"alerts"`           // 生成的告警条数（受 detect.alerts_per_rule 节流）
+	Hits       int            `json:"hits"`             // 命中次数：含被规则节流、未生成告警的重复命中
+	Muted      int            `json:"muted"`            // 其中未生成告警的命中数（Hits - Alerts）
+	Success    int            `json:"success"`          // 疑似攻击成功（只凭 2xx 或有证据）的告警数
+	Proven     int            `json:"proven,omitempty"` // 其中有第二份证据（响应码之外）的告警数
 	Categories map[string]int `json:"categories"`
 	Phases     map[string]int `json:"phases"`
 	Rules      map[string]int `json:"rules"`       // 规则 → 命中次数（含被节流的重复命中）
@@ -95,6 +96,8 @@ type Incident struct {
 	ClosedSev  model.Severity `json:"closed_severity,omitempty"` // 关闭时的最高等级：之后出现更高等级的告警时自动重新打开
 	// AIFrom 是外部模型判为误报、等级被自动下调前的等级；为 0 表示没有下调
 	AIFrom model.Severity `json:"ai_from,omitempty"`
+	// GradeV 是事件按哪一版定级规则生成，用于升级时修正旧事件的等级
+	GradeV int `json:"grade_v,omitempty"`
 }
 
 // ensureMaps 补全旧快照中缺失的字段。
@@ -135,6 +138,7 @@ type IncidentView struct {
 	Hits       int            `json:"hits"`
 	Muted      int            `json:"muted"`
 	Success    int            `json:"success"`
+	Proven     int            `json:"proven,omitempty"`
 	Categories []string       `json:"categories"`
 	Phases     []string       `json:"phases"`
 	FirstSeen  time.Time      `json:"first_seen"`
@@ -178,7 +182,10 @@ func (i *Incident) view(now time.Time) IncidentView {
 	case len(cats) == 1:
 		title += " · " + cats[0]
 	}
-	if i.Success > 0 {
+	switch {
+	case i.Proven > 0:
+		title += "（有证据证明成功）"
+	case i.Success > 0:
 		title += "（疑似成功）"
 	}
 	var phases []string
@@ -188,7 +195,7 @@ func (i *Incident) view(now time.Time) IncidentView {
 		}
 	}
 	return IncidentView{ID: i.ID, Key: i.Key, Title: title, Location: i.Location, Severity: i.Severity, Status: i.Status, Assignee: i.Assignee,
-		Alerts: i.Alerts, Hits: i.Hits, Muted: i.Muted, Success: i.Success, Categories: cats, Phases: phases, FirstSeen: i.FirstSeen, LastSeen: i.LastSeen,
+		Alerts: i.Alerts, Hits: i.Hits, Muted: i.Muted, Success: i.Success, Proven: i.Proven, Categories: cats, Phases: phases, FirstSeen: i.FirstSeen, LastSeen: i.LastSeen,
 		Created: i.Created, Updated: i.Updated, Due: i.Due, Closed: i.Closed, Overdue: i.active() && now.After(i.Due), AIFrom: i.AIFrom, Notes: len(i.Notes), Assets: rankKeys(i.Assets, 5), AssetLevel: i.AssetLevel}
 }
 
@@ -203,7 +210,8 @@ func (s *Store) attachIncidentLocked(a *model.Alert, p *IPProfile) uint64 {
 		s.nextInc++
 		inc = &Incident{ID: s.nextInc, Key: a.SrcIP, Severity: a.Severity, Status: IncOpen, Categories: map[string]int{}, Phases: map[string]int{},
 			Rules: map[string]int{}, Targets: map[string]int{}, FirstSeen: a.Time, LastSeen: a.Time, Created: now, Updated: now,
-			Due: now.Add(slaFor(a.Severity, a.AssetLevel)), Notes: []IncidentNote{}, AssetLevel: a.AssetLevel}
+			GradeV: gradeVersion,
+			Due:    now.Add(slaFor(a.Severity, a.AssetLevel)), Notes: []IncidentNote{}, AssetLevel: a.AssetLevel}
 		s.incidents[inc.ID] = inc
 		s.incByKey[a.SrcIP] = inc.ID
 		s.evictIncidentsLocked()
@@ -216,6 +224,9 @@ func (s *Store) attachIncidentLocked(a *model.Alert, p *IPProfile) uint64 {
 	incBounded(&inc.RuleAlerts, a.RuleID, maxIncRules)
 	if a.Result == model.ResultSuccess {
 		inc.Success++
+	}
+	if a.Proven {
+		inc.Proven++
 	}
 	incBounded(&inc.Categories, a.Category, 50)
 	incBounded(&inc.Phases, a.Phase, 10)
@@ -237,7 +248,7 @@ func (s *Store) attachIncidentLocked(a *model.Alert, p *IPProfile) uint64 {
 		inc.LastSeen = a.Time
 	}
 	// 模型判为误报而下调的事件：出现成功利用、失陷迹象或比下调前更高的等级时，证据优先，撤销下调
-	if inc.AIFrom != 0 && (a.Severity > inc.AIFrom || a.Result == model.ResultSuccess || risk.CompromiseEvidence(a.Category)) {
+	if inc.AIFrom != 0 && (a.Severity > inc.AIFrom || a.Proven || risk.CompromiseEvidence(a.Category)) {
 		inc.restoreAI(now, "系统", "出现"+a.Severity.Label()+"告警「"+a.Name+"」")
 	}
 	if a.Severity > inc.Severity && inc.AIFrom == 0 {
@@ -260,6 +271,7 @@ func (s *Store) attachIncidentLocked(a *model.Alert, p *IPProfile) uint64 {
 // 全部按「命中」口径累计，避免同一个事件里同时出现告警口径与命中口径两套数字。
 type incidentHit struct {
 	rule, category, phase, target, result string
+	proven                                bool
 	asset                                 *model.AssetRef
 	at                                    time.Time
 }
@@ -283,8 +295,11 @@ func (s *Store) muteIncidentLocked(ip string, h incidentHit) {
 	incBounded(&inc.Phases, h.phase, 10)
 	if h.result == model.ResultSuccess {
 		inc.Success++
+	}
+	if h.proven {
+		inc.Proven++
 		if inc.AIFrom != 0 {
-			inc.restoreAI(time.Now(), "系统", "出现疑似成功的命中")
+			inc.restoreAI(time.Now(), "系统", "出现有证据证明攻击成功的命中")
 		}
 	}
 	if h.asset != nil {
@@ -500,6 +515,8 @@ func intMap(m map[string]int) map[string]int64 {
 
 // IncidentUpdate 是一次处置操作：修改状态、指派与 / 或填写备注（为空的字段不修改）。
 type IncidentUpdate struct {
+	// Mark 是系统动作的说明，写在处置记录最前面（如“已执行处置剧本”），不能由接口提交
+	Mark     string  `json:"-"`
 	Status   string  `json:"status"`
 	Assignee *string `json:"assignee"`
 	Note     string  `json:"note"`
@@ -536,6 +553,7 @@ func (s *Store) UpdateIncidents(ids []uint64, user string, u IncidentUpdate) ([]
 	defer s.mu.Unlock()
 	// 先确认全部事件存在再修改：批量处置中途遇到不存在（已被淘汰）的事件时，前面的事件不能已经被改掉，
 	// 否则接口报错、研判反馈与审计都按失败处理，事件状态却已部分变更。重复的编号只处理一次
+	var touched []*Incident
 	list := make([]*Incident, 0, len(ids))
 	seen := make(map[uint64]bool, len(ids))
 	for _, id := range ids {
@@ -579,10 +597,15 @@ func (s *Store) UpdateIncidents(ids []uint64, user string, u IncidentUpdate) ([]
 			out = append(out, i.view(now))
 			continue
 		}
+		if u.Mark != "" {
+			actions = append([]string{u.Mark}, actions...)
+		}
 		i.Notes = appendNote(i.Notes, IncidentNote{Time: now, User: user, Action: strings.Join(actions, "；"), Text: u.Note})
 		i.Updated = now
 		out = append(out, i.view(now))
+		touched = append(touched, i)
 	}
+	s.journalLocked(touched...)
 	return out, nil
 }
 
@@ -704,7 +727,7 @@ func (s *Store) AIDowngrade(id uint64, reason string) (model.Severity, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	i := s.incidents[id]
-	if i == nil || !i.active() || i.AIFrom != 0 || i.Success > 0 || i.AssetLevel == "core" || i.Severity < model.SevMedium || i.Severity > model.SevHigh {
+	if i == nil || !i.active() || i.AIFrom != 0 || i.Proven > 0 || i.AssetLevel == "core" || i.Severity < model.SevMedium || i.Severity > model.SevHigh {
 		return 0, false
 	}
 	for c := range i.Categories {
@@ -715,7 +738,32 @@ func (s *Store) AIDowngrade(id uint64, reason string) (model.Severity, bool) {
 	from, now := i.Severity, time.Now()
 	i.AIFrom, i.Severity = from, from-1
 	i.Due, i.Reminded = i.Created.Add(slaFor(i.Severity, i.AssetLevel)), false
+	defer s.journalLocked(i)
 	i.Notes = appendNote(i.Notes, IncidentNote{Time: now, User: "系统", Action: "等级由" + from.Label() + "下调为" + i.Severity.Label() + "：" + reason + "；出现成功利用或更高等级的告警时自动恢复，也可人工撤销"})
 	i.Updated = now
 	return from, true
+}
+
+// gradeVersion 是当前的定级规则版本。版本 1 起，只有响应码的“疑似成功”最高为高危。
+const gradeVersion = 1
+
+// migrateGrade 修正旧版本生成的待处理事件：旧规则只凭 2xx 就判严重，而且没有记录证据。
+// 除了失陷迹象类事件，都先回落到高危；之后出现有证据的告警时会升回严重。已关闭的事件保持原样。
+func (i *Incident) migrateGrade(now time.Time) {
+	if i.GradeV >= gradeVersion {
+		return
+	}
+	i.GradeV = gradeVersion
+	if !i.active() || i.Severity < model.SevCritical {
+		return
+	}
+	for c := range i.Categories {
+		if risk.CompromiseEvidence(c) {
+			return
+		}
+	}
+	i.Severity = model.SevHigh
+	i.Due, i.Reminded = i.Created.Add(slaFor(i.Severity, i.AssetLevel)), false
+	i.Notes = appendNote(i.Notes, IncidentNote{Time: now, User: "系统", Action: "定级规则升级：严重需要响应码之外的证据，等级由严重调整为高危；出现有证据的告警时自动升回"})
+	i.Updated = now
 }

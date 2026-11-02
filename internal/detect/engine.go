@@ -1,8 +1,11 @@
 package detect
 
 import (
+	"fmt"
+	"regexp"
 	"strings"
 	"sync"
+	"unicode"
 
 	"netsa/internal/geo"
 	"netsa/internal/model"
@@ -46,9 +49,31 @@ type Engine struct {
 }
 
 func NewEngine(rulesFile string, successMinBytes int64) (*Engine, error) {
+	return NewEngineWith(rulesFile, nil, successMinBytes)
+}
+
+// NewEngineWith 在内置规则和规则文件之外，加上页面维护的规则。这些规则不能覆盖已有规则：
+// 覆盖内置规则请用规则文件，它是可以审查的配置。
+func NewEngineWith(rulesFile string, extra []Rule, successMinBytes int64) (*Engine, error) {
 	rules, err := LoadRules(rulesFile)
 	if err != nil {
 		return nil, err
+	}
+	seen := make(map[string]bool, len(rules)+len(extra))
+	for _, r := range rules {
+		seen[r.ID] = true
+	}
+	for i := range extra {
+		r := extra[i]
+		if seen[r.ID] {
+			return nil, fmt.Errorf("规则 ID %s 已存在", r.ID)
+		}
+		seen[r.ID] = true
+		r.Methods = append([]string(nil), r.Methods...)
+		if err := r.compile(); err != nil {
+			return nil, err
+		}
+		rules = append(rules, &r)
 	}
 	e := &Engine{rules: rules, minBytes: successMinBytes}
 	// 收集所有规则的预过滤字面量并编号，构建 Aho-Corasick 自动机
@@ -87,6 +112,26 @@ func NewEngine(rulesFile string, successMinBytes int64) (*Engine, error) {
 	return e, nil
 }
 
+// TestRule 用样本试运行一条规则：样本按检测时相同的方式归一化。返回是否命中和证据。
+func TestRule(r Rule, sample string) (bool, string, error) {
+	r.Methods = append([]string(nil), r.Methods...)
+	if err := r.compile(); err != nil {
+		return false, "", err
+	}
+	text := Normalize(sample)
+	switch segOf(r.Target) {
+	case segPath:
+		text, _, _ = strings.Cut(text, "?")
+	case segUA:
+		text = strings.ToLower(sample)
+	}
+	loc := r.re.FindStringIndex(text)
+	if loc == nil {
+		return false, "", nil
+	}
+	return true, excerpt(text, loc[0], loc[1]), nil
+}
+
 // Rules 返回已加载的规则列表。
 func (e *Engine) Rules() []*Rule { return e.rules }
 
@@ -113,7 +158,7 @@ func (e *Engine) Inspect(ev *model.Event) []model.Hit {
 		before := hits[i].Severity
 		risk.Finalize(&hits[i])
 		// 只在等级被下调时写入说明：上调（分类底线）是常态，写进证据会让页面变得嘈杂
-		if hits[i].Severity < before {
+		if hits[i].Severity < before && hits[i].Result != model.ResultPassed && hits[i].Result != model.ResultSuccess {
 			if d := risk.Describe(&hits[i], before); d != "" {
 				hits[i].Evidence = Printable(hits[i].Evidence+"（"+d+"）", 400)
 			}
@@ -228,6 +273,9 @@ func (e *Engine) inspectWeb(ev *model.Event) []model.Hit {
 			}
 			start, end = loc[0], loc[1]
 		}
+		if r.ID == "trav-dotdot" && !strings.Contains(uri[len(path):], "..") && harmlessDotDot(ev.URI) {
+			continue
+		}
 		h := model.Hit{
 			RuleID: r.ID, Name: r.Name, Category: r.Category, Severity: r.sev, Phase: r.Phase,
 			Evidence: excerpt(text, start, end), Result: result, TagOnly: r.TagOnly,
@@ -235,9 +283,69 @@ func (e *Engine) inspectWeb(ev *model.Event) []model.Hit {
 		if result == model.ResultSuccess && !risk.ResponseProvable(r.Category) {
 			h.Result = model.ResultPassed
 		}
+		if seg == segURI && !r.TagOnly && proseCategory[r.Category] && inertProse(uri, start, end) {
+			h.Weak = true
+			if h.Result == model.ResultSuccess {
+				h.Result = model.ResultPassed
+			}
+		}
 		hits = append(hits, h)
 	}
 	return append(hits, specialWebChecks(ev, uri, result)...)
+}
+
+// harmlessDotDot 判断路径中的 ../ 是否只是普通的相对路径：字面写在路径里（没有编码）、解析后没有越出
+// 站点根目录。如 /assets/../assets/app.js，来自页面里的相对引用，不是目录穿越。查询串里的 ../ 由调用方排除。
+// 解析后指向敏感文件的情况由 lfi-sensitive 等规则单独判断。
+func harmlessDotDot(uri string) bool {
+	path, _, _ := strings.Cut(uri, "?")
+	if strings.ContainsAny(path, `%\;`) {
+		return false
+	}
+	depth := 0
+	for _, seg := range strings.Split(path, "/") {
+		switch seg {
+		case "", ".":
+		case "..":
+			if depth--; depth < 0 {
+				return false
+			}
+		default:
+			depth++
+		}
+	}
+	return true
+}
+
+// proseCategory 是特征可能出现在普通文字中的分类（文章标题、搜索词），其余分类的特征本身就不是自然语言。
+var proseCategory = map[string]bool{CatXSS: true, CatCmdExec: true, CatSQLi: true}
+
+// inertToken 是只被提到、不会执行的写法：不带属性的标签、没有参数的函数名。phpinfo() 没有参数也能执行，不在其中。
+var inertToken = regexp.MustCompile(`</?\s*(script|iframe|frame|svg|object|embed|form|meta|base|applet|math|details|marquee)\s*>|\b(eval|assert|system|exec|shell_exec|passthru|popen|alert|prompt|confirm)\s*\(\s*\)`)
+
+// inertProse 判断命中位置所在的参数值是否只是普通文字：去掉只被提到的写法后，剩下的至少有两个词，
+// 且没有任何代码或注入需要的符号。如“how to use <script> tag”；而 <script>alert(1)</script>、
+// system('id') 都留有符号，不受影响。
+func inertProse(uri string, start, end int) bool {
+	q := strings.IndexByte(uri, '?')
+	if q < 0 || start <= q {
+		return false
+	}
+	from := q + 1 + strings.LastIndexByte(uri[q+1:start], '&') + 1
+	to := len(uri)
+	if i := strings.IndexByte(uri[end:], '&'); i >= 0 {
+		to = end + i
+	}
+	eq := strings.IndexByte(uri[from:to], '=')
+	if eq < 0 || from+eq >= start {
+		return false
+	}
+	value := uri[from+eq+1 : to]
+	rest := inertToken.ReplaceAllString(value, " ")
+	if rest == value || strings.ContainsAny(rest, "<>'\"`;(){}[]$|&=\\/%*#@") {
+		return false
+	}
+	return len(strings.FieldsFunc(rest, func(r rune) bool { return !unicode.IsLetter(r) && !unicode.IsDigit(r) })) >= 2
 }
 
 // excerpt 截取命中位置附近的上下文作为证据。
@@ -283,6 +391,8 @@ func specialWebChecks(ev *model.Event, uri, result string) []model.Hit {
 		add("proto-proxy", "开放代理探测", CatProtocol, model.SevMedium, model.PhaseRecon, Printable(raw, 120))
 	case ev.Method == "PUT" && (hasScriptExt(uri) || strings.HasSuffix(uri, ".jsp/") || strings.Contains(uri, ".jsp::$data")):
 		add("cve-put-upload", "PUT上传WebShell(CVE-2017-12615等)", CatCVE, model.SevCritical, model.PhaseExploit, ev.Method+" "+Printable(raw, 120))
+		// 201 / 204 表示服务器确实创建了这个脚本文件，响应码本身就是证据
+		hits[len(hits)-1].Proven = ev.Status == 201 || ev.Status == 204
 	case ev.Method == "TRACE" || ev.Method == "TRACK":
 		add("proto-trace", "HTTP TRACE方法探测", CatProtocol, model.SevLow, model.PhaseRecon, ev.Method+" "+Printable(raw, 80))
 	case ev.Method == "PROPFIND" || ev.Method == "MKCOL" || ev.Method == "MOVE" || ev.Method == "COPY" || ev.Method == "SEARCH":
@@ -497,6 +607,7 @@ func deviceThreatHit(ev *model.Event) model.Hit {
 	if ev.ThreatCategory != "" {
 		evidence += "（" + Printable(ev.ThreatCategory, 60) + "）"
 	}
+	// 设备看到了完整的流量内容，放行时它给出的等级就是响应码之外的独立判断
 	return model.Hit{RuleID: "dev-" + ev.Format, Name: "设备告警: " + Printable(name, 80), Category: cat,
-		Severity: threatSeverity(ev.ThreatSeverity), Phase: phase, Evidence: evidence + " → " + ev.Target(), Result: result}
+		Severity: threatSeverity(ev.ThreatSeverity), Phase: phase, Evidence: evidence + " → " + ev.Target(), Result: result, Proven: result == model.ResultPassed}
 }

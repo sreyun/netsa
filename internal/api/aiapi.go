@@ -5,6 +5,7 @@ import (
 	"errors"
 	"log"
 	"net/http"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -30,7 +31,7 @@ func (s *Server) incidentFacts(d *store.IncidentDetail, m *ai.Masker) string {
 	line("攻击来源", d.Key+"（"+d.Location+"）")
 	line("等级 / 状态", d.Severity.Label()+" / "+store.IncidentStatusLabel[d.Status])
 	line("时间", d.FirstSeen.In(loc).Format("2006-01-02 15:04:05")+" ~ "+d.LastSeen.In(loc).Format("2006-01-02 15:04:05"))
-	line("规模", "告警 "+strconv.Itoa(d.Alerts)+" 条，命中 "+strconv.Itoa(d.Hits)+" 次，疑似成功 "+strconv.Itoa(d.Success)+" 次")
+	line("规模", "告警 "+strconv.Itoa(d.Alerts)+" 条，命中 "+strconv.Itoa(d.Hits)+" 次，疑似成功 "+strconv.Itoa(d.Success)+" 次（其中有证据 "+strconv.Itoa(d.Proven)+" 次）")
 	line("攻击类型", strings.Join(d.Categories, "、"))
 	line("攻击阶段", strings.Join(d.Phases, "、"))
 	line("涉及资产", strings.Join(d.Assets, "、")+" "+d.AssetLevel)
@@ -106,7 +107,7 @@ func (s *Server) incidentFacts(d *store.IncidentDetail, m *ai.Masker) string {
 		// 地址的前几段会原样发给外部模型；按字符截断，不产生非法 UTF-8
 		ev := clipRunes(m.Mask(a.Evidence), 300)
 		ua := clipRunes(m.Mask(a.UA), 120)
-		sb.WriteString("- " + a.Time.In(loc).Format("01-02 15:04:05") + " " + a.RuleID + " " + a.Name + " [" + a.Severity.Label() + "/" + a.Result + "] 目标 " +
+		sb.WriteString("- " + a.Time.In(loc).Format("01-02 15:04:05") + " " + a.RuleID + " " + a.Name + " [" + a.Severity.Label() + "/" + a.Result + proofTag(a.Proven) + "] 目标 " +
 			m.Mask(a.Target) + " | 证据 " + ev)
 		if ua != "" {
 			sb.WriteString(" | UA " + ua)
@@ -114,6 +115,14 @@ func (s *Server) incidentFacts(d *store.IncidentDetail, m *ai.Masker) string {
 		sb.WriteString("\n")
 	}
 	return sb.String()
+}
+
+// proofTag 标注告警是否有响应码之外的成功证据。
+func proofTag(proven bool) string {
+	if proven {
+		return "/有证据"
+	}
+	return ""
 }
 
 // clipRunes 按字符截断到最多 n 个字符（不截断多字节字符）。
@@ -218,23 +227,84 @@ func (s *Server) incidentAI(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// aiTick 由后台任务每分钟调用：开启 ai.auto_triage 时，对新出现的高危及以上待处理事件自动研判（每轮最多 3 个，受每小时上限约束）。
+// maxAIQueue 是批量研判队列的长度上限，与批量处置一次最多 500 个事件保持一致。
+const maxAIQueue = 500
+
+// incidentAIBatch 把选中的事件加入后台研判队列（运营分析员以上）。模型一次研判可能要几十秒，
+// 不能在一个请求里等完；队列由 aiTick 消费，受每小时调用上限约束。
+func (s *Server) incidentAIBatch(w http.ResponseWriter, r *http.Request) {
+	if !s.AI.Enabled() {
+		writeError(w, http.StatusNotFound, ai.ErrDisabled.Error())
+		return
+	}
+	var form struct {
+		IDs []uint64 `json:"ids"`
+	}
+	if !decodeForm(w, r, &form) {
+		return
+	}
+	if len(form.IDs) == 0 || len(form.IDs) > maxAIQueue {
+		writeError(w, http.StatusBadRequest, "一次选择 1 到 "+strconv.Itoa(maxAIQueue)+" 个事件")
+		return
+	}
+	s.aiQueueMu.Lock()
+	queued := map[uint64]bool{}
+	for _, id := range s.aiQueue {
+		queued[id] = true
+	}
+	added := 0
+	for _, id := range form.IDs {
+		if queued[id] || len(s.aiQueue) >= maxAIQueue || s.Store.Incident(id) == nil {
+			continue
+		}
+		queued[id] = true
+		s.aiQueue = append(s.aiQueue, id)
+		added++
+	}
+	pending := len(s.aiQueue)
+	s.aiQueueMu.Unlock()
+	s.audit(r, "批量 AI 研判", "加入队列 "+strconv.Itoa(added)+" 个事件", nil)
+	writeJSON(w, map[string]any{"queued": added, "pending": pending, "per_tick": aiPerTick})
+}
+
+// aiPerTick 是后台每分钟最多研判的事件数。
+const aiPerTick = 3
+
+// takeAIQueue 取出队列前面最多 n 个事件。
+func (s *Server) takeAIQueue(n int) []uint64 {
+	s.aiQueueMu.Lock()
+	defer s.aiQueueMu.Unlock()
+	n = min(n, len(s.aiQueue))
+	out := append([]uint64(nil), s.aiQueue[:n]...)
+	s.aiQueue = s.aiQueue[n:]
+	return out
+}
+
+// aiTick 由后台任务每分钟调用：先处理批量研判队列；开启 ai.auto_triage 时，再对新出现的高危及以上
+// （可扩大到中危）待处理事件自动研判。每轮最多 3 个，受每小时上限约束。
 // 研判在单独的协程中进行，不阻塞其他后台任务。
 func (s *Server) aiTick(ctx context.Context) {
-	if !s.AI.AutoTriage() || !s.aiBusy.CompareAndSwap(false, true) {
+	if !s.AI.Enabled() || !s.aiBusy.CompareAndSwap(false, true) {
 		return
 	}
 	if s.aiDone == nil {
 		s.aiDone = map[uint64]bool{}
 	}
-	list, _, _ := s.Store.Incidents(store.IncidentQuery{Status: "active", MinSeverity: model.SevHigh, Limit: 50})
-	var todo []uint64
-	for _, v := range list {
-		if len(todo) == 3 {
-			break
+	todo := s.takeAIQueue(aiPerTick)
+	if s.AI.AutoTriage() && len(todo) < aiPerTick {
+		minSev := model.SevHigh
+		if s.AI.AutoTriageMedium() {
+			minSev = model.SevMedium
 		}
-		if time.Since(v.Created) < 24*time.Hour && !s.aiDone[v.ID] {
-			todo = append(todo, v.ID)
+		// 列表按等级从高到低排序，严重的事件优先研判
+		list, _, _ := s.Store.Incidents(store.IncidentQuery{Status: "active", MinSeverity: minSev, Limit: 50})
+		for _, v := range list {
+			if len(todo) == aiPerTick {
+				break
+			}
+			if time.Since(v.Created) < 24*time.Hour && !s.aiDone[v.ID] && !slices.Contains(todo, v.ID) {
+				todo = append(todo, v.ID)
+			}
 		}
 	}
 	if len(todo) == 0 {
@@ -261,7 +331,7 @@ func (s *Server) aiTick(ctx context.Context) {
 			if errors.Is(err, ai.ErrRateLimited) {
 				return
 			}
-			if err != nil {
+			if err != nil && !errors.Is(err, store.ErrNoIncident) {
 				log.Printf("[ai] 自动研判事件 #%d 失败: %v", id, err)
 			}
 		}

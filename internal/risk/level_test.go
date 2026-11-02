@@ -1,6 +1,7 @@
 package risk
 
 import (
+	"strings"
 	"testing"
 
 	"netsa/internal/model"
@@ -34,18 +35,43 @@ func TestFinalize(t *testing.T) {
 			want: model.SevHigh,
 		},
 		{
-			name: "未拦截的漏洞利用：维持规则声明的严重",
+			name: "未拦截的漏洞利用：没有第二份证据只到高危",
 			hit:  model.Hit{Category: "已知漏洞利用", Severity: model.SevCritical, Result: model.ResultPassed},
+			want: model.SevHigh,
+		},
+		{
+			name: "未拦截的漏洞利用：有第二份证据维持严重",
+			hit:  model.Hit{Category: "已知漏洞利用", Severity: model.SevCritical, Result: model.ResultPassed, Proven: true},
 			want: model.SevCritical,
 		},
 		{
-			name: "成功利用：规则只写高危也升为严重",
-			hit:  model.Hit{Category: "SQL注入", Severity: model.SevHigh, Result: model.ResultSuccess},
+			name: "只有响应码的疑似成功：规则写严重也只到高危",
+			hit:  model.Hit{Category: "SQL注入", Severity: model.SevCritical, Result: model.ResultSuccess},
+			want: model.SevHigh,
+		},
+		{
+			name: "有第二份证据的成功利用：规则只写高危也升为严重",
+			hit:  model.Hit{Category: "SQL注入", Severity: model.SevHigh, Result: model.ResultSuccess, Proven: true},
 			want: model.SevCritical,
 		},
 		{
-			name: "盲打类（表达式注入）成功：同样升为严重",
-			hit:  model.Hit{Category: "表达式注入", Severity: model.SevHigh, Result: model.ResultSuccess},
+			name: "日志直接证明的成功（暴力破解后登录）：不需要第二份证据",
+			hit:  model.Hit{Category: "暴力破解", Severity: model.SevCritical, Result: model.ResultSuccess},
+			want: model.SevCritical,
+		},
+		{
+			name: "自由文本中的弱特征：不按底线抬升，最高低危",
+			hit:  model.Hit{Category: "XSS跨站脚本", Severity: model.SevHigh, Result: model.ResultPassed, Weak: true},
+			want: model.SevLow,
+		},
+		{
+			name: "兜底页面返回的 200：底线放宽一级",
+			hit:  model.Hit{Category: "WebShell后门", Severity: model.SevMedium, Result: model.ResultPassed, Disproven: true},
+			want: model.SevMedium,
+		},
+		{
+			name: "盲打类（表达式注入）成功：有证据同样升为严重",
+			hit:  model.Hit{Category: "表达式注入", Severity: model.SevHigh, Result: model.ResultSuccess, Proven: true},
 			want: model.SevCritical,
 		},
 		{
@@ -99,9 +125,14 @@ func TestFinalize(t *testing.T) {
 			want: model.SevMedium,
 		},
 		{
-			name: "自学习下调但响应证明利用成功：仍升为严重",
-			hit:  model.Hit{Category: "SQL注入", Severity: model.SevMedium, Result: model.ResultSuccess, Learned: -1},
+			name: "自学习下调但有证据证明利用成功：仍升为严重",
+			hit:  model.Hit{Category: "SQL注入", Severity: model.SevMedium, Result: model.ResultSuccess, Learned: -1, Proven: true},
 			want: model.SevCritical,
+		},
+		{
+			name: "自学习下调且只有响应码：校准生效",
+			hit:  model.Hit{Category: "SQL注入", Severity: model.SevMedium, Result: model.ResultSuccess, Learned: -1},
+			want: model.SevMedium,
 		},
 		{
 			name: "自学习下调的低危底线分类：不低于低危",
@@ -116,7 +147,7 @@ func TestFinalize(t *testing.T) {
 		{
 			name: "越界等级：收敛到合法区间而不是让后续数组越界",
 			hit:  model.Hit{Category: "自定义规则", Severity: model.Severity(9), Result: model.ResultPassed},
-			want: model.SevCritical,
+			want: model.SevHigh,
 		},
 		{
 			name: "设备判定严重但已被拦截：按高危处置",
@@ -182,5 +213,75 @@ func TestAdjustmentsRecorded(t *testing.T) {
 	}
 	if got <= before[[2]model.Severity{model.SevCritical, model.SevHigh}] {
 		t.Fatalf("等级调整未被计数: %d", got)
+	}
+}
+
+// 等级调整的说明写在告警证据里，分析员据此判断为什么是这个等级。
+func TestDescribe(t *testing.T) {
+	cases := []struct {
+		name   string
+		hit    model.Hit
+		before model.Severity
+		want   string
+	}{
+		{"没有调整", model.Hit{Severity: model.SevHigh}, model.SevHigh, ""},
+		{"有证据升为严重", model.Hit{Severity: model.SevCritical, Result: model.ResultSuccess}, model.SevHigh, "有证据"},
+		{"底线抬升", model.Hit{Severity: model.SevHigh}, model.SevLow, "底线"},
+		{"标签", model.Hit{Severity: model.SevLow, TagOnly: true}, model.SevHigh, "标签"},
+		{"普通文字", model.Hit{Severity: model.SevLow, Weak: true}, model.SevHigh, "普通文字"},
+		{"只有响应码", model.Hit{Severity: model.SevHigh, Result: model.ResultSuccess}, model.SevCritical, "只有响应码"},
+		{"已拦截", model.Hit{Severity: model.SevHigh, Result: model.ResultBlocked}, model.SevCritical, "拦截"},
+		{"失败", model.Hit{Severity: model.SevHigh, Result: model.ResultFailed}, model.SevCritical, "未成功"},
+		{"后端异常", model.Hit{Severity: model.SevHigh, Result: model.ResultError}, model.SevCritical, "未成功"},
+		{"缺少证据", model.Hit{Severity: model.SevHigh, Result: model.ResultPassed}, model.SevCritical, "缺少成功证据"},
+	}
+	for _, c := range cases {
+		got := Describe(&c.hit, c.before)
+		if (c.want == "") != (got == "") || !strings.Contains(got, c.want) {
+			t.Errorf("%s: %q，期望包含 %q", c.name, got, c.want)
+		}
+	}
+	if Describe(nil, model.SevHigh) != "" {
+		t.Error("nil 命中应返回空")
+	}
+	Finalize(nil) // 不应崩溃
+}
+
+func TestCategoryPredicates(t *testing.T) {
+	if Floor("SQL注入") != model.SevHigh || Floor("不存在的分类") != model.SevInfo {
+		t.Error("分类底线")
+	}
+	if !ResponseProvable("SQL注入") || ResponseProvable("SSRF") {
+		t.Error("响应可判定的分类")
+	}
+	if !SuccessEscalates("SSRF") || SuccessEscalates("敏感文件探测") {
+		t.Error("可升级的分类")
+	}
+	if !CompromiseEvidence("带外探测") || CompromiseEvidence("SQL注入") {
+		t.Error("失陷迹象分类")
+	}
+}
+
+// 证据改变不了已拦截的结果：严重级准入和结果封顶的顺序不能颠倒。
+func TestProvenCannotOverrideBlocked(t *testing.T) {
+	for _, r := range []string{model.ResultBlocked, model.ResultFailed, model.ResultError} {
+		h := model.Hit{Category: "SQL注入", Severity: model.SevCritical, Result: r, Proven: true}
+		Finalize(&h)
+		if h.Severity != model.SevHigh {
+			t.Errorf("%s 不应达到严重: %s", r, h.Severity)
+		}
+	}
+	// 幂等：多次裁决结果不变
+	h := model.Hit{Category: "SQL注入", Severity: model.SevHigh, Result: model.ResultSuccess, Proven: true}
+	Finalize(&h)
+	Finalize(&h)
+	if h.Severity != model.SevCritical {
+		t.Errorf("应保持严重: %s", h.Severity)
+	}
+	w := model.Hit{Category: "XSS跨站脚本", Severity: model.SevCritical, Result: model.ResultPassed, Weak: true}
+	Finalize(&w)
+	Finalize(&w)
+	if w.Severity != model.SevLow {
+		t.Errorf("弱特征应保持低危: %s", w.Severity)
 	}
 }
