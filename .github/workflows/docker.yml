@@ -202,7 +202,7 @@ jobs:
       - name: 漏洞扫描
         id: trivy
         continue-on-error: true
-        uses: aquasecurity/trivy-action@0.28.0
+        uses: aquasecurity/trivy-action@v0.36.0
         with:
           image-ref: netsa:smoke
           format: table
@@ -214,7 +214,7 @@ jobs:
       - name: 生成 SBOM
         id: sbom
         continue-on-error: true
-        uses: anchore/sbom-action@v0
+        uses: anchore/sbom-action@v0.24.3
         with:
           image: netsa:smoke
           format: spdx-json
