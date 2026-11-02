@@ -136,7 +136,7 @@ func CompromiseEvidence(category string) bool { return compromiseEvidence[catego
 //  4. 标签命中：仅打标签的观察不超过低危。
 //
 // 判定顺序即优先级：结果封顶在成功升级之后，保证「已拦截」永远不会因规则声明为
-// critical 而继续标为严重；标签降级最后执行，保证 tag_only 规则不会因分类底线反弹。
+// critical 而继续标为严重；标签命中不参与底线抬升且最后封顶，保证 tag_only 规则不会因分类底线反弹。
 func Finalize(h *model.Hit) {
 	if h == nil {
 		return
@@ -151,7 +151,9 @@ func Finalize(h *model.Hit) {
 	if sev > model.SevCritical {
 		sev = model.SevCritical
 	}
-	if f := catFloor[h.Category]; sev < f {
+	// 底线只用于防止告警被漏配降级；仅打标签的观察不生成告警，不按底线抬升，
+	// 否则空 UA、未到达服务的探测等弱特征永远到不了信息级，等级调整计数也会被这类常态流量淹没
+	if f := catFloor[h.Category]; sev < f && !h.TagOnly {
 		sev = f
 	}
 

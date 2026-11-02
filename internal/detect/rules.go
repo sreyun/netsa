@@ -93,11 +93,16 @@ func (r *Rule) compile() error {
 		return fmt.Errorf("规则 %s 的 severity %q 无法识别（可选 info/low/medium/high/critical）", r.ID, r.Severity)
 	}
 	r.sev = sev
-	// 低于分类底线的声明在加载阶段纠正并输出告警，便于发现配置错误
-	if f := risk.Floor(r.Category); sev < f {
+	// 低于分类底线的声明在加载阶段纠正并输出告警，便于发现配置错误；
+	// 仅打标签的规则不生成告警，与统一裁决（risk.Finalize）一致：不按底线抬升，最高为低危
+	if f := risk.Floor(r.Category); sev < f && !r.TagOnly {
 		log.Printf("[detect] 规则 %s（%s）声明的等级 %s 低于分类底线，已提升为 %s",
 			r.ID, r.Category, sev, f)
 		r.sev = f
+	}
+	if r.TagOnly && sev > model.SevLow {
+		log.Printf("[detect] 规则 %s 仅打标签，声明的等级 %s 已按低危处理", r.ID, sev)
+		r.sev = model.SevLow
 	}
 	// 对外暴露的等级统一为「最终生效值」：/api/rules 与界面展示的等级必须与实际检测一致，
 	// 否则排查时会看到规则写 low、告警却是 high，产生口径分歧。
@@ -150,14 +155,14 @@ var builtinRules = []Rule{
 	// ---------------- SQL 注入 ----------------
 	rule("sqli-union", "UNION联合查询注入", CatSQLi, "high", ex, "uri", `\bunion\s+(all\s+|distinct\s+)?\(?\s*select\b`),
 	rule("sqli-bool", "布尔盲注", CatSQLi, "high", ex, "uri", `['"\)]\s*(and|or|xor|&&|\|\|)\s*['"\(]?\s*\w+\s*['"\)]?\s*(=|<|>|\blike\b|\brlike\b|\bregexp\b)\s*['"\(]?\s*\w+`),
-	rule("sqli-bool-num", "数字型布尔注入", CatSQLi, "medium", ex, "uri", `[=\s]\d+\s+(and|or|xor)\s+\d+\s*(=|<|>)\s*\d+`),
+	rule("sqli-bool-num", "数字型布尔注入", CatSQLi, "high", ex, "uri", `[=\s]\d+\s+(and|or|xor)\s+\d+\s*(=|<|>)\s*\d+`),
 	rule("sqli-time", "时间盲注", CatSQLi, "high", ex, "uri", `\b(sleep|pg_sleep)\s*\(\s*\d|\bbenchmark\s*\(\s*\d|waitfor\s+delay\s+['"]|dbms_pipe\.receive_message|dbms_lock\.sleep`),
 	rule("sqli-error", "报错注入", CatSQLi, "high", ex, "uri", `\b(extractvalue|updatexml|geometrycollection|multipoint|polygon|linestring|exp)\s*\(.*(select|concat|0x7e|~)|floor\s*\(\s*rand\s*\(`),
 	rule("sqli-schema", "数据库元数据探测", CatSQLi, "high", ex, "uri", `\b(information_schema|mysql\.(user|db)|pg_(catalog|shadow|user)|sqlite_master|sys\.(objects|tables|databases)|sysobjects|syscolumns|all_tables|user_tables|msysobjects)\b`),
 	rule("sqli-danger", "危险数据库操作(写文件/执行命令)", CatSQLi, "critical", ex, "uri", `\b(xp_cmdshell|sp_oacreate|sp_configure)\b|load_file\s*\(|into\s+(out|dump)file\b|\blo_import\b|copy\s+\S+\s+from\s+program\b`),
 	rule("sqli-stacked", "堆叠查询注入", CatSQLi, "high", ex, "uri", `['"\d\)]\s*;\s*(drop|alter|create|truncate|insert|update|delete|exec|execute|declare|shutdown)\b`),
-	rule("sqli-func", "SQL函数注入特征", CatSQLi, "medium", ex, "uri", `\b(concat(_ws)?|group_concat|char|chr|substr(ing)?|ascii|ord|hex|unhex|mid|version|database|schema|current_user)\s*\(.*\bselect\b|@@(version|datadir|hostname|basedir)\b|\bselect\b.+\bfrom\b.+\bwhere\b`),
-	rule("sqli-comment", "SQL注释截断", CatSQLi, "medium", ex, "uri", `['"\)]\s*(--|#)(\s|$|-|\+)`),
+	rule("sqli-func", "SQL函数注入特征", CatSQLi, "high", ex, "uri", `\b(concat(_ws)?|group_concat|char|chr|substr(ing)?|ascii|ord|hex|unhex|mid|version|database|schema|current_user)\s*\(.*\bselect\b|@@(version|datadir|hostname|basedir)\b|\bselect\b.+\bfrom\b.+\bwhere\b`),
+	rule("sqli-comment", "SQL注释截断", CatSQLi, "high", ex, "uri", `['"\)]\s*(--|#)(\s|$|-|\+)`),
 
 	// ---------------- XSS ----------------
 	rule("xss-script", "Script标签注入", CatXSS, "high", ex, "uri", `<\s*/?\s*script\b`),
@@ -167,11 +172,11 @@ var builtinRules = []Rule{
 	rule("xss-dom", "DOM/JS执行特征", CatXSS, "medium", ex, "uri", `document\.(cookie|domain|write|location)|window\.location|\b(alert|prompt|confirm)\s*(\(|`+"`"+`)|string\.fromcharcode|expression\s*\(|\bsrcdoc\s*=`),
 
 	// ---------------- 目录穿越 / 文件包含 ----------------
-	rule("trav-dotdot", "目录穿越", CatTraversal, "medium", ex, "uri", `\.\.[/\\]`),
+	rule("trav-dotdot", "目录穿越", CatTraversal, "high", ex, "uri", `\.\.[/\\]`),
 	rule("lfi-sensitive", "读取系统敏感文件", CatTraversal, "high", ex, "uri", `/etc/(passwd|shadow|group|hosts|issue|crontab|sudoers|ssh/)|/proc/(self|\d+)/(environ|cmdline|fd|maps|status)|c:[/\\]+windows|\\windows\\|win\.ini|boot\.ini|system32[/\\]|/var/log/(auth|secure|apache|nginx|httpd)|/root/\.|/home/[^/]+/\.ssh`),
 	rule("lfi-wrapper", "伪协议文件包含", CatTraversal, "high", ex, "uri", `\b(php|zip|phar|expect|glob|compress\.zlib|ogg|rar|ssh2)://|\bdata://|\bfile://`),
-	rule("rfi", "远程文件包含", CatTraversal, "medium", ex, "uri", `[?&](file|page|path|include|inc|template|tpl|dir|document|folder|root|lang|module)=\s*(https?|ftps?)://`),
-	rule("null-byte", "空字节截断", CatTraversal, "medium", ex, "uri", `\x00`),
+	rule("rfi", "远程文件包含", CatTraversal, "high", ex, "uri", `[?&](file|page|path|include|inc|template|tpl|dir|document|folder|root|lang|module)=\s*(https?|ftps?)://`),
+	rule("null-byte", "空字节截断", CatTraversal, "high", ex, "uri", `\x00`),
 
 	// ---------------- 命令 / 代码执行 ----------------
 	rule("cmd-inject", "系统命令注入", CatCmdExec, "high", ex, "uri", `(;|\|\|?|&&|\$\(|`+"`"+`)\s*(id|whoami|uname|cat|ls|dir|wget|curl|tftp|nc|ncat|netcat|bash|sh|zsh|ping|nslookup|dig|echo|chmod|chown|rm|python[23]?|perl|php|ruby|powershell|cmd|certutil|bitsadmin|telnet|busybox|ifconfig|ipconfig|net|systeminfo|tasklist|ps|hostname|sleep)(\s|$|[;|&)<>]|`+"`"+`)`),
@@ -190,7 +195,7 @@ var builtinRules = []Rule{
 	// ---------------- SSRF / XXE / 反序列化 ----------------
 	rule("ssrf-metadata", "云元数据访问(SSRF)", CatSSRF, "high", ex, "uri", `169\.254\.169\.254|metadata\.google\.internal|100\.100\.100\.200|metadata\.tencentyun\.com|/latest/meta-data|/computemetadata/`),
 	rule("ssrf-proto", "危险协议SSRF", CatSSRF, "high", ex, "uri", `\b(gopher|dict|ldaps?|tftp|jar|netdoc|sftp)://`),
-	rule("ssrf-internal", "内网地址SSRF探测", CatSSRF, "medium", ex, "uri", `[?&][^=&]*=\s*(https?://)?(127\.0\.0\.1|localhost|0\.0\.0\.0|\[::1?\]|0x7f|2130706433|10\.\d{1,3}\.\d{1,3}\.\d{1,3}|192\.168\.\d{1,3}\.\d{1,3}|172\.(1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3})(:\d+)?([/?#&]|$)`),
+	rule("ssrf-internal", "内网地址SSRF探测", CatSSRF, "high", ex, "uri", `[?&][^=&]*=\s*(https?://)?(127\.0\.0\.1|localhost|0\.0\.0\.0|\[::1?\]|0x7f|2130706433|10\.\d{1,3}\.\d{1,3}\.\d{1,3}|192\.168\.\d{1,3}\.\d{1,3}|172\.(1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3})(:\d+)?([/?#&]|$)`),
 	rule("xxe", "XML外部实体注入", CatXXE, "high", ex, "uri", `<!entity|<!doctype[^>]*\[|\bsystem\s+['"](file|http|ftp|php|expect|jar)|xmlns:xi=|<xi:include`),
 	rule("deser-fastjson", "Fastjson反序列化", CatDeser, "critical", ex, "uri", `"?@type"?\s*:\s*"(com\.sun|org\.apache|java\.|com\.alibaba|br\.com|org\.springframework|ch\.qos|com\.mchange|org\.hibernate)`),
 	rule("deser-generic", "反序列化载荷", CatDeser, "high", ex, "uri", `\bro0ab|aced0005|\bysoserial\b|com\.sun\.rowset\.jdbcrowsetimpl|org\.apache\.commons\.collections|templatesimpl|\$\$bcel\$\$|o:\d+:"[a-z_\\]+":\d+:\{`),

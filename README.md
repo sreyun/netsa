@@ -58,6 +58,8 @@ docker compose logs -f netsa
 - **权限**：容器以非 root 用户（uid 10001）运行，并加入 `adm` 组（gid 4）以读取 nginx 日志；宿主机日志权限不同时，调整 `group_add` 或日志文件权限。
 - **日志必须以目录方式挂载**：logrotate 轮转会创建新文件，单文件挂载会一直指向旧文件。
 - **保留设备真实源地址**：多台设备共用 syslog 端口、需要在发送端管理中按设备地址区分时，可把服务改为 `network_mode: host`。
+- **端口被占用**：启动时报 `Bind for 0.0.0.0:8080 failed: port is already allocated`，说明宿主机上已有程序（例如同机运行的[演示环境](#演示环境)）占用了该端口。在 `.env` 中设置 `NETSA_HTTP_PORT=8081`（syslog 端口冲突时设置 `NETSA_SYSLOG_PORT`）后重新执行 `docker compose up -d`，再用新端口访问。
+- **Windows 上试用**：Windows PowerShell 5.1 不支持 `&&`，请把命令逐行执行；`cp` 可改用 `Copy-Item .env.example .env`，查看初始密码用 `docker compose logs netsa | Select-String 初始密码`（PowerShell 没有 `grep`）。Docker Desktop 中宿主机没有 `/var/log/nginx`，挂载的是空目录，可通过 syslog 发送日志，或直接使用自带模拟日志的[演示环境](#演示环境)体验。
 - **健康检查**：`GET /healthz`（不需要认证），compose 已配置容器健康检查。
 - **告警归档**：需要长期留存、检索历史告警时，按 [告警归档](#告警归档可选postgresql) 一节在 `.env` 中设置数据库密码后执行 `docker compose --profile archive up -d`。
 
@@ -67,6 +69,8 @@ docker compose logs -f netsa
 |---|---|---|
 | `NETSA_IMAGE` | `swr.cn-east-3.myhuaweicloud.com/sreyun/netsa:latest` | netsa 镜像；生产环境建议固定版本号，内网可改为私有仓库地址 |
 | `PG_IMAGE` | `swr.cn-east-3.myhuaweicloud.com/sreyun/pgvector:pg18` | 告警归档数据库镜像 |
+| `NETSA_HTTP_PORT` | `8080` | 宿主机上的 Web 端口（容器内固定 8080） |
+| `NETSA_SYSLOG_PORT` | `5514` | 宿主机上的 syslog 端口，UDP 与 TCP 同时映射（容器内固定 5514） |
 | `NETSA_ADMIN_PASSWORD` | 随机生成 | 首次启动时管理员 `admin` 的初始密码 |
 | `POSTGRES_PASSWORD` | — | 自带 PostgreSQL 的密码（启用归档时必填） |
 | `NETSA_ARCHIVE_DSN` | — | 告警归档连接串，设置后启用归档 |
@@ -516,7 +520,7 @@ IP 详情页的“同源关联分析”在全部攻击源中查找与当前 IP �
 
 **误报与异常防护**
 
-- **规则加载即校验**：`severity` 拼写错误直接启动失败（不再静默降级为 info）；低于分类底线的声明会被纠正并打印日志。
+- **规则加载即校验**：`severity` 拼写错误直接启动失败（不再静默降级为 info）；低于分类底线的声明会被纠正并打印日志；`tag_only` 规则不生成告警，不按底线抬升，最高按低危。
 - **响应复核**：攻击请求的响应大小与该接口正常基线一致（变异系数 ≤10%、偏差 ≤5%）时改判为「未成功」，等级随之回落。
 - **资产关联不越权**：目标确有针对性的未修复漏洞时，未拦截的命中按成功处理；已拦截的仍只到高危。
 - **严重级佐证**：单条「严重」告警若既无成功命中、也无失陷迹象类分类，攻击源等级只按高危封顶，避免一条误判把 IP 抬到严重。

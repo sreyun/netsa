@@ -1,7 +1,8 @@
-# 生产部署（直接使用华为云 SWR 上发布的镜像，无需在服务器上编译）：
-#   docker compose pull && docker compose up -d
+# 生产部署（直接使用华为云 SWR 上发布的镜像，无需在服务器上编译），依次执行（Windows PowerShell 5.1 不支持 &&，请逐行执行）：
+#   docker compose pull
+#   docker compose up -d
 # 浏览器访问 http://<服务器IP>:8080 ，防火墙/网络设备 syslog 发送到 <服务器IP>:5514
-# 镜像地址、版本、管理员初始密码、告警归档等均可在同目录的 .env 中设置，模板见 .env.example
+# 镜像地址、版本、对外端口、管理员初始密码、告警归档等均可在同目录的 .env 中设置，模板见 .env.example
 name: netsa
 
 services:
@@ -22,10 +23,12 @@ services:
       # 可选：外部大模型密钥（配置 ai.enabled 后使用）、周报月报发信口令
       NETSA_AI_API_KEY: ${NETSA_AI_API_KEY:-}
       NETSA_SMTP_PASSWORD: ${NETSA_SMTP_PASSWORD:-}
+    # 宿主机端口可在 .env 中修改（NETSA_HTTP_PORT / NETSA_SYSLOG_PORT），用于避开已占用的端口；
+    # 容器内端口固定为 8080 / 5514，与 configs/docker.yaml 一致，不要改冒号右侧
     ports:
-      - "8080:8080"
-      - "5514:5514/udp"
-      - "5514:5514/tcp"
+      - "${NETSA_HTTP_PORT:-8080}:8080"
+      - "${NETSA_SYSLOG_PORT:-5514}:5514/udp"
+      - "${NETSA_SYSLOG_PORT:-5514}:5514/tcp"
     # 读取 /var/log/nginx 通常需要 adm 组（Debian/Ubuntu 上 gid=4）
     group_add:
       - "4"

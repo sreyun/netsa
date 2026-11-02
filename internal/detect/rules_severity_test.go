@@ -61,14 +61,29 @@ func TestRuleSeverityValidation(t *testing.T) {
 		t.Fatal("自定义规则未加载")
 	}
 
-	// 内置规则的等级必须全部合法，且不低于分类底线（防止后续修改引入回归）
+	// 内置规则的等级必须全部合法，且不低于分类底线（防止后续修改引入回归）。
+	// 检查的是源码中的声明值而不是加载后的生效值：生效值已被纠正，检查它发现不了声明错误，
+	// 而声明错误会让每次启动都打印一批「已提升」日志，看起来像配置故障。
+	for _, r := range builtinRules {
+		sev, ok := model.TryParseSeverity(r.Severity)
+		if !ok {
+			t.Errorf("内置规则 %s 的等级 %q 无法识别", r.ID, r.Severity)
+			continue
+		}
+		if !r.TagOnly && sev < risk.Floor(r.Category) {
+			t.Errorf("内置规则 %s 声明的等级 %s 低于分类底线 %s", r.ID, sev, risk.Floor(r.Category))
+		}
+		if r.TagOnly && sev > model.SevLow {
+			t.Errorf("仅打标签的内置规则 %s 声明的等级 %s 高于低危", r.ID, sev)
+		}
+	}
 	all, err := LoadRules("")
 	if err != nil {
 		t.Fatal(err)
 	}
 	for _, r := range all {
-		if r.sev < risk.Floor(r.Category) {
-			t.Errorf("内置规则 %s 等级 %s 低于分类底线 %s", r.ID, r.sev, risk.Floor(r.Category))
+		if r.ID == "ua-automation" && r.sev != model.SevInfo {
+			t.Errorf("仅打标签的脚本 UA 规则应保持信息级，实际 %s", r.sev)
 		}
 	}
 }

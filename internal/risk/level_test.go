@@ -79,6 +79,16 @@ func TestFinalize(t *testing.T) {
 			want: model.SevLow,
 		},
 		{
+			name: "仅打标签的弱特征（空 UA）：不按分类底线抬升，保持信息级",
+			hit:  model.Hit{Category: "自动化工具", Severity: model.SevInfo, TagOnly: true},
+			want: model.SevInfo,
+		},
+		{
+			name: "未到达服务的端口探测降为标签：保持信息级",
+			hit:  model.Hit{Category: "高危服务探测", Severity: model.SevInfo, Result: model.ResultAllowed, TagOnly: true},
+			want: model.SevInfo,
+		},
+		{
 			name: "未知分类保持声明等级",
 			hit:  model.Hit{Category: "自定义规则", Severity: model.SevMedium, Result: model.ResultPassed},
 			want: model.SevMedium,
