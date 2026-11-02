@@ -8,5 +8,6 @@ state
 tmp*
 *.exe
 *.md
+docs
 data/state.json*
 data/*.mmdb

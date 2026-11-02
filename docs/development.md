@@ -63,6 +63,7 @@ internal/safe/        异常保护（单条畸形数据不影响服务）
 web/static/           前端大屏（ECharts、世界地图、中国省级/地市级地图已内置，可离线使用）
 data/                 离线定位库（ip2region；MaxMind 可放入此目录）
 configs/              config.yaml（本机）、docker.yaml（容器）、demo.yaml（演示）、规则示例
+docs/                 使用与开发文档（images/ 为 README 截图，i18n/ 为多语言 README）
 ```
 
 ## 镜像构建与发布（华为云 SWR）

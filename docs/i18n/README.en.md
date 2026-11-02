@@ -12,13 +12,13 @@ A single binary that works out of the box, including on isolated networks.
 ![Go](https://img.shields.io/badge/Go-1.25%2B-00ADD8?logo=go&logoColor=white)
 ![Docker](https://img.shields.io/badge/docker-amd64%20%7C%20arm64-2496ED?logo=docker&logoColor=white)
 
-[简体中文](README.md) · **English** · [繁體中文](README.zh-TW.md) · [日本語](README.ja.md) · [한국어](README.ko.md) · [Español](README.es.md) · [Français](README.fr.md) · [Deutsch](README.de.md) · [Русский](README.ru.md)
+[简体中文](../../README.md) · **English** · [繁體中文](README.zh-TW.md) · [日本語](README.ja.md) · [한국어](README.ko.md) · [Español](README.es.md) · [Français](README.fr.md) · [Deutsch](README.de.md) · [Русский](README.ru.md)
 
 [Quick start](#quick-start) · [Screenshots](#screenshots) · [Core capabilities](#core-capabilities) · [How it works](#how-it-works) · [Supported logs](#supported-logs) · [Documentation](#documentation)
 
 </div>
 
-![Situation overview: attack map, live alerts and threat index](docs/images/overview.png)
+![Situation overview: attack map, live alerts and threat index](../images/overview.png)
 
 ## Why netsa
 
@@ -56,7 +56,7 @@ docker compose up -d
 - To pin a version, change ports or enable alert archiving, run `cp .env.example .env` first and edit it following the comments.
 - Windows PowerShell 5.1 does not support `&&` or `grep`: run commands one line at a time, and use `Select-String` instead of `grep`.
 
-For upgrades and rollback, offline deployment and common problems, see the [deployment guide](docs/deployment.md).
+For upgrades and rollback, offline deployment and common problems, see the [deployment guide](../deployment.md).
 
 ### Analyze existing logs without deploying
 
@@ -70,9 +70,9 @@ go build -o bin/netsa ./cmd/netsa
 
 | Security assessment and recommendations | Attack surface analysis |
 |---|---|
-| ![Security assessment](docs/images/assess.png) | ![Attack surface analysis](docs/images/surface.png) |
+| ![Security assessment](../images/assess.png) | ![Attack surface analysis](../images/surface.png) |
 | **Incident handling and deadlines** | **Self-learning and auto-calibration** |
-| ![Incident handling](docs/images/incidents.png) | ![Self-learning](docs/images/learn.png) |
+| ![Incident handling](../images/incidents.png) | ![Self-learning](../images/learn.png) |
 
 The screenshots show the web UI, which is in Chinese, using demo data from the built-in simulator. All IPs and sites in them are simulated. You can try it yourself with the demo environment above.
 
@@ -80,17 +80,17 @@ The screenshots show the web UI, which is in Chinese, using demo data from the b
 
 | Module | Capabilities |
 |---|---|
-| [Log collection](docs/log-sources.md) | Live file tailing (wildcards, logrotate rotation), batch analysis (including `.gz`), syslog over UDP / TCP / TLS (mutual authentication optional); sender identification, allowlist, rate limiting and silent-source alerts |
-| [Attack detection](docs/detection.md) | Signature rules for SQL injection, XSS, command execution, Log4Shell, SSRF, XXE, deserialization, WebShell, known vulnerability exploitation and more; behavioral detection of CC attacks, brute force, credential stuffing, API enumeration, port scanning and more; multi-round decoding against common evasion |
-| [Result verification](docs/detection.md#研判复核用证据排除表面成功) | Uses responses and session evidence to distinguish blocked, failed, not blocked and suspected success; rules out appearances such as single-page app fallback pages, unified error pages, and "allowed" traffic that never reached a service |
-| [Host and DNS detection](docs/log-sources.md#主机认证日志与-dns-日志) | SSH / RDP / VPN brute force and successful compromise, password spraying, cleared logs, new accounts and privilege escalation; DNSLog out-of-band callbacks, DNS tunneling, DGA, mining pool domains |
-| [Attack source tracing](docs/traceability.md) | Combines ip2region, MaxMind, ip-api, rDNS and RDAP / WHOIS, with custom internal subnet locations; same-origin correlation by subnet, tool fingerprint and attack technique finds likely members of the same group |
-| [Situation dashboard](docs/deployment.md#演示环境) | World / China attack maps with drill-down to province and city; live attack lines and alert push; KPIs, trends and distribution charts all drill down to attack sources or alerts |
-| [Attack surface analysis](docs/log-sources.md#未做-dnat-映射的端口探测) | Maps exposed services and finds leaked source code, keys and backups, and exposed admin interfaces; uses DNAT mappings and firewall session evidence to filter out background scans that cannot reach any service |
-| [Security assessment and compromise analysis](docs/detection.md#安全评估与失陷研判) | Scores seven dimensions with an A–E overall grade and P0–P3 recommendations; internal hosts connecting to threat-intelligence addresses, C2 beacon detection; MITRE ATT&CK matrix |
-| [Self-learning and AI triage](docs/self-learning.md) | Rule-level and target-level auto-calibration, escalation of returning confirmed attackers, a learning window, with policy adjustable in the web UI; AI triage supports OpenAI / Anthropic APIs and vLLM, adapts to model differences automatically, includes similar cases from your own organization, and tracks how often the model agrees with analysts |
-| [Incident handling and notifications](docs/operations.md#事件处置与误报抑制) | Alerts aggregate into incidents automatically, with assignment, handling deadlines and overdue reminders; false-positive suppression; [DingTalk / WeCom / Feishu notifications](docs/operations.md#告警推送钉钉--企业微信--飞书) with deduplication, merging and rate limiting; blocklist export for nginx, iptables, ipset and more |
-| [Retention, compliance and audit](docs/operations.md#原始日志留存与检索) | Raw logs retained in hourly compressed segments with a tamper-evident hash chain; [long-term PostgreSQL archiving](docs/operations.md#告警归档可选postgresql) (optional); weekly and monthly reports, MLPS 2.0 self-assessment; [three roles, two-factor authentication and a tamper-evident audit chain](docs/operations.md#登录账号与审计); Prometheus metrics |
+| [Log collection](../log-sources.md) | Live file tailing (wildcards, logrotate rotation), batch analysis (including `.gz`), syslog over UDP / TCP / TLS (mutual authentication optional); sender identification, allowlist, rate limiting and silent-source alerts |
+| [Attack detection](../detection.md) | Signature rules for SQL injection, XSS, command execution, Log4Shell, SSRF, XXE, deserialization, WebShell, known vulnerability exploitation and more; behavioral detection of CC attacks, brute force, credential stuffing, API enumeration, port scanning and more; multi-round decoding against common evasion |
+| [Result verification](../detection.md#研判复核用证据排除表面成功) | Uses responses and session evidence to distinguish blocked, failed, not blocked and suspected success; rules out appearances such as single-page app fallback pages, unified error pages, and "allowed" traffic that never reached a service |
+| [Host and DNS detection](../log-sources.md#主机认证日志与-dns-日志) | SSH / RDP / VPN brute force and successful compromise, password spraying, cleared logs, new accounts and privilege escalation; DNSLog out-of-band callbacks, DNS tunneling, DGA, mining pool domains |
+| [Attack source tracing](../traceability.md) | Combines ip2region, MaxMind, ip-api, rDNS and RDAP / WHOIS, with custom internal subnet locations; same-origin correlation by subnet, tool fingerprint and attack technique finds likely members of the same group |
+| [Situation dashboard](../deployment.md#演示环境) | World / China attack maps with drill-down to province and city; live attack lines and alert push; KPIs, trends and distribution charts all drill down to attack sources or alerts |
+| [Attack surface analysis](../log-sources.md#未做-dnat-映射的端口探测) | Maps exposed services and finds leaked source code, keys and backups, and exposed admin interfaces; uses DNAT mappings and firewall session evidence to filter out background scans that cannot reach any service |
+| [Security assessment and compromise analysis](../detection.md#安全评估与失陷研判) | Scores seven dimensions with an A–E overall grade and P0–P3 recommendations; internal hosts connecting to threat-intelligence addresses, C2 beacon detection; MITRE ATT&CK matrix |
+| [Self-learning and AI triage](../self-learning.md) | Rule-level and target-level auto-calibration, escalation of returning confirmed attackers, a learning window, with policy adjustable in the web UI; AI triage supports OpenAI / Anthropic APIs and vLLM, adapts to model differences automatically, includes similar cases from your own organization, and tracks how often the model agrees with analysts |
+| [Incident handling and notifications](../operations.md#事件处置与误报抑制) | Alerts aggregate into incidents automatically, with assignment, handling deadlines and overdue reminders; false-positive suppression; [DingTalk / WeCom / Feishu notifications](../operations.md#告警推送钉钉--企业微信--飞书) with deduplication, merging and rate limiting; blocklist export for nginx, iptables, ipset and more |
+| [Retention, compliance and audit](../operations.md#原始日志留存与检索) | Raw logs retained in hourly compressed segments with a tamper-evident hash chain; [long-term PostgreSQL archiving](../operations.md#告警归档可选postgresql) (optional); weekly and monthly reports, MLPS 2.0 self-assessment; [three roles, two-factor authentication and a tamper-evident audit chain](../operations.md#登录账号与审计); Prometheus metrics |
 
 ## How it works
 
@@ -120,7 +120,7 @@ State store       attacker profiles · alerts · incidents · attack surface · 
 
 Key design points:
 
-- **Severity is decided in one place**: the severity declared by a rule is only a suggestion, which prevents each stage from adding and subtracting on its own and leaving similar events with different severities. See [severity decisions](docs/detection.md#威胁等级判定).
+- **Severity is decided in one place**: the severity declared by a rule is only a suggestion, which prevents each stage from adding and subtracting on its own and leaving similar events with different severities. See [severity decisions](../detection.md#威胁等级判定).
 - **Evidence over appearances**: a firewall "allow", a 200 response, or a successful login after repeated failures are all re-checked against sessions, response baselines and account clues.
 - **Learning has limits**: it learns only from human verdicts. Automatic adjustments move at most one level at a time, and successful exploitation is still critical. False-positive suppression, which hides alerts, must be adopted by a person. AI conclusions are not used as learning samples and never trigger automatic handling.
 - **Stays in control under pressure**: parsing and detection run in parallel and are stored in batches, profile counts and detection windows have hard limits, and a single malformed log line does not affect the service. Queue backlogs and drops all have monitoring metrics.
@@ -136,7 +136,7 @@ Key design points:
 | **DNS** | BIND, dnsmasq, CoreDNS, Windows DNS, Zeek, Suricata DNS |
 | **Containers and collectors** | Docker json-file, Fluent Bit / Fluentd, Filebeat / Logstash / Vector, containerd / CRI-O, unwrapped automatically to recognize the original log |
 
-See [log onboarding](docs/log-sources.md) for setup. After connecting a source, check the recognition results and parse-failure samples on the dashboard's data source page.
+See [log onboarding](../log-sources.md) for setup. After connecting a source, check the recognition results and parse-failure samples on the dashboard's data source page.
 
 ## Documentation
 
@@ -144,15 +144,15 @@ The detailed documents below are written in Simplified Chinese.
 
 | Document | Contents |
 |---|---|
-| [Deployment guide](docs/deployment.md) | Production deployment, `.env` variables, upgrades and rollback, offline networks, demo environment, running from source |
-| [Log onboarding](docs/log-sources.md) | Web, firewall, authentication and DNS onboarding, syslog sender management, time zones, DNAT and session evidence |
-| [Detection and verification](docs/detection.md) | Severity decisions, result verification, threat scoring, security assessment and compromise analysis |
-| [Attack source tracing](docs/traceability.md) | Multi-source geolocation, internal subnets, hot reload of geolocation databases, same-origin correlation |
-| [Self-learning and AI triage](docs/self-learning.md) | What is applied automatically and its limits, behavior baselines, compliance self-checks, external model configuration and adaptation |
-| [Security operations](docs/operations.md) | Incident handling, notifications, raw logs, assets and vulnerabilities, reports and compliance, accounts and audit, metrics, alert archiving |
-| [Configuration reference](docs/configuration.md) | Common settings and operational notes |
-| [API](docs/api.md) | REST API overview |
-| [Development and release](docs/development.md) | Local testing, code structure, image build and release |
+| [Deployment guide](../deployment.md) | Production deployment, `.env` variables, upgrades and rollback, offline networks, demo environment, running from source |
+| [Log onboarding](../log-sources.md) | Web, firewall, authentication and DNS onboarding, syslog sender management, time zones, DNAT and session evidence |
+| [Detection and verification](../detection.md) | Severity decisions, result verification, threat scoring, security assessment and compromise analysis |
+| [Attack source tracing](../traceability.md) | Multi-source geolocation, internal subnets, hot reload of geolocation databases, same-origin correlation |
+| [Self-learning and AI triage](../self-learning.md) | What is applied automatically and its limits, behavior baselines, compliance self-checks, external model configuration and adaptation |
+| [Security operations](../operations.md) | Incident handling, notifications, raw logs, assets and vulnerabilities, reports and compliance, accounts and audit, metrics, alert archiving |
+| [Configuration reference](../configuration.md) | Common settings and operational notes |
+| [API](../api.md) | REST API overview |
+| [Development and release](../development.md) | Local testing, code structure, image build and release |
 
 ## Development
 
@@ -171,7 +171,7 @@ Race tests need a C compiler. Without gcc on your machine, run them in a contain
 docker run --rm -v "$PWD":/src -w /src golang:1.27-alpine sh -c 'apk add --no-cache gcc musl-dev && CGO_ENABLED=1 go test -race -short ./...'
 ```
 
-See [development and release](docs/development.md) for code structure and the release process.
+See [development and release](../development.md) for code structure and the release process.
 
 ## Contributing
 

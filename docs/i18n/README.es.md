@@ -12,13 +12,13 @@ Un único binario listo para usar, también en redes internas sin conexión.
 ![Go](https://img.shields.io/badge/Go-1.25%2B-00ADD8?logo=go&logoColor=white)
 ![Docker](https://img.shields.io/badge/docker-amd64%20%7C%20arm64-2496ED?logo=docker&logoColor=white)
 
-[简体中文](README.md) · [English](README.en.md) · [繁體中文](README.zh-TW.md) · [日本語](README.ja.md) · [한국어](README.ko.md) · **Español** · [Français](README.fr.md) · [Deutsch](README.de.md) · [Русский](README.ru.md)
+[简体中文](../../README.md) · [English](README.en.md) · [繁體中文](README.zh-TW.md) · [日本語](README.ja.md) · [한국어](README.ko.md) · **Español** · [Français](README.fr.md) · [Deutsch](README.de.md) · [Русский](README.ru.md)
 
 [Inicio rápido](#inicio-rápido) · [Capturas de pantalla](#capturas-de-pantalla) · [Capacidades principales](#capacidades-principales) · [Cómo funciona](#cómo-funciona) · [Registros compatibles](#registros-compatibles) · [Documentación](#documentación)
 
 </div>
 
-![Vista general: mapa de ataques, alertas en tiempo real e índice de amenazas](docs/images/overview.png)
+![Vista general: mapa de ataques, alertas en tiempo real e índice de amenazas](../images/overview.png)
 
 ## Por qué netsa
 
@@ -56,7 +56,7 @@ docker compose up -d
 - Para fijar una versión, cambiar puertos o activar el archivado de alertas, ejecuta primero `cp .env.example .env` y edítalo siguiendo los comentarios.
 - Windows PowerShell 5.1 no admite `&&` ni `grep`: ejecuta los comandos línea a línea y usa `Select-String` en lugar de `grep`.
 
-Para actualizaciones y reversiones, despliegue sin conexión y problemas comunes, consulta la [guía de despliegue](docs/deployment.md).
+Para actualizaciones y reversiones, despliegue sin conexión y problemas comunes, consulta la [guía de despliegue](../deployment.md).
 
 ### Analiza registros existentes sin desplegar
 
@@ -70,9 +70,9 @@ go build -o bin/netsa ./cmd/netsa
 
 | Evaluación de seguridad y recomendaciones | Análisis de la superficie de ataque |
 |---|---|
-| ![Evaluación de seguridad](docs/images/assess.png) | ![Análisis de la superficie de ataque](docs/images/surface.png) |
+| ![Evaluación de seguridad](../images/assess.png) | ![Análisis de la superficie de ataque](../images/surface.png) |
 | **Gestión de incidentes y plazos** | **Autoaprendizaje y calibración automática** |
-| ![Gestión de incidentes](docs/images/incidents.png) | ![Autoaprendizaje](docs/images/learn.png) |
+| ![Gestión de incidentes](../images/incidents.png) | ![Autoaprendizaje](../images/learn.png) |
 
 Las capturas muestran la interfaz web, que está en chino, con datos de demostración del simulador integrado. Todas las IP y los sitios son simulados. Puedes probarlo con el entorno de demostración de arriba.
 
@@ -80,17 +80,17 @@ Las capturas muestran la interfaz web, que está en chino, con datos de demostra
 
 | Módulo | Capacidades |
 |---|---|
-| [Recopilación de registros](docs/log-sources.md) | Seguimiento de archivos en tiempo real (comodines, rotación con logrotate), análisis por lotes (incluido `.gz`), syslog por UDP / TCP / TLS (autenticación mutua opcional); identificación de emisores, lista de permitidos, limitación de velocidad y alertas de fuentes silenciosas |
-| [Detección de ataques](docs/detection.md) | Reglas de firmas para inyección SQL, XSS, ejecución de comandos, Log4Shell, SSRF, XXE, deserialización, WebShell, explotación de vulnerabilidades conocidas y más; detección de comportamiento de ataques CC, fuerza bruta, relleno de credenciales, enumeración de API, escaneo de puertos y más; decodificación en varias rondas contra las evasiones habituales |
-| [Verificación de resultados](docs/detection.md#研判复核用证据排除表面成功) | Usa respuestas y evidencias de sesión para distinguir bloqueado, fallido, no bloqueado y posible éxito; descarta apariencias como páginas de respaldo de aplicaciones de una sola página, páginas de error unificadas y tráfico «permitido» que nunca llegó a un servicio |
-| [Detección en hosts y DNS](docs/log-sources.md#主机认证日志与-dns-日志) | Fuerza bruta SSH / RDP / VPN y compromisos exitosos, rociado de contraseñas, borrado de registros, cuentas nuevas y escalada de privilegios; retrollamadas fuera de banda DNSLog, túneles DNS, DGA, dominios de minería |
-| [Rastreo del origen de ataques](docs/traceability.md) | Combina ip2region, MaxMind, ip-api, rDNS y RDAP / WHOIS, con ubicación de subredes internas personalizadas; la correlación de mismo origen por subred, huella de herramienta y técnica de ataque encuentra posibles miembros del mismo grupo |
-| [Panel de situación](docs/deployment.md#演示环境) | Mapas de ataques del mundo y de China con desglose hasta provincia y ciudad; líneas de ataque y alertas en tiempo real; los KPI, las tendencias y los gráficos de distribución permiten desglosar hasta orígenes de ataque o alertas |
-| [Análisis de la superficie de ataque](docs/log-sources.md#未做-dnat-映射的端口探测) | Inventaría los servicios expuestos y encuentra filtraciones de código fuente, claves y copias de seguridad, e interfaces de administración expuestas; usa mapeos DNAT y evidencias de sesión del firewall para filtrar los escaneos de fondo que no alcanzan ningún servicio |
-| [Evaluación de seguridad y análisis de compromiso](docs/detection.md#安全评估与失陷研判) | Puntúa siete dimensiones con una nota global de A a E y recomendaciones P0–P3; hosts internos que conectan a direcciones de inteligencia de amenazas, detección de balizas C2; matriz MITRE ATT&CK |
-| [Autoaprendizaje y triaje con IA](docs/self-learning.md) | Calibración automática por regla y por objetivo, escalado de atacantes confirmados que reaparecen, ventana de aprendizaje, con política ajustable en la interfaz web; el triaje con IA admite las API de OpenAI / Anthropic y vLLM, se adapta automáticamente a las diferencias entre modelos, incluye casos similares de tu propia organización y mide la coincidencia del modelo con los analistas |
-| [Gestión de incidentes y notificaciones](docs/operations.md#事件处置与误报抑制) | Las alertas se agregan automáticamente en incidentes, con asignación, plazos de gestión y avisos de vencimiento; supresión de falsos positivos; [notificaciones por DingTalk / WeCom / Feishu](docs/operations.md#告警推送钉钉--企业微信--飞书) con deduplicación, fusión y limitación de velocidad; exportación de listas de bloqueo para nginx, iptables, ipset y más |
-| [Conservación, cumplimiento y auditoría](docs/operations.md#原始日志留存与检索) | Registros sin procesar conservados en segmentos comprimidos por hora con cadena de hash a prueba de manipulaciones; [archivado a largo plazo en PostgreSQL](docs/operations.md#告警归档可选postgresql) (opcional); informes semanales y mensuales, autoevaluación MLPS 2.0; [tres roles, autenticación de dos factores y cadena de auditoría a prueba de manipulaciones](docs/operations.md#登录账号与审计); métricas de Prometheus |
+| [Recopilación de registros](../log-sources.md) | Seguimiento de archivos en tiempo real (comodines, rotación con logrotate), análisis por lotes (incluido `.gz`), syslog por UDP / TCP / TLS (autenticación mutua opcional); identificación de emisores, lista de permitidos, limitación de velocidad y alertas de fuentes silenciosas |
+| [Detección de ataques](../detection.md) | Reglas de firmas para inyección SQL, XSS, ejecución de comandos, Log4Shell, SSRF, XXE, deserialización, WebShell, explotación de vulnerabilidades conocidas y más; detección de comportamiento de ataques CC, fuerza bruta, relleno de credenciales, enumeración de API, escaneo de puertos y más; decodificación en varias rondas contra las evasiones habituales |
+| [Verificación de resultados](../detection.md#研判复核用证据排除表面成功) | Usa respuestas y evidencias de sesión para distinguir bloqueado, fallido, no bloqueado y posible éxito; descarta apariencias como páginas de respaldo de aplicaciones de una sola página, páginas de error unificadas y tráfico «permitido» que nunca llegó a un servicio |
+| [Detección en hosts y DNS](../log-sources.md#主机认证日志与-dns-日志) | Fuerza bruta SSH / RDP / VPN y compromisos exitosos, rociado de contraseñas, borrado de registros, cuentas nuevas y escalada de privilegios; retrollamadas fuera de banda DNSLog, túneles DNS, DGA, dominios de minería |
+| [Rastreo del origen de ataques](../traceability.md) | Combina ip2region, MaxMind, ip-api, rDNS y RDAP / WHOIS, con ubicación de subredes internas personalizadas; la correlación de mismo origen por subred, huella de herramienta y técnica de ataque encuentra posibles miembros del mismo grupo |
+| [Panel de situación](../deployment.md#演示环境) | Mapas de ataques del mundo y de China con desglose hasta provincia y ciudad; líneas de ataque y alertas en tiempo real; los KPI, las tendencias y los gráficos de distribución permiten desglosar hasta orígenes de ataque o alertas |
+| [Análisis de la superficie de ataque](../log-sources.md#未做-dnat-映射的端口探测) | Inventaría los servicios expuestos y encuentra filtraciones de código fuente, claves y copias de seguridad, e interfaces de administración expuestas; usa mapeos DNAT y evidencias de sesión del firewall para filtrar los escaneos de fondo que no alcanzan ningún servicio |
+| [Evaluación de seguridad y análisis de compromiso](../detection.md#安全评估与失陷研判) | Puntúa siete dimensiones con una nota global de A a E y recomendaciones P0–P3; hosts internos que conectan a direcciones de inteligencia de amenazas, detección de balizas C2; matriz MITRE ATT&CK |
+| [Autoaprendizaje y triaje con IA](../self-learning.md) | Calibración automática por regla y por objetivo, escalado de atacantes confirmados que reaparecen, ventana de aprendizaje, con política ajustable en la interfaz web; el triaje con IA admite las API de OpenAI / Anthropic y vLLM, se adapta automáticamente a las diferencias entre modelos, incluye casos similares de tu propia organización y mide la coincidencia del modelo con los analistas |
+| [Gestión de incidentes y notificaciones](../operations.md#事件处置与误报抑制) | Las alertas se agregan automáticamente en incidentes, con asignación, plazos de gestión y avisos de vencimiento; supresión de falsos positivos; [notificaciones por DingTalk / WeCom / Feishu](../operations.md#告警推送钉钉--企业微信--飞书) con deduplicación, fusión y limitación de velocidad; exportación de listas de bloqueo para nginx, iptables, ipset y más |
+| [Conservación, cumplimiento y auditoría](../operations.md#原始日志留存与检索) | Registros sin procesar conservados en segmentos comprimidos por hora con cadena de hash a prueba de manipulaciones; [archivado a largo plazo en PostgreSQL](../operations.md#告警归档可选postgresql) (opcional); informes semanales y mensuales, autoevaluación MLPS 2.0; [tres roles, autenticación de dos factores y cadena de auditoría a prueba de manipulaciones](../operations.md#登录账号与审计); métricas de Prometheus |
 
 ## Cómo funciona
 
@@ -120,7 +120,7 @@ Almacén de estado     perfiles de atacantes · alertas · incidentes · superfi
 
 Decisiones clave de diseño:
 
-- **La gravedad se decide en un solo lugar**: la gravedad que declara una regla es solo una sugerencia, lo que evita que cada etapa sume y reste por su cuenta y que eventos similares acaben con gravedades distintas. Consulta las [decisiones de gravedad](docs/detection.md#威胁等级判定).
+- **La gravedad se decide en un solo lugar**: la gravedad que declara una regla es solo una sugerencia, lo que evita que cada etapa sume y reste por su cuenta y que eventos similares acaben con gravedades distintas. Consulta las [decisiones de gravedad](../detection.md#威胁等级判定).
 - **Las evidencias por encima de las apariencias**: un «permitir» del firewall, una respuesta 200 o un inicio de sesión exitoso tras varios fallos se vuelven a comprobar con sesiones, líneas base de respuesta e indicios de la cuenta.
 - **El aprendizaje tiene límites**: solo aprende de conclusiones humanas. Los ajustes automáticos cambian como máximo un nivel cada vez, y una explotación exitosa sigue siendo crítica. La supresión de falsos positivos, que oculta alertas, debe adoptarla una persona. Las conclusiones de la IA no se usan como muestras de aprendizaje ni desencadenan gestión automática.
 - **Bajo control incluso con carga**: el análisis y la detección se ejecutan en paralelo y se almacenan por lotes, el número de perfiles y las ventanas de detección tienen límites estrictos, y una sola línea de registro malformada no afecta al servicio. Las colas acumuladas y los descartes tienen métricas de monitorización.
@@ -136,7 +136,7 @@ Decisiones clave de diseño:
 | **DNS** | BIND, dnsmasq, CoreDNS, Windows DNS, Zeek, Suricata DNS |
 | **Contenedores y recopiladores** | Docker json-file, Fluent Bit / Fluentd, Filebeat / Logstash / Vector, containerd / CRI-O; se desenvuelven automáticamente para reconocer el registro original |
 
-Consulta la [incorporación de registros](docs/log-sources.md) para la configuración. Después de conectar una fuente, revisa los resultados del reconocimiento y las muestras de errores de análisis en la página de fuentes de datos del panel.
+Consulta la [incorporación de registros](../log-sources.md) para la configuración. Después de conectar una fuente, revisa los resultados del reconocimiento y las muestras de errores de análisis en la página de fuentes de datos del panel.
 
 ## Documentación
 
@@ -144,15 +144,15 @@ Los documentos detallados siguientes están escritos en chino simplificado.
 
 | Documento | Contenido |
 |---|---|
-| [Guía de despliegue](docs/deployment.md) | Despliegue en producción, variables de `.env`, actualizaciones y reversiones, redes sin conexión, entorno de demostración, ejecución desde el código fuente |
-| [Incorporación de registros](docs/log-sources.md) | Incorporación de web, firewall, autenticación y DNS, gestión de emisores syslog, zonas horarias, DNAT y evidencias de sesión |
-| [Detección y verificación](docs/detection.md) | Decisiones de gravedad, verificación de resultados, puntuación de amenazas, evaluación de seguridad y análisis de compromiso |
-| [Rastreo del origen de ataques](docs/traceability.md) | Geolocalización multifuente, subredes internas, recarga en caliente de las bases de geolocalización, correlación de mismo origen |
-| [Autoaprendizaje y triaje con IA](docs/self-learning.md) | Qué se aplica automáticamente y sus límites, líneas base de comportamiento, autocomprobaciones de cumplimiento, configuración y adaptación de modelos externos |
-| [Operaciones de seguridad](docs/operations.md) | Gestión de incidentes, notificaciones, registros sin procesar, activos y vulnerabilidades, informes y cumplimiento, cuentas y auditoría, métricas, archivado de alertas |
-| [Referencia de configuración](docs/configuration.md) | Ajustes comunes y notas de operación |
-| [API](docs/api.md) | Resumen de la API REST |
-| [Desarrollo y publicación](docs/development.md) | Pruebas locales, estructura del código, compilación y publicación de imágenes |
+| [Guía de despliegue](../deployment.md) | Despliegue en producción, variables de `.env`, actualizaciones y reversiones, redes sin conexión, entorno de demostración, ejecución desde el código fuente |
+| [Incorporación de registros](../log-sources.md) | Incorporación de web, firewall, autenticación y DNS, gestión de emisores syslog, zonas horarias, DNAT y evidencias de sesión |
+| [Detección y verificación](../detection.md) | Decisiones de gravedad, verificación de resultados, puntuación de amenazas, evaluación de seguridad y análisis de compromiso |
+| [Rastreo del origen de ataques](../traceability.md) | Geolocalización multifuente, subredes internas, recarga en caliente de las bases de geolocalización, correlación de mismo origen |
+| [Autoaprendizaje y triaje con IA](../self-learning.md) | Qué se aplica automáticamente y sus límites, líneas base de comportamiento, autocomprobaciones de cumplimiento, configuración y adaptación de modelos externos |
+| [Operaciones de seguridad](../operations.md) | Gestión de incidentes, notificaciones, registros sin procesar, activos y vulnerabilidades, informes y cumplimiento, cuentas y auditoría, métricas, archivado de alertas |
+| [Referencia de configuración](../configuration.md) | Ajustes comunes y notas de operación |
+| [API](../api.md) | Resumen de la API REST |
+| [Desarrollo y publicación](../development.md) | Pruebas locales, estructura del código, compilación y publicación de imágenes |
 
 ## Desarrollo
 
@@ -171,7 +171,7 @@ Las pruebas de condiciones de carrera necesitan un compilador de C. Si no tienes
 docker run --rm -v "$PWD":/src -w /src golang:1.27-alpine sh -c 'apk add --no-cache gcc musl-dev && CGO_ENABLED=1 go test -race -short ./...'
 ```
 
-Consulta [desarrollo y publicación](docs/development.md) para ver la estructura del código y el proceso de publicación.
+Consulta [desarrollo y publicación](../development.md) para ver la estructura del código y el proceso de publicación.
 
 ## Contribuir
 

@@ -12,13 +12,13 @@ Eine einzige Binärdatei, sofort einsetzbar, auch offline in internen Netzen.
 ![Go](https://img.shields.io/badge/Go-1.25%2B-00ADD8?logo=go&logoColor=white)
 ![Docker](https://img.shields.io/badge/docker-amd64%20%7C%20arm64-2496ED?logo=docker&logoColor=white)
 
-[简体中文](README.md) · [English](README.en.md) · [繁體中文](README.zh-TW.md) · [日本語](README.ja.md) · [한국어](README.ko.md) · [Español](README.es.md) · [Français](README.fr.md) · **Deutsch** · [Русский](README.ru.md)
+[简体中文](../../README.md) · [English](README.en.md) · [繁體中文](README.zh-TW.md) · [日本語](README.ja.md) · [한국어](README.ko.md) · [Español](README.es.md) · [Français](README.fr.md) · **Deutsch** · [Русский](README.ru.md)
 
 [Schnellstart](#schnellstart) · [Screenshots](#screenshots) · [Kernfunktionen](#kernfunktionen) · [Funktionsweise](#funktionsweise) · [Unterstützte Logs](#unterstützte-logs) · [Dokumentation](#dokumentation)
 
 </div>
 
-![Lageübersicht: Angriffskarte, Echtzeit-Alarme und Bedrohungsindex](docs/images/overview.png)
+![Lageübersicht: Angriffskarte, Echtzeit-Alarme und Bedrohungsindex](../images/overview.png)
 
 ## Warum netsa
 
@@ -56,7 +56,7 @@ docker compose up -d
 - Um eine Version festzulegen, Ports zu ändern oder die Alarmarchivierung zu aktivieren, führe zuerst `cp .env.example .env` aus und bearbeite die Datei gemäß den Kommentaren.
 - Windows PowerShell 5.1 unterstützt weder `&&` noch `grep`: Führe Befehle zeilenweise aus und verwende `Select-String` statt `grep`.
 
-Upgrades und Rollback, Offline-Bereitstellung und häufige Probleme findest du im [Bereitstellungsleitfaden](docs/deployment.md).
+Upgrades und Rollback, Offline-Bereitstellung und häufige Probleme findest du im [Bereitstellungsleitfaden](../deployment.md).
 
 ### Vorhandene Logs ohne Bereitstellung analysieren
 
@@ -70,9 +70,9 @@ go build -o bin/netsa ./cmd/netsa
 
 | Sicherheitsbewertung und Empfehlungen | Analyse der Angriffsfläche |
 |---|---|
-| ![Sicherheitsbewertung](docs/images/assess.png) | ![Analyse der Angriffsfläche](docs/images/surface.png) |
+| ![Sicherheitsbewertung](../images/assess.png) | ![Analyse der Angriffsfläche](../images/surface.png) |
 | **Vorfallbearbeitung und Fristen** | **Selbstlernen und automatische Kalibrierung** |
-| ![Vorfallbearbeitung](docs/images/incidents.png) | ![Selbstlernen](docs/images/learn.png) |
+| ![Vorfallbearbeitung](../images/incidents.png) | ![Selbstlernen](../images/learn.png) |
 
 Die Screenshots zeigen die Weboberfläche, die auf Chinesisch ist, mit Demodaten des eingebauten Simulators. Alle IPs und Websites darin sind simuliert. Du kannst es mit der obigen Demo-Umgebung selbst ausprobieren.
 
@@ -80,17 +80,17 @@ Die Screenshots zeigen die Weboberfläche, die auf Chinesisch ist, mit Demodaten
 
 | Modul | Funktionen |
 |---|---|
-| [Log-Erfassung](docs/log-sources.md) | Dateien in Echtzeit verfolgen (Platzhalter, logrotate-Rotation), Stapelanalyse (auch `.gz`), Syslog über UDP / TCP / TLS (gegenseitige Authentifizierung möglich); Absendererkennung, Positivliste, Ratenbegrenzung und Alarme bei ausbleibenden Logs |
-| [Angriffserkennung](docs/detection.md) | Signaturregeln für SQL-Injection, XSS, Befehlsausführung, Log4Shell, SSRF, XXE, Deserialisierung, WebShell, Ausnutzung bekannter Schwachstellen und mehr; Verhaltenserkennung von CC-Angriffen, Brute Force, Credential Stuffing, API-Enumeration, Portscans und mehr; mehrstufige Dekodierung gegen gängige Umgehungen |
-| [Ergebnisprüfung](docs/detection.md#研判复核用证据排除表面成功) | Unterscheidet anhand von Antworten und Sitzungsbelegen blockiert, fehlgeschlagen, nicht blockiert und vermuteten Erfolg; schließt Scheinbefunde wie Fallback-Seiten von Single-Page-Apps, einheitliche Fehlerseiten und „erlaubten“ Verkehr aus, der nie einen Dienst erreicht hat |
-| [Host- und DNS-Erkennung](docs/log-sources.md#主机认证日志与-dns-日志) | SSH- / RDP- / VPN-Brute-Force und erfolgreiche Kompromittierung, Password Spraying, gelöschte Logs, neue Konten und Rechteausweitung; DNSLog-Out-of-Band-Rückrufe, DNS-Tunnel, DGA, Mining-Pool-Domains |
-| [Rückverfolgung der Angriffsquelle](docs/traceability.md) | Kombiniert ip2region, MaxMind, ip-api, rDNS und RDAP / WHOIS, mit Standortzuordnung für eigene interne Subnetze; die Korrelation gleicher Herkunft findet über Subnetz, Werkzeug-Fingerabdruck und Angriffstechnik vermutliche Mitglieder derselben Gruppe |
-| [Lage-Dashboard](docs/deployment.md#演示环境) | Angriffskarten der Welt und Chinas mit Drill-down bis zu Provinz und Stadt; Angriffslinien und Alarme in Echtzeit; KPIs, Trends und Verteilungsdiagramme führen per Drill-down zu Angriffsquellen oder Alarmen |
-| [Analyse der Angriffsfläche](docs/log-sources.md#未做-dnat-映射的端口探测) | Erfasst exponierte Dienste und findet offengelegten Quellcode, Schlüssel und Backups sowie exponierte Verwaltungsschnittstellen; filtert mithilfe von DNAT-Zuordnungen und Firewall-Sitzungsbelegen Hintergrundscans heraus, die keinen Dienst erreichen können |
-| [Sicherheitsbewertung und Kompromittierungsanalyse](docs/detection.md#安全评估与失陷研判) | Bewertet sieben Dimensionen mit einer Gesamtnote von A bis E und Empfehlungen P0–P3; interne Hosts, die Adressen aus Threat Intelligence kontaktieren, Erkennung von C2-Beacons; MITRE-ATT&CK-Matrix |
-| [Selbstlernen und KI-Triage](docs/self-learning.md) | Automatische Kalibrierung auf Regel- und Zielebene, Hochstufung zurückkehrender bestätigter Angreifer, Lernfenster, Richtlinie in der Weboberfläche anpassbar; die KI-Triage unterstützt OpenAI- / Anthropic-APIs und vLLM, passt sich automatisch an Modellunterschiede an, fügt ähnliche Fälle aus der eigenen Organisation hinzu und misst die Übereinstimmung des Modells mit den Analysten |
-| [Vorfallbearbeitung und Benachrichtigungen](docs/operations.md#事件处置与误报抑制) | Alarme werden automatisch zu Vorfällen gebündelt, mit Zuweisung, Bearbeitungsfristen und Erinnerungen bei Überschreitung; Unterdrückung von Fehlalarmen; [Benachrichtigungen über DingTalk / WeCom / Feishu](docs/operations.md#告警推送钉钉--企业微信--飞书) mit Deduplizierung, Zusammenführung und Ratenbegrenzung; Export von Sperrlisten für nginx, iptables, ipset und mehr |
-| [Aufbewahrung, Compliance und Audit](docs/operations.md#原始日志留存与检索) | Rohlogs in stündlich komprimierten Segmenten mit manipulationssicherer Hash-Kette; [langfristige PostgreSQL-Archivierung](docs/operations.md#告警归档可选postgresql) (optional); Wochen- und Monatsberichte, MLPS-2.0-Selbstprüfung; [drei Rollen, Zwei-Faktor-Authentifizierung und manipulationssichere Audit-Kette](docs/operations.md#登录账号与审计); Prometheus-Metriken |
+| [Log-Erfassung](../log-sources.md) | Dateien in Echtzeit verfolgen (Platzhalter, logrotate-Rotation), Stapelanalyse (auch `.gz`), Syslog über UDP / TCP / TLS (gegenseitige Authentifizierung möglich); Absendererkennung, Positivliste, Ratenbegrenzung und Alarme bei ausbleibenden Logs |
+| [Angriffserkennung](../detection.md) | Signaturregeln für SQL-Injection, XSS, Befehlsausführung, Log4Shell, SSRF, XXE, Deserialisierung, WebShell, Ausnutzung bekannter Schwachstellen und mehr; Verhaltenserkennung von CC-Angriffen, Brute Force, Credential Stuffing, API-Enumeration, Portscans und mehr; mehrstufige Dekodierung gegen gängige Umgehungen |
+| [Ergebnisprüfung](../detection.md#研判复核用证据排除表面成功) | Unterscheidet anhand von Antworten und Sitzungsbelegen blockiert, fehlgeschlagen, nicht blockiert und vermuteten Erfolg; schließt Scheinbefunde wie Fallback-Seiten von Single-Page-Apps, einheitliche Fehlerseiten und „erlaubten“ Verkehr aus, der nie einen Dienst erreicht hat |
+| [Host- und DNS-Erkennung](../log-sources.md#主机认证日志与-dns-日志) | SSH- / RDP- / VPN-Brute-Force und erfolgreiche Kompromittierung, Password Spraying, gelöschte Logs, neue Konten und Rechteausweitung; DNSLog-Out-of-Band-Rückrufe, DNS-Tunnel, DGA, Mining-Pool-Domains |
+| [Rückverfolgung der Angriffsquelle](../traceability.md) | Kombiniert ip2region, MaxMind, ip-api, rDNS und RDAP / WHOIS, mit Standortzuordnung für eigene interne Subnetze; die Korrelation gleicher Herkunft findet über Subnetz, Werkzeug-Fingerabdruck und Angriffstechnik vermutliche Mitglieder derselben Gruppe |
+| [Lage-Dashboard](../deployment.md#演示环境) | Angriffskarten der Welt und Chinas mit Drill-down bis zu Provinz und Stadt; Angriffslinien und Alarme in Echtzeit; KPIs, Trends und Verteilungsdiagramme führen per Drill-down zu Angriffsquellen oder Alarmen |
+| [Analyse der Angriffsfläche](../log-sources.md#未做-dnat-映射的端口探测) | Erfasst exponierte Dienste und findet offengelegten Quellcode, Schlüssel und Backups sowie exponierte Verwaltungsschnittstellen; filtert mithilfe von DNAT-Zuordnungen und Firewall-Sitzungsbelegen Hintergrundscans heraus, die keinen Dienst erreichen können |
+| [Sicherheitsbewertung und Kompromittierungsanalyse](../detection.md#安全评估与失陷研判) | Bewertet sieben Dimensionen mit einer Gesamtnote von A bis E und Empfehlungen P0–P3; interne Hosts, die Adressen aus Threat Intelligence kontaktieren, Erkennung von C2-Beacons; MITRE-ATT&CK-Matrix |
+| [Selbstlernen und KI-Triage](../self-learning.md) | Automatische Kalibrierung auf Regel- und Zielebene, Hochstufung zurückkehrender bestätigter Angreifer, Lernfenster, Richtlinie in der Weboberfläche anpassbar; die KI-Triage unterstützt OpenAI- / Anthropic-APIs und vLLM, passt sich automatisch an Modellunterschiede an, fügt ähnliche Fälle aus der eigenen Organisation hinzu und misst die Übereinstimmung des Modells mit den Analysten |
+| [Vorfallbearbeitung und Benachrichtigungen](../operations.md#事件处置与误报抑制) | Alarme werden automatisch zu Vorfällen gebündelt, mit Zuweisung, Bearbeitungsfristen und Erinnerungen bei Überschreitung; Unterdrückung von Fehlalarmen; [Benachrichtigungen über DingTalk / WeCom / Feishu](../operations.md#告警推送钉钉--企业微信--飞书) mit Deduplizierung, Zusammenführung und Ratenbegrenzung; Export von Sperrlisten für nginx, iptables, ipset und mehr |
+| [Aufbewahrung, Compliance und Audit](../operations.md#原始日志留存与检索) | Rohlogs in stündlich komprimierten Segmenten mit manipulationssicherer Hash-Kette; [langfristige PostgreSQL-Archivierung](../operations.md#告警归档可选postgresql) (optional); Wochen- und Monatsberichte, MLPS-2.0-Selbstprüfung; [drei Rollen, Zwei-Faktor-Authentifizierung und manipulationssichere Audit-Kette](../operations.md#登录账号与审计); Prometheus-Metriken |
 
 ## Funktionsweise
 
@@ -120,7 +120,7 @@ Zustandsspeicher     Angreiferprofile · Alarme · Vorfälle · Angriffsfläche 
 
 Wichtige Designentscheidungen:
 
-- **Der Schweregrad wird an einer einzigen Stelle entschieden**: Der in einer Regel angegebene Schweregrad ist nur ein Vorschlag. So rechnet nicht jede Stufe eigenständig hoch und herunter, und gleichartige Ereignisse erhalten keine unterschiedlichen Schweregrade. Siehe [Schweregrad-Entscheidung](docs/detection.md#威胁等级判定).
+- **Der Schweregrad wird an einer einzigen Stelle entschieden**: Der in einer Regel angegebene Schweregrad ist nur ein Vorschlag. So rechnet nicht jede Stufe eigenständig hoch und herunter, und gleichartige Ereignisse erhalten keine unterschiedlichen Schweregrade. Siehe [Schweregrad-Entscheidung](../detection.md#威胁等级判定).
 - **Belege vor Anschein**: Ein „Erlauben“ der Firewall, eine 200-Antwort oder eine erfolgreiche Anmeldung nach mehreren Fehlversuchen werden anhand von Sitzungen, Antwort-Baselines und Kontohinweisen nachgeprüft.
 - **Lernen hat Grenzen**: Es wird nur aus menschlichen Entscheidungen gelernt. Automatische Anpassungen ändern höchstens eine Stufe auf einmal, und erfolgreiche Ausnutzung bleibt kritisch. Die Unterdrückung von Fehlalarmen, die Alarme ausblendet, muss von einer Person übernommen werden. KI-Ergebnisse dienen nicht als Lernbeispiele und lösen keine automatische Bearbeitung aus.
 - **Unter Last unter Kontrolle**: Parsing und Erkennung laufen parallel und werden stapelweise gespeichert, Profilanzahl und Erkennungsfenster haben feste Obergrenzen, und eine einzelne fehlerhafte Logzeile beeinträchtigt den Dienst nicht. Für Warteschlangenstau und Verwerfungen gibt es Überwachungsmetriken.
@@ -136,7 +136,7 @@ Wichtige Designentscheidungen:
 | **DNS** | BIND, dnsmasq, CoreDNS, Windows DNS, Zeek, Suricata DNS |
 | **Container und Collectors** | Docker json-file, Fluent Bit / Fluentd, Filebeat / Logstash / Vector, containerd / CRI-O; werden automatisch entpackt, um das Originallog zu erkennen |
 
-Die Einrichtung ist unter [Log-Anbindung](docs/log-sources.md) beschrieben. Nach dem Anbinden einer Quelle kannst du auf der Datenquellen-Seite des Dashboards die Erkennungsergebnisse und Beispiele für Parsing-Fehler prüfen.
+Die Einrichtung ist unter [Log-Anbindung](../log-sources.md) beschrieben. Nach dem Anbinden einer Quelle kannst du auf der Datenquellen-Seite des Dashboards die Erkennungsergebnisse und Beispiele für Parsing-Fehler prüfen.
 
 ## Dokumentation
 
@@ -144,15 +144,15 @@ Die folgenden ausführlichen Dokumente sind in vereinfachtem Chinesisch verfasst
 
 | Dokument | Inhalt |
 |---|---|
-| [Bereitstellungsleitfaden](docs/deployment.md) | Produktivbereitstellung, `.env`-Variablen, Upgrades und Rollback, Offline-Netze, Demo-Umgebung, Ausführung aus dem Quellcode |
-| [Log-Anbindung](docs/log-sources.md) | Anbindung von Web, Firewall, Authentifizierung und DNS, Verwaltung von Syslog-Absendern, Zeitzonen, DNAT und Sitzungsbelege |
-| [Erkennung und Prüfung](docs/detection.md) | Schweregrad-Entscheidung, Ergebnisprüfung, Bedrohungsbewertung, Sicherheitsbewertung und Kompromittierungsanalyse |
-| [Rückverfolgung der Angriffsquelle](docs/traceability.md) | Geolokalisierung aus mehreren Quellen, interne Subnetze, Hot Reload der Geodatenbanken, Korrelation gleicher Herkunft |
-| [Selbstlernen und KI-Triage](docs/self-learning.md) | Was automatisch angewendet wird und seine Grenzen, Verhaltens-Baselines, Compliance-Selbstprüfungen, Konfiguration und Anpassung externer Modelle |
-| [Sicherheitsbetrieb](docs/operations.md) | Vorfallbearbeitung, Benachrichtigungen, Rohlogs, Assets und Schwachstellen, Berichte und Compliance, Konten und Audit, Metriken, Alarmarchivierung |
-| [Konfigurationsreferenz](docs/configuration.md) | Häufige Einstellungen und Betriebshinweise |
-| [API](docs/api.md) | Überblick über die REST-API |
-| [Entwicklung und Veröffentlichung](docs/development.md) | Lokale Tests, Codestruktur, Erstellung und Veröffentlichung von Images |
+| [Bereitstellungsleitfaden](../deployment.md) | Produktivbereitstellung, `.env`-Variablen, Upgrades und Rollback, Offline-Netze, Demo-Umgebung, Ausführung aus dem Quellcode |
+| [Log-Anbindung](../log-sources.md) | Anbindung von Web, Firewall, Authentifizierung und DNS, Verwaltung von Syslog-Absendern, Zeitzonen, DNAT und Sitzungsbelege |
+| [Erkennung und Prüfung](../detection.md) | Schweregrad-Entscheidung, Ergebnisprüfung, Bedrohungsbewertung, Sicherheitsbewertung und Kompromittierungsanalyse |
+| [Rückverfolgung der Angriffsquelle](../traceability.md) | Geolokalisierung aus mehreren Quellen, interne Subnetze, Hot Reload der Geodatenbanken, Korrelation gleicher Herkunft |
+| [Selbstlernen und KI-Triage](../self-learning.md) | Was automatisch angewendet wird und seine Grenzen, Verhaltens-Baselines, Compliance-Selbstprüfungen, Konfiguration und Anpassung externer Modelle |
+| [Sicherheitsbetrieb](../operations.md) | Vorfallbearbeitung, Benachrichtigungen, Rohlogs, Assets und Schwachstellen, Berichte und Compliance, Konten und Audit, Metriken, Alarmarchivierung |
+| [Konfigurationsreferenz](../configuration.md) | Häufige Einstellungen und Betriebshinweise |
+| [API](../api.md) | Überblick über die REST-API |
+| [Entwicklung und Veröffentlichung](../development.md) | Lokale Tests, Codestruktur, Erstellung und Veröffentlichung von Images |
 
 ## Entwicklung
 
@@ -171,7 +171,7 @@ Race-Tests benötigen einen C-Compiler. Ohne gcc auf deinem Rechner kannst du si
 docker run --rm -v "$PWD":/src -w /src golang:1.27-alpine sh -c 'apk add --no-cache gcc musl-dev && CGO_ENABLED=1 go test -race -short ./...'
 ```
 
-Codestruktur und Veröffentlichungsablauf findest du unter [Entwicklung und Veröffentlichung](docs/development.md).
+Codestruktur und Veröffentlichungsablauf findest du unter [Entwicklung und Veröffentlichung](../development.md).
 
 ## Mitwirken
 

@@ -12,13 +12,13 @@ nginx, 방화벽 / IDS, 호스트 인증, DNS 로그를 추적하고 대응할 �
 ![Go](https://img.shields.io/badge/Go-1.25%2B-00ADD8?logo=go&logoColor=white)
 ![Docker](https://img.shields.io/badge/docker-amd64%20%7C%20arm64-2496ED?logo=docker&logoColor=white)
 
-[简体中文](README.md) · [English](README.en.md) · [繁體中文](README.zh-TW.md) · [日本語](README.ja.md) · **한국어** · [Español](README.es.md) · [Français](README.fr.md) · [Deutsch](README.de.md) · [Русский](README.ru.md)
+[简体中文](../../README.md) · [English](README.en.md) · [繁體中文](README.zh-TW.md) · [日本語](README.ja.md) · **한국어** · [Español](README.es.md) · [Français](README.fr.md) · [Deutsch](README.de.md) · [Русский](README.ru.md)
 
 [빠른 시작](#빠른-시작) · [화면 미리보기](#화면-미리보기) · [핵심 기능](#핵심-기능) · [동작 방식](#동작-방식) · [지원 로그](#지원-로그) · [문서](#문서)
 
 </div>
 
-![상황 개요: 공격 지도, 실시간 경보, 위협 지수](docs/images/overview.png)
+![상황 개요: 공격 지도, 실시간 경보, 위협 지수](../images/overview.png)
 
 ## netsa를 선택하는 이유
 
@@ -56,7 +56,7 @@ docker compose up -d
 - 버전 고정, 포트 변경, 경보 보관이 필요하면 먼저 `cp .env.example .env`를 실행한 뒤 주석에 따라 수정합니다.
 - Windows PowerShell 5.1은 `&&`와 `grep`을 지원하지 않습니다. 명령을 한 줄씩 실행하고 `grep` 대신 `Select-String`을 사용하세요.
 
-업그레이드와 롤백, 오프라인 배포, 자주 묻는 문제는 [배포 가이드](docs/deployment.md)를 참고하세요.
+업그레이드와 롤백, 오프라인 배포, 자주 묻는 문제는 [배포 가이드](../deployment.md)를 참고하세요.
 
 ### 배포 없이 기존 로그 분석
 
@@ -70,9 +70,9 @@ go build -o bin/netsa ./cmd/netsa
 
 | 보안 평가와 처리 권고 | 공격 표면 분석 |
 |---|---|
-| ![보안 평가](docs/images/assess.png) | ![공격 표면 분석](docs/images/surface.png) |
+| ![보안 평가](../images/assess.png) | ![공격 표면 분석](../images/surface.png) |
 | **인시던트 처리와 처리 기한** | **자가 학습과 자동 보정** |
-| ![인시던트 처리](docs/images/incidents.png) | ![자가 학습](docs/images/learn.png) |
+| ![인시던트 처리](../images/incidents.png) | ![자가 학습](../images/learn.png) |
 
 스크린샷은 중국어 웹 화면이며, 내장 시뮬레이터가 생성한 데모 데이터를 보여 줍니다. IP와 사이트는 모두 가상입니다. 위의 데모 환경으로 직접 체험할 수 있습니다.
 
@@ -80,17 +80,17 @@ go build -o bin/netsa ./cmd/netsa
 
 | 모듈 | 기능 |
 |---|---|
-| [로그 수집](docs/log-sources.md) | 파일 실시간 추적(와일드카드, logrotate 순환), 일괄 분석(`.gz` 포함), Syslog UDP / TCP / TLS(상호 인증 가능), 송신 측 식별, 허용 목록, 속도 제한, 로그 끊김 경보 |
-| [공격 탐지](docs/detection.md) | SQL 인젝션, XSS, 명령 실행, Log4Shell, SSRF, XXE, 역직렬화, WebShell, 알려진 취약점 악용 등의 시그니처 규칙; CC, 무차별 대입, 크리덴셜 스터핑, API 열거, 포트 스캔 등의 행위 탐지; 다단계 디코딩으로 일반적인 우회에 대응 |
-| [결과 판정](docs/detection.md#研判复核用证据排除表面成功) | 응답과 세션 증거로 차단됨, 실패, 차단되지 않음, 성공 의심을 구분; 단일 페이지 앱의 대체 페이지, 통합 오류 페이지, 서비스에 도달하지 않은 "허용" 같은 겉보기 현상을 배제 |
-| [호스트 및 DNS 탐지](docs/log-sources.md#主机认证日志与-dns-日志) | SSH / RDP / VPN 무차별 대입과 침입 성공, 패스워드 스프레이, 로그 삭제, 계정 생성과 권한 상승; DNSLog 대역 외 콜백, DNS 터널, DGA, 채굴 풀 도메인 |
-| [공격원 추적](docs/traceability.md) | ip2region, MaxMind, ip-api, rDNS, RDAP / WHOIS를 통합하고 내부 사용자 정의 서브넷 위치를 지원; 동일 출처 연관으로 서브넷, 도구 지문, 공격 기법에 따라 같은 그룹으로 의심되는 대상을 발견 |
-| [상황 대시보드](docs/deployment.md#演示环境) | 세계 / 중국 이중 공격 지도, 성과 시 단위까지 드릴다운; 실시간 공격선과 경보 알림; KPI, 추세, 분포 차트를 클릭해 공격원이나 경보로 드릴다운 |
-| [공격 표면 분석](docs/log-sources.md#未做-dnat-映射的端口探测) | 외부 공개 서비스를 정리하고 소스 코드, 키, 백업 유출과 관리 인터페이스 노출을 발견; DNAT 매핑과 방화벽 세션 증거로 어떤 서비스에도 닿지 않는 배경 스캔을 걸러냄 |
-| [보안 평가와 침해 판정](docs/detection.md#安全评估与失陷研判) | 7개 차원으로 점수를 매겨 A~E 종합 등급과 P0~P3 처리 권고를 제시; 내부 호스트의 위협 인텔리전스 주소 접속, C2 비콘 탐지; MITRE ATT&CK 매트릭스 |
-| [자가 학습과 AI 분석](docs/self-learning.md) | 규칙 단위와 대상 단위 자동 보정, 확인된 공격원 재출현 시 등급 상향, 학습 기간(정책은 화면에서 조정 가능); AI 분석은 OpenAI / Anthropic API와 vLLM을 지원하고 모델 차이에 자동 적응하며, 자사 유사 사례를 첨부하고 모델과 분석가 결론의 일치율을 집계 |
-| [인시던트 처리와 알림](docs/operations.md#事件处置与误报抑制) | 경보를 인시던트로 자동 집계하고 담당자 지정, 처리 기한, 기한 초과 알림을 지원; 오탐 억제; [DingTalk / WeCom / Feishu 알림](docs/operations.md#告警推送钉钉--企业微信--飞书)(중복 제거, 병합, 속도 제한); nginx, iptables, ipset 등의 차단 목록 내보내기 |
-| [보관, 규정 준수, 감사](docs/operations.md#原始日志留存与检索) | 원본 로그를 시간 단위로 압축 보관하고 해시 체인으로 위변조 방지; [PostgreSQL 장기 보관](docs/operations.md#告警归档可选postgresql)(선택); 주간·월간 보고서, MLPS 2.0 자가 점검; [세 가지 역할, 이중 인증, 위변조 방지 감사 체인](docs/operations.md#登录账号与审计); Prometheus 지표 |
+| [로그 수집](../log-sources.md) | 파일 실시간 추적(와일드카드, logrotate 순환), 일괄 분석(`.gz` 포함), Syslog UDP / TCP / TLS(상호 인증 가능), 송신 측 식별, 허용 목록, 속도 제한, 로그 끊김 경보 |
+| [공격 탐지](../detection.md) | SQL 인젝션, XSS, 명령 실행, Log4Shell, SSRF, XXE, 역직렬화, WebShell, 알려진 취약점 악용 등의 시그니처 규칙; CC, 무차별 대입, 크리덴셜 스터핑, API 열거, 포트 스캔 등의 행위 탐지; 다단계 디코딩으로 일반적인 우회에 대응 |
+| [결과 판정](../detection.md#研判复核用证据排除表面成功) | 응답과 세션 증거로 차단됨, 실패, 차단되지 않음, 성공 의심을 구분; 단일 페이지 앱의 대체 페이지, 통합 오류 페이지, 서비스에 도달하지 않은 "허용" 같은 겉보기 현상을 배제 |
+| [호스트 및 DNS 탐지](../log-sources.md#主机认证日志与-dns-日志) | SSH / RDP / VPN 무차별 대입과 침입 성공, 패스워드 스프레이, 로그 삭제, 계정 생성과 권한 상승; DNSLog 대역 외 콜백, DNS 터널, DGA, 채굴 풀 도메인 |
+| [공격원 추적](../traceability.md) | ip2region, MaxMind, ip-api, rDNS, RDAP / WHOIS를 통합하고 내부 사용자 정의 서브넷 위치를 지원; 동일 출처 연관으로 서브넷, 도구 지문, 공격 기법에 따라 같은 그룹으로 의심되는 대상을 발견 |
+| [상황 대시보드](../deployment.md#演示环境) | 세계 / 중국 이중 공격 지도, 성과 시 단위까지 드릴다운; 실시간 공격선과 경보 알림; KPI, 추세, 분포 차트를 클릭해 공격원이나 경보로 드릴다운 |
+| [공격 표면 분석](../log-sources.md#未做-dnat-映射的端口探测) | 외부 공개 서비스를 정리하고 소스 코드, 키, 백업 유출과 관리 인터페이스 노출을 발견; DNAT 매핑과 방화벽 세션 증거로 어떤 서비스에도 닿지 않는 배경 스캔을 걸러냄 |
+| [보안 평가와 침해 판정](../detection.md#安全评估与失陷研判) | 7개 차원으로 점수를 매겨 A~E 종합 등급과 P0~P3 처리 권고를 제시; 내부 호스트의 위협 인텔리전스 주소 접속, C2 비콘 탐지; MITRE ATT&CK 매트릭스 |
+| [자가 학습과 AI 분석](../self-learning.md) | 규칙 단위와 대상 단위 자동 보정, 확인된 공격원 재출현 시 등급 상향, 학습 기간(정책은 화면에서 조정 가능); AI 분석은 OpenAI / Anthropic API와 vLLM을 지원하고 모델 차이에 자동 적응하며, 자사 유사 사례를 첨부하고 모델과 분석가 결론의 일치율을 집계 |
+| [인시던트 처리와 알림](../operations.md#事件处置与误报抑制) | 경보를 인시던트로 자동 집계하고 담당자 지정, 처리 기한, 기한 초과 알림을 지원; 오탐 억제; [DingTalk / WeCom / Feishu 알림](../operations.md#告警推送钉钉--企业微信--飞书)(중복 제거, 병합, 속도 제한); nginx, iptables, ipset 등의 차단 목록 내보내기 |
+| [보관, 규정 준수, 감사](../operations.md#原始日志留存与检索) | 원본 로그를 시간 단위로 압축 보관하고 해시 체인으로 위변조 방지; [PostgreSQL 장기 보관](../operations.md#告警归档可选postgresql)(선택); 주간·월간 보고서, MLPS 2.0 자가 점검; [세 가지 역할, 이중 인증, 위변조 방지 감사 체인](../operations.md#登录账号与审计); Prometheus 지표 |
 
 ## 동작 방식
 
@@ -120,7 +120,7 @@ go build -o bin/netsa ./cmd/netsa
 
 핵심 설계:
 
-- **등급은 한곳에서만 판정**: 규칙에 선언한 등급은 권장값일 뿐이며, 각 단계가 제각각 가감해 같은 종류의 이벤트 등급이 달라지는 것을 막습니다. 자세한 내용은 [위협 등급 판정](docs/detection.md#威胁等级判定)을 참고하세요.
+- **등급은 한곳에서만 판정**: 규칙에 선언한 등급은 권장값일 뿐이며, 각 단계가 제각각 가감해 같은 종류의 이벤트 등급이 달라지는 것을 막습니다. 자세한 내용은 [위협 등급 판정](../detection.md#威胁等级判定)을 참고하세요.
 - **겉모습보다 증거 우선**: 방화벽 "허용", 응답 200, 여러 번 실패한 뒤의 로그인 성공은 모두 세션, 응답 기준선, 계정 단서로 재검증합니다.
 - **학습에는 경계가 있음**: 사람의 결론에서만 학습합니다. 자동 조정은 한 번에 최대 한 단계이며, 악용에 성공하면 여전히 심각으로 판정합니다. 경보를 숨기는 오탐 억제는 사람이 채택해야 합니다. AI 결론은 학습 샘플로 쓰이지 않으며 자동 처리도 하지 않습니다.
 - **부하에도 통제 유지**: 파싱과 탐지를 병렬로 수행해 일괄 저장하고, 프로필 수와 탐지 창에는 엄격한 상한이 있습니다. 비정상 로그 한 줄이 서비스에 영향을 주지 않으며, 대기열 적체와 폐기는 모두 모니터링 지표로 확인할 수 있습니다.
@@ -136,7 +136,7 @@ go build -o bin/netsa ./cmd/netsa
 | **DNS** | BIND, dnsmasq, CoreDNS, Windows DNS, Zeek, Suricata DNS |
 | **컨테이너와 수집기** | Docker json-file, Fluent Bit / Fluentd, Filebeat / Logstash / Vector, containerd / CRI-O(자동으로 풀어 원본 로그를 인식) |
 
-연동 방법은 [로그 연동](docs/log-sources.md)을 참고하세요. 연동 후 대시보드의 "데이터 소스" 페이지에서 인식 결과와 파싱 실패 샘플을 확인할 수 있습니다.
+연동 방법은 [로그 연동](../log-sources.md)을 참고하세요. 연동 후 대시보드의 "데이터 소스" 페이지에서 인식 결과와 파싱 실패 샘플을 확인할 수 있습니다.
 
 ## 문서
 
@@ -144,15 +144,15 @@ go build -o bin/netsa ./cmd/netsa
 
 | 문서 | 내용 |
 |---|---|
-| [배포 가이드](docs/deployment.md) | 운영 환경 배포, `.env` 변수, 업그레이드와 롤백, 오프라인 환경, 데모 환경, 소스에서 실행 |
-| [로그 연동](docs/log-sources.md) | Web, 방화벽, 인증, DNS 연동, syslog 송신 측 관리, 시간대, DNAT와 세션 증거 |
-| [탐지와 판정](docs/detection.md) | 위협 등급 판정, 결과 재검증, 위협 점수, 보안 평가와 침해 판정 |
-| [공격원 추적](docs/traceability.md) | 다중 소스 위치 정보, 내부 서브넷, 위치 정보 데이터베이스 핫 리로드, 동일 출처 연관 분석 |
-| [자가 학습과 AI 분석](docs/self-learning.md) | 자동 적용 범위와 경계, 행위 기준선, 규정 준수 자가 점검, 외부 모델 설정과 적응 |
-| [보안 운영](docs/operations.md) | 인시던트 처리, 경보 알림, 원본 로그, 자산과 취약점, 보고서와 규정 준수, 계정과 감사, 모니터링 지표, 경보 보관 |
-| [설정 참고](docs/configuration.md) | 자주 쓰는 설정 항목과 운영 시 주의 사항 |
-| [API](docs/api.md) | REST API 목록 |
-| [개발과 릴리스](docs/development.md) | 로컬 테스트, 코드 구조, 이미지 빌드와 릴리스 |
+| [배포 가이드](../deployment.md) | 운영 환경 배포, `.env` 변수, 업그레이드와 롤백, 오프라인 환경, 데모 환경, 소스에서 실행 |
+| [로그 연동](../log-sources.md) | Web, 방화벽, 인증, DNS 연동, syslog 송신 측 관리, 시간대, DNAT와 세션 증거 |
+| [탐지와 판정](../detection.md) | 위협 등급 판정, 결과 재검증, 위협 점수, 보안 평가와 침해 판정 |
+| [공격원 추적](../traceability.md) | 다중 소스 위치 정보, 내부 서브넷, 위치 정보 데이터베이스 핫 리로드, 동일 출처 연관 분석 |
+| [자가 학습과 AI 분석](../self-learning.md) | 자동 적용 범위와 경계, 행위 기준선, 규정 준수 자가 점검, 외부 모델 설정과 적응 |
+| [보안 운영](../operations.md) | 인시던트 처리, 경보 알림, 원본 로그, 자산과 취약점, 보고서와 규정 준수, 계정과 감사, 모니터링 지표, 경보 보관 |
+| [설정 참고](../configuration.md) | 자주 쓰는 설정 항목과 운영 시 주의 사항 |
+| [API](../api.md) | REST API 목록 |
+| [개발과 릴리스](../development.md) | 로컬 테스트, 코드 구조, 이미지 빌드와 릴리스 |
 
 ## 개발
 
@@ -171,7 +171,7 @@ go test ./...
 docker run --rm -v "$PWD":/src -w /src golang:1.27-alpine sh -c 'apk add --no-cache gcc musl-dev && CGO_ENABLED=1 go test -race -short ./...'
 ```
 
-코드 구조와 릴리스 절차는 [개발과 릴리스](docs/development.md)를 참고하세요.
+코드 구조와 릴리스 절차는 [개발과 릴리스](../development.md)를 참고하세요.
 
 ## 기여하기
 
