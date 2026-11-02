@@ -27,13 +27,15 @@ type Settings struct {
 	APIKey string `json:"api_key,omitempty"`
 	// KeyFromEnv 表示界面未填写密钥时使用环境变量中的密钥（兼容原有部署方式）；
 	// 在界面填写或清除密钥后不再使用环境变量
-	KeyFromEnv  bool      `json:"key_from_env"`
-	MaxPerHour  int       `json:"max_per_hour"`
-	MaxTokens   int       `json:"max_tokens,omitempty"`  // 研判的输出长度上限，0 为自动
-	TimeoutSec  int       `json:"timeout_sec,omitempty"` // 单次调用超时（秒）
-	Thinking    string    `json:"thinking,omitempty"`    // 思考模式：auto / off / on
-	Desensitize bool      `json:"desensitize"`
-	AutoTriage  bool      `json:"auto_triage"`
+	KeyFromEnv  bool   `json:"key_from_env"`
+	MaxPerHour  int    `json:"max_per_hour"`
+	MaxTokens   int    `json:"max_tokens,omitempty"`  // 研判的输出长度上限，0 为自动
+	TimeoutSec  int    `json:"timeout_sec,omitempty"` // 单次调用超时（秒）
+	Thinking    string `json:"thinking,omitempty"`    // 思考模式：auto / off / on
+	Desensitize bool   `json:"desensitize"`
+	AutoTriage  bool   `json:"auto_triage"`
+	// NoDowngrade 关闭「模型高置信判为误报时下调事件等级」（默认开启）
+	NoDowngrade bool      `json:"no_downgrade,omitempty"`
 	UpdatedBy   string    `json:"updated_by,omitempty"`
 	Updated     time.Time `json:"updated,omitzero"`
 }
@@ -224,6 +226,16 @@ func (c *Client) AutoTriage() bool {
 	return c.set.Enabled && c.set.AutoTriage
 }
 
+// AutoDowngrade 返回模型高置信判为误报时是否下调事件等级。
+func (c *Client) AutoDowngrade() bool {
+	if c == nil {
+		return false
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return !c.set.NoDowngrade
+}
+
 // CallBudget 返回一次研判最长耗时：研判最多调用 3 次模型（截断重试、格式修复），每次还可能重试一次瞬时错误。
 func (c *Client) CallBudget() time.Duration {
 	if c == nil {
@@ -296,6 +308,7 @@ type View struct {
 	Thinking    string    `json:"thinking"`
 	Desensitize bool      `json:"desensitize"`
 	AutoTriage  bool      `json:"auto_triage"`
+	NoDowngrade bool      `json:"no_downgrade"`
 	FromUI      bool      `json:"from_ui"` // 配置来自界面（否则来自配置文件 ai 段）
 	Persist     bool      `json:"persist"` // 界面配置会保存到文件；否则重启后恢复为配置文件中的值
 	UpdatedBy   string    `json:"updated_by,omitempty"`
@@ -309,7 +322,7 @@ func (c *Client) View() View {
 	s := c.set
 	v := View{Enabled: s.Enabled, Protocol: s.Protocol, BaseURL: s.BaseURL, Model: s.Model, KeyEnv: c.keyEnv, MaxPerHour: s.MaxPerHour, MaxTokens: s.MaxTokens,
 		TimeoutSec: s.TimeoutSec, Thinking: s.Thinking, Desensitize: s.Desensitize,
-		AutoTriage: s.AutoTriage, FromUI: c.fromUI, Persist: c.path != "", UpdatedBy: s.UpdatedBy, Updated: s.Updated}
+		AutoTriage: s.AutoTriage, NoDowngrade: s.NoDowngrade, FromUI: c.fromUI, Persist: c.path != "", UpdatedBy: s.UpdatedBy, Updated: s.Updated}
 	switch {
 	case s.APIKey != "":
 		v.KeySet, v.KeySource = true, "ui"
@@ -337,6 +350,7 @@ type Update struct {
 	Thinking    string `json:"thinking"`
 	Desensitize bool   `json:"desensitize"`
 	AutoTriage  bool   `json:"auto_triage"`
+	NoDowngrade bool   `json:"no_downgrade"`
 }
 
 // ErrKeyRebind 表示模型地址的主机变更后沿用了原密钥。
@@ -354,7 +368,7 @@ func hostOf(base string) string {
 // 主机变更且沿用原密钥时拒绝：否则拿到管理会话的人只需改一下地址就能把密钥发到自己的服务器上。
 func (c *Client) mergeLocked(u Update) (Settings, error) {
 	s := Settings{Enabled: u.Enabled, Protocol: u.Protocol, BaseURL: u.BaseURL, Model: u.Model, APIKey: c.set.APIKey, KeyFromEnv: c.set.KeyFromEnv,
-		MaxPerHour: u.MaxPerHour, MaxTokens: u.MaxTokens, TimeoutSec: u.TimeoutSec, Thinking: u.Thinking, Desensitize: u.Desensitize, AutoTriage: u.AutoTriage}
+		MaxPerHour: u.MaxPerHour, MaxTokens: u.MaxTokens, TimeoutSec: u.TimeoutSec, Thinking: u.Thinking, Desensitize: u.Desensitize, AutoTriage: u.AutoTriage, NoDowngrade: u.NoDowngrade}
 	if s.TimeoutSec == 0 {
 		s.TimeoutSec = c.set.TimeoutSec
 	}

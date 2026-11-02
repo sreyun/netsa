@@ -1,6 +1,7 @@
 // Package ai 接入可选的外部大模型（OpenAI 兼容的 /chat/completions 接口），为安全事件提供研判参考。
 //
-// 模型输出只是参考：不自动处置，也不作为自学习样本（自学习只用分析员的结论来评估模型的一致率）；
+// 模型不关闭事件，结论也不作为自学习样本（自学习只用分析员的结论来评估模型的一致率）；高置信的误报判断
+// 只在没有实证的事件上把等级下调一级（见 store.AIDowngrade）；
 // 送给模型的日志内容可能被攻击者控制，系统提示中声明其只是数据，结果在界面上按纯文本展示。
 // 发送前默认脱敏，每次调用记入审计链并受每小时调用上限约束。模型地址、名称、密钥在 Web 管理页面配置（见 client.go）。
 package ai
@@ -30,8 +31,9 @@ type Verdict struct {
 	Suppress   string    `json:"false_positive_hint,omitempty"`
 	Trust      string    `json:"trust,omitempty"` // 自学习评估的该模型与分析员结论的一致率（由调用方填写）
 	Model      string    `json:"model"`
-	Raw        string    `json:"raw,omitempty"`      // 无法解析为 JSON 时的原文
-	Unparsed   bool      `json:"unparsed,omitempty"` // 未能得到结构化结论（不是模型判断为「无法判断」）
+	Raw        string    `json:"raw,omitempty"`        // 无法解析为 JSON 时的原文
+	Unparsed   bool      `json:"unparsed,omitempty"`   // 未能得到结构化结论（不是模型判断为「无法判断」）
+	Downgraded string    `json:"downgraded,omitempty"` // 事件因该结论下调前的等级（由调用方填写）
 	Time       time.Time `json:"time"`
 }
 

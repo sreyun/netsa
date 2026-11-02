@@ -48,6 +48,8 @@ type incidentForm struct {
 	Status   string   `json:"status"`
 	Assignee *string  `json:"assignee"`
 	Note     string   `json:"note"`
+	// RestoreAI 撤销模型判为误报造成的等级下调
+	RestoreAI bool `json:"restore_ai"`
 }
 
 // incidentUpdate 处置单个事件（POST /api/incidents/{id}）或批量处置（POST /api/incidents/bulk，最多 500 个）。
@@ -80,7 +82,7 @@ func (s *Server) incidentUpdate(w http.ResponseWriter, r *http.Request) {
 	if sess := sessionOf(r); sess != nil {
 		user = sess.User
 	}
-	list, err := s.Store.UpdateIncidents(f.IDs, user, store.IncidentUpdate{Status: f.Status, Assignee: f.Assignee, Note: f.Note})
+	list, err := s.Store.UpdateIncidents(f.IDs, user, store.IncidentUpdate{Status: f.Status, Assignee: f.Assignee, Note: f.Note, RestoreAI: f.RestoreAI})
 	detail := incidentIDs(f.IDs)
 	if f.Status != "" {
 		detail += " → " + store.IncidentStatusLabel[f.Status]

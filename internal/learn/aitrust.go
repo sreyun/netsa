@@ -415,3 +415,18 @@ func (l *Learner) History(source string, rules, targets []string, exclude uint64
 	}
 	return h
 }
+
+// TrustRate 返回模型与分析员结论的一致率；评估样本不足时 known 为 false。
+func (l *Learner) TrustRate(model string) (rate float64, known bool) {
+	if l == nil {
+		return 0, false
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	for _, st := range l.aiStats {
+		if st.Model == model && st.Rate >= 0 {
+			return st.Rate, true
+		}
+	}
+	return 0, false
+}

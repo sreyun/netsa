@@ -148,3 +148,72 @@ func TestIncidentEviction(t *testing.T) {
 		t.Fatalf("批量淘汰后: %d %d %v", n, keys, last)
 	}
 }
+
+// 模型判为误报时下调事件等级：有实证的事件不下调；之后出现证据自动撤销，也可人工撤销。
+func TestIncidentAIDowngrade(t *testing.T) {
+	s := newTestStore()
+	now := time.Now()
+	rec := func(ip, rule, cat string, sev model.Severity, result string, at time.Duration) uint64 {
+		res := s.Record(&model.Event{Kind: model.KindWeb, SrcIP: ip, Method: "GET", URI: "/a?" + rule, Status: 403, Time: now.Add(at)},
+			[]model.Hit{attackHit(rule, cat, sev, result)})
+		return res.Alerts[0].IncidentID
+	}
+	id := rec("203.0.113.1", "r1", "SQL注入", model.SevHigh, model.ResultBlocked, 0)
+	before := s.Incident(id).Due
+	from, ok := s.AIDowngrade(id, "模型判为疑似误报")
+	d := s.Incident(id)
+	if !ok || from != model.SevHigh || d.Severity != model.SevMedium || d.AIFrom != model.SevHigh || !d.Due.After(before) || d.Status != IncOpen {
+		t.Fatalf("应下调一级并放宽时限，事件保持待处理: %v %v %+v", from, ok, d.IncidentView)
+	}
+	if _, again := s.AIDowngrade(id, "x"); again {
+		t.Fatal("只下调一次")
+	}
+	// 同等级的新告警不把等级抬回去
+	rec("203.0.113.1", "r2", "SQL注入", model.SevHigh, model.ResultBlocked, time.Minute)
+	if d := s.Incident(id); d.Severity != model.SevMedium || d.AIFrom != model.SevHigh {
+		t.Fatalf("同等级告警不应撤销下调: %s", d.Severity)
+	}
+	// 出现成功利用：撤销下调并按实际等级
+	rec("203.0.113.1", "r3", "SQL注入", model.SevCritical, model.ResultSuccess, 2*time.Minute)
+	if d := s.Incident(id); d.Severity != model.SevCritical || d.AIFrom != 0 {
+		t.Fatalf("成功利用应撤销下调: %s %+v", d.Severity, d.Notes)
+	}
+	// 人工撤销
+	id2 := rec("203.0.113.2", "r1", "SQL注入", model.SevHigh, model.ResultBlocked, 0)
+	s.AIDowngrade(id2, "x")
+	if _, err := s.UpdateIncidents([]uint64{id2}, "ana", IncidentUpdate{RestoreAI: true}); err != nil {
+		t.Fatal(err)
+	}
+	if d := s.Incident(id2); d.Severity != model.SevHigh || d.AIFrom != 0 {
+		t.Fatalf("人工撤销: %s", d.Severity)
+	}
+	// 有实证的事件不下调
+	for _, c := range []struct {
+		name, ip, cat string
+		sev           model.Severity
+		result        string
+	}{
+		{"疑似成功", "203.0.113.3", "SQL注入", model.SevHigh, model.ResultSuccess},
+		{"严重", "203.0.113.4", "带外探测", model.SevCritical, model.ResultPassed},
+		{"失陷迹象", "203.0.113.5", "恶意外连", model.SevHigh, model.ResultPassed},
+		{"低危", "203.0.113.6", "扫描器", model.SevLow, model.ResultPassed},
+	} {
+		if _, ok := s.AIDowngrade(rec(c.ip, "r1", c.cat, c.sev, c.result, 0), "x"); ok {
+			t.Errorf("%s 的事件不应下调", c.name)
+		}
+	}
+	// 重启后保持
+	path := filepath.Join(t.TempDir(), "s.json.gz")
+	id3 := rec("203.0.113.7", "r1", "SQL注入", model.SevHigh, model.ResultBlocked, 0)
+	s.AIDowngrade(id3, "x")
+	if err := s.Save(path); err != nil {
+		t.Fatal(err)
+	}
+	s2 := newTestStore()
+	if err := s2.Load(path); err != nil {
+		t.Fatal(err)
+	}
+	if d := s2.Incident(id3); d.AIFrom != model.SevHigh || d.Severity != model.SevMedium {
+		t.Fatalf("快照恢复: %+v", d.IncidentView)
+	}
+}

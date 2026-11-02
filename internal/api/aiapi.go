@@ -124,6 +124,11 @@ func clipRunes(s string, n int) string {
 	return s
 }
 
+const (
+	aiDowngradeConfidence = 85  // 模型判为误报时下调事件等级所需的最低置信度
+	aiDowngradeMinRate    = 0.6 // 已有评估时要求的最低一致率
+)
+
 // triage 研判一个事件，结论写入事件处置记录并记入审计链。user 为触发人（自动研判为「系统」）。
 func (s *Server) triage(ctx context.Context, id uint64, user, ip string) (ai.Verdict, error) {
 	d := s.Store.Incident(id)
@@ -155,6 +160,17 @@ func (s *Server) triage(ctx context.Context, id uint64, user, ip string) (ai.Ver
 		}
 		if _, uerr := s.Store.UpdateIncidents([]uint64{id}, "AI（"+v.Model+"）", store.IncidentUpdate{Note: v.Note()}); uerr != nil {
 			log.Printf("[ai] 写入事件 #%d 处置记录失败: %v", id, uerr)
+		}
+		// 模型高置信判为误报：下调事件等级（不关闭事件，也不作为学习样本），减少分析员在这类事件上的时间。
+		// 分析员的结论已经证明这个模型不可靠时不下调
+		if !v.Unparsed && v.Verdict == "false_positive" && v.Confidence >= aiDowngradeConfidence && s.AI.AutoDowngrade() {
+			if rate, known := s.Learn.TrustRate(v.Model); !known || rate >= aiDowngradeMinRate {
+				reason := "模型 " + v.Model + " 判为疑似误报（置信度 " + strconv.Itoa(v.Confidence) + "%）"
+				if from, ok := s.Store.AIDowngrade(id, reason); ok {
+					v.Downgraded = from.Label()
+					detail += "，事件等级由" + from.Label() + "下调一级"
+				}
+			}
 		}
 	}
 	reason := ""

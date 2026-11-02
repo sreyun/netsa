@@ -8,6 +8,7 @@ import (
 	"unicode/utf8"
 
 	"netsa/internal/model"
+	"netsa/internal/risk"
 )
 
 // 事件处置状态。
@@ -92,6 +93,8 @@ type Incident struct {
 	Reminded   bool           `json:"reminded,omitempty"` // 已发送超时提醒
 	Notes      []IncidentNote `json:"notes"`
 	ClosedSev  model.Severity `json:"closed_severity,omitempty"` // 关闭时的最高等级：之后出现更高等级的告警时自动重新打开
+	// AIFrom 是外部模型判为误报、等级被自动下调前的等级；为 0 表示没有下调
+	AIFrom model.Severity `json:"ai_from,omitempty"`
 }
 
 // ensureMaps 补全旧快照中缺失的字段。
@@ -144,6 +147,7 @@ type IncidentView struct {
 	Assets     []string       `json:"assets,omitempty"`
 	AssetLevel string         `json:"asset_level,omitempty"`
 	Notes      int            `json:"notes"`
+	AIFrom     model.Severity `json:"ai_from,omitempty"` // 模型判为误报前的等级，0 表示没有下调
 }
 
 // rankKeys 按计数从多到少（相同时按名称）返回前 n 个键。
@@ -185,7 +189,7 @@ func (i *Incident) view(now time.Time) IncidentView {
 	}
 	return IncidentView{ID: i.ID, Key: i.Key, Title: title, Location: i.Location, Severity: i.Severity, Status: i.Status, Assignee: i.Assignee,
 		Alerts: i.Alerts, Hits: i.Hits, Muted: i.Muted, Success: i.Success, Categories: cats, Phases: phases, FirstSeen: i.FirstSeen, LastSeen: i.LastSeen,
-		Created: i.Created, Updated: i.Updated, Due: i.Due, Closed: i.Closed, Overdue: i.active() && now.After(i.Due), Notes: len(i.Notes), Assets: rankKeys(i.Assets, 5), AssetLevel: i.AssetLevel}
+		Created: i.Created, Updated: i.Updated, Due: i.Due, Closed: i.Closed, Overdue: i.active() && now.After(i.Due), AIFrom: i.AIFrom, Notes: len(i.Notes), Assets: rankKeys(i.Assets, 5), AssetLevel: i.AssetLevel}
 }
 
 // attachIncidentLocked 把告警归入事件（调用方持写锁），返回事件编号。
@@ -232,7 +236,11 @@ func (s *Store) attachIncidentLocked(a *model.Alert, p *IPProfile) uint64 {
 	if a.Time.After(inc.LastSeen) {
 		inc.LastSeen = a.Time
 	}
-	if a.Severity > inc.Severity {
+	// 模型判为误报而下调的事件：出现成功利用、失陷迹象或比下调前更高的等级时，证据优先，撤销下调
+	if inc.AIFrom != 0 && (a.Severity > inc.AIFrom || a.Result == model.ResultSuccess || risk.CompromiseEvidence(a.Category)) {
+		inc.restoreAI(now, "系统", "出现"+a.Severity.Label()+"告警「"+a.Name+"」")
+	}
+	if a.Severity > inc.Severity && inc.AIFrom == 0 {
 		inc.Severity = a.Severity
 		if inc.active() { // 等级升高后处置时限相应缩短
 			if due := inc.Created.Add(slaFor(a.Severity, inc.AssetLevel)); due.Before(inc.Due) {
@@ -275,6 +283,9 @@ func (s *Store) muteIncidentLocked(ip string, h incidentHit) {
 	incBounded(&inc.Phases, h.phase, 10)
 	if h.result == model.ResultSuccess {
 		inc.Success++
+		if inc.AIFrom != 0 {
+			inc.restoreAI(time.Now(), "系统", "出现疑似成功的命中")
+		}
 	}
 	if h.asset != nil {
 		incBounded(&inc.Assets, h.asset.Name, maxIncTargets)
@@ -452,7 +463,7 @@ func (s *Store) Incident(id uint64) *IncidentDetail {
 	}
 	d := &IncidentDetail{IncidentView: i.view(time.Now()), Notes: append([]IncidentNote{}, i.Notes...), AlertList: []*model.Alert{}, SLA: slaFor(i.Severity, i.AssetLevel).String()}
 	for k, v := range i.Rules {
-		name := s.ruleNames[k]
+		name := incidentRuleName(k, s.ruleNames[k])
 		if name == "" {
 			name = k
 		} else {
@@ -492,6 +503,8 @@ type IncidentUpdate struct {
 	Status   string  `json:"status"`
 	Assignee *string `json:"assignee"`
 	Note     string  `json:"note"`
+	// RestoreAI 撤销模型判为误报造成的等级下调
+	RestoreAI bool `json:"restore_ai,omitempty"`
 }
 
 // 处置错误。
@@ -509,7 +522,7 @@ func (s *Store) UpdateIncidents(ids []uint64, user string, u IncidentUpdate) ([]
 	if u.Status != "" && IncidentStatusLabel[u.Status] == "" {
 		return nil, ErrIncStatus
 	}
-	if u.Status == "" && u.Assignee == nil && u.Note == "" {
+	if u.Status == "" && u.Assignee == nil && u.Note == "" && !u.RestoreAI {
 		return nil, ErrIncEmpty
 	}
 	if utf8.RuneCountInString(u.Note) > 1000 {
@@ -538,6 +551,9 @@ func (s *Store) UpdateIncidents(ids []uint64, user string, u IncidentUpdate) ([]
 	}
 	var out []IncidentView
 	for _, i := range list {
+		if u.RestoreAI && i.AIFrom != 0 {
+			i.restoreAI(now, user, "人工撤销")
+		}
 		var actions []string
 		if u.Status != "" && u.Status != i.Status {
 			actions = append(actions, "状态："+IncidentStatusLabel[i.Status]+" → "+IncidentStatusLabel[u.Status])
@@ -647,4 +663,59 @@ func (s *Store) IncidentStats(from, to time.Time) IncidentPeriod {
 		st.Top = append(st.Top, top[k].view(now))
 	}
 	return st
+}
+
+// incidentRuleName 返回事件中展示的规则名称。这几条规则一个 ID 覆盖多个端口，名称却带具体端口，
+// 按 ID 汇总时只能显示最后一次的端口（目标都是 5432 却显示 MySQL），因此去掉端口。
+func incidentRuleName(id, name string) string {
+	switch id {
+	case "fw-riskport":
+		return "高危服务端口探测"
+	case "fw-iot":
+		return "IoT僵尸网络端口探测"
+	case "bhv-fwbrute":
+		return "端口暴力破解"
+	}
+	return name
+}
+
+// restoreAI 撤销模型判为误报造成的等级下调。调用方持写锁。
+func (i *Incident) restoreAI(now time.Time, user, why string) {
+	from := i.AIFrom
+	i.AIFrom = 0
+	if from <= i.Severity {
+		return
+	}
+	i.Severity = from
+	if i.active() {
+		if due := i.Created.Add(slaFor(from, i.AssetLevel)); due.Before(i.Due) {
+			i.Due, i.Reminded = due, false
+		}
+	}
+	i.Notes = appendNote(i.Notes, IncidentNote{Time: now, User: user, Action: "撤销模型的等级下调，恢复为" + from.Label() + "（" + why + "）"})
+	i.Updated = now
+}
+
+// AIDowngrade 在外部模型把事件判为误报时把等级下调一级，处置时限随之放宽，事件仍保留待分析员确认。
+//
+// 送给模型的日志内容可能被攻击者控制，因此只用于没有实证的事件：有疑似成功或失陷迹象、已是严重、
+// 涉及核心资产的事件一律不下调；之后出现相应证据时自动撤销。返回下调前的等级与是否下调。
+func (s *Store) AIDowngrade(id uint64, reason string) (model.Severity, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	i := s.incidents[id]
+	if i == nil || !i.active() || i.AIFrom != 0 || i.Success > 0 || i.AssetLevel == "core" || i.Severity < model.SevMedium || i.Severity > model.SevHigh {
+		return 0, false
+	}
+	for c := range i.Categories {
+		if risk.CompromiseEvidence(c) {
+			return 0, false
+		}
+	}
+	from, now := i.Severity, time.Now()
+	i.AIFrom, i.Severity = from, from-1
+	i.Due, i.Reminded = i.Created.Add(slaFor(i.Severity, i.AssetLevel)), false
+	i.Notes = appendNote(i.Notes, IncidentNote{Time: now, User: "系统", Action: "等级由" + from.Label() + "下调为" + i.Severity.Label() + "：" + reason + "；出现成功利用或更高等级的告警时自动恢复，也可人工撤销"})
+	i.Updated = now
+	return from, true
 }

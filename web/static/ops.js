@@ -95,7 +95,7 @@ async function loadIncidents() {
     ${ops ? `<td class="chk"><input type="checkbox" data-sel="${i.id}" ${inc.sel.has(i.id) ? 'checked' : ''} aria-label="选择事件 #${i.id}"></td>` : ''}
     <td class="nowrap mono">#${i.id}</td>
     <td><b>${esc(i.title)}</b><div class="cell-chips">${(i.phases || []).map((ph) => `<span class="chip">${esc(PHASE[ph] || ph)}</span>`).join('')}${(i.assets || []).map((a) => `<span class="chip ${i.asset_level === 'core' ? 'warn' : ''}">资产 ${esc(a)}</span>`).join('')}</div></td>
-    <td>${badge(i.severity)}</td><td class="nowrap">${statusChip(i.status)}</td>
+    <td>${badge(i.severity)}${i.ai_from ? `<div class="muted" style="font-size:11px" title="模型判为疑似误报，等级已下调，待分析员确认">原${esc(SEV_LABEL[i.ai_from] || i.ai_from)} · AI 下调</div>` : ''}</td><td class="nowrap">${statusChip(i.status)}</td>
     <td class="nowrap">${esc(i.assignee || '-')}</td>
     <td class="num">${num(i.alerts)}${i.hits && i.hits !== i.alerts ? `<div class="muted" style="font-size:11px" title="同一规则在节流窗口内只记录前若干条告警，其余命中只计数">命中 ${num(i.hits)}</div>` : ''}${i.success ? `<div class="res-success" style="font-size:11px">${i.success} 次疑似成功</div>` : ''}</td>
     <td class="nowrap muted">${esc(fmtShort(i.first_seen))}<br>${esc(fmtShort(i.last_seen))}</td>
@@ -187,6 +187,7 @@ async function openIncident(id) {
       <div class="k">攻击类型</div><div>${(d.categories || []).map((c) => `<span class="chip">${esc(c)}</span>`).join('') || '-'}</div>
       <div class="k">攻击阶段</div><div>${(d.phases || []).map((p) => `<span class="chip">${esc(PHASE[p] || p)}</span>`).join('') || '-'}</div>
       ${(d.assets || []).length ? `<div class="k">涉及资产</div><div>${d.assets.map((a) => `<span class="chip">${esc(a)}</span>`).join('')} ${IMPC(d.asset_level)}</div>` : ''}
+      ${d.ai_from ? `<div class="k">等级调整</div><div>模型判为疑似误报，由${esc(SEV_LABEL[d.ai_from] || d.ai_from)}下调一级，待分析员确认；出现成功利用或更高等级的告警时自动恢复${canOperate() ? ' <button type="button" class="btn" id="incRestoreAI">撤销下调</button>' : ''}</div>` : ''}
       <div class="k">负责人</div><div>${esc(d.assignee || '未指派')}</div>
       <div class="k">处置时限</div><div>${esc(fmtTime(d.due))}（${esc(fmtDur(d.sla))}，${d.asset_level === 'core' ? '涉及核心资产，时限按高一级计算' : '按事件等级计算'}）· ${incDue(d)}</div>
       <div class="k">命中规则</div><div>${(d.rules || []).map((r) => {
@@ -212,6 +213,17 @@ async function openIncident(id) {
   $('#incAIBox').hidden = true;
   openModal('incModal');
 }
+const SEV_LABEL = { critical: '严重', high: '高危', medium: '中危', low: '低危', info: '信息' };
+$('#incBody').addEventListener('click', (e) => {
+  if (e.target.id !== 'incRestoreAI') return;
+  ntBusy(e.target, async () => {
+    try {
+      await api('/api/incidents/' + inc.cur.id, 'POST', { restore_ai: true });
+      await openIncident(inc.cur.id);
+      loadIncidents().catch(console.error);
+    } catch (err) { setMsg('#incMsg', err.message); }
+  });
+});
 // AI 研判：结论写入处置记录并在对话框中展示（模型输出按纯文本展示）
 const AI_VERDICT = { attack: ['真实攻击', 'lv-high'], false_positive: ['疑似误报', 'nt-on'], uncertain: ['无法判断', 'muted'] };
 $('#incAI').addEventListener('click', () => {
@@ -227,6 +239,7 @@ $('#incAI').addEventListener('click', () => {
       const list = (xs) => (xs || []).map((x) => `<li>${esc(x)}</li>`).join('');
       $('#incAIBox').innerHTML = `<div><b>AI 研判</b> <span class="muted">${esc(v.model)} · 仅供参考，已写入处置记录</span></div>
         <div class="ai-verdict">${v.unparsed ? `<b class="lv-medium">未得到结论</b> · ${esc(v.summary)}` : `<b class="${cls}">${esc(label)}</b> 置信度 ${num(v.confidence)}% · ${esc(v.summary)}`}</div>
+        ${v.downgraded ? `<div class="muted">事件等级已由${esc(v.downgraded)}下调一级，事件保持待处理，请分析员确认</div>` : ''}
         ${(v.reasons || []).length ? `<div class="muted">依据</div><ul>${list(v.reasons)}</ul>` : ''}
         ${(v.actions || []).length ? `<div class="muted">处置建议</div><ul>${list(v.actions)}</ul>` : ''}
         ${v.false_positive_hint ? `<div class="muted">抑制建议：${esc(v.false_positive_hint)}</div>` : ''}
@@ -1025,7 +1038,7 @@ async function loadLearn() {
         <div class="k">调用</div><div>近 1 小时 ${num(a.used_hour)} / ${num(a.max_per_hour)} 次 · 累计 ${num(a.total)} 次${a.failed ? ` · <span class="lv-high">失败 ${num(a.failed)} 次</span>` : ''}${a.last_error ? `<div class="arc-err">${esc(a.last_error)}</div>` : ''}</div>
         <div class="k">协议</div><div>${a.protocol === 'anthropic' ? 'Anthropic（/messages）' : 'OpenAI 兼容（/chat/completions）'}</div>
         ${aiAdaptRows(a.adapt)}</div>`
-    : `<div class="muted">未启用。${isAdmin() ? '点击右上角“配置模型”，填写模型地址、模型名称与模型密钥后启用' : '请联系管理员在此页面配置模型地址、名称与密钥'}，即可在事件详情中使用“AI 研判”。支持 DeepSeek、通义千问、智谱、Kimi 等 OpenAI 兼容接口，以及内网部署的 vLLM / Ollama。</div>`) + trust;
+    : `<div class="muted">未启用。${isAdmin() ? '点击右上角“配置模型”，填写模型地址、模型名称与模型密钥后启用' : '请联系管理员在此页面配置模型地址、名称与密钥'}，即可在事件详情中使用“AI 研判”。同时支持 OpenAI 兼容接口与 Anthropic 接口，内网部署的 vLLM / Ollama 和云端模型都可接入。</div>`) + trust;
   $('#lnLog').innerHTML = `<thead><tr><th>时间</th><th>类型</th><th>操作人</th><th>说明</th></tr></thead><tbody>${r.changes.map((c) => `<tr><td class="nowrap muted">${esc(fmtShort(c.time))}</td>
       <td class="nowrap">${esc(LN_CHANGE[c.kind] || c.kind)}</td><td class="nowrap">${esc(c.user)}</td><td>${esc(c.detail)}</td></tr>`).join('') || empty(4, '暂无记录')}</tbody>`;
 }
@@ -1097,6 +1110,7 @@ async function openAIForm() {
   $('#aiTimeout').value = v.timeout_sec || 120;
   $('#aiDesens').checked = v.desensitize;
   $('#aiAuto').checked = v.auto_triage;
+  $('#aiDowngrade').checked = !v.no_downgrade;
   const who = v.updated_by ? `最近由 ${esc(v.updated_by)} 于 ${esc(fmtShort(v.updated))} 修改。` : (v.from_ui ? '' : '当前值来自配置文件 ai 段。');
   $('#aiNote').innerHTML = (v.persist
     ? '保存后立即生效，无需重启；配置保存在服务端状态目录的 ai.json，优先于配置文件。'
@@ -1111,7 +1125,7 @@ function aiCollect() {
     api_key: $('#aiClear').checked ? '' : $('#aiKey').value.trim(), clear_key: $('#aiClear').checked,
     max_per_hour: parseInt($('#aiMax').value, 10) || 30, desensitize: $('#aiDesens').checked, auto_triage: $('#aiAuto').checked,
     protocol: $('#aiProto').value, thinking: $('#aiThinking').value, max_tokens: parseInt($('#aiTokens').value, 10) || 0,
-    timeout_sec: parseInt($('#aiTimeout').value, 10) || 120,
+    timeout_sec: parseInt($('#aiTimeout').value, 10) || 120, no_downgrade: !$('#aiDowngrade').checked,
   };
 }
 $('#aiListBtn').addEventListener('click', () => {

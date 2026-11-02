@@ -46,12 +46,13 @@ type webWin struct {
 }
 
 type fwWin struct {
-	start  time.Time
-	events int
-	ports  map[int]struct{}
-	sweep  map[int]map[string]struct{}
-	auth   map[int]int
-	fired  int
+	start    time.Time
+	events   int
+	ports    map[int]struct{}
+	sweep    map[int]map[string]struct{}
+	auth     map[int]int    // 端口 → 同一主机上的最大连接数
+	authHost map[string]int // 端口/主机 → 连接数
+	fired    int
 }
 
 // loginWin 是一个登录接口的全局窗口，用于发现分布式暴力破解（撞库）：每个来源只尝试少量几次，
@@ -109,6 +110,9 @@ type Behavior struct {
 
 // maxWindows 是同时跟踪的行为窗口上限：大量不同来源（如伪造源地址的扫描）时不再为新来源建窗口，防止内存耗尽。
 const maxWindows = 300000
+
+// maxAuthHosts 是单个来源窗口内跟踪的「端口 + 主机」数量上限，伪造大量目标不会占用过多内存。
+const maxAuthHosts = 256
 
 func NewBehavior(th config.Thresholds) *Behavior {
 	return &Behavior{th: th, web: map[string]*webWin{}, fw: map[string]*fwWin{}, logins: map[string]*loginWin{},
@@ -541,9 +545,15 @@ func (b *Behavior) observeFw(ev *model.Event) []model.Hit {
 		}
 		if _, ok := authPorts[ev.DstPort]; ok {
 			if w.auth == nil {
-				w.auth = map[int]int{}
+				w.auth, w.authHost = map[int]int{}, map[string]int{}
 			}
-			w.auth[ev.DstPort]++
+			// 按「同一主机的同一端口」计数：暴力破解是对一个服务反复尝试；对大量主机各连几次是横向扫描，
+			// 由 bhv-hostsweep 判断。累加到端口上会把互联网背景扫描误判为暴力破解
+			key := strconv.Itoa(ev.DstPort) + "/" + ev.DstIP
+			if _, seen := w.authHost[key]; seen || len(w.authHost) < maxAuthHosts {
+				w.authHost[key]++
+				w.auth[ev.DstPort] = max(w.auth[ev.DstPort], w.authHost[key])
+			}
 		}
 	}
 	win := fmtDur(b.th.FwWindow)
@@ -557,9 +567,15 @@ func (b *Behavior) observeFw(ev *model.Event) []model.Hit {
 		}
 	}
 	nPorts := len(w.ports)
-	sev := model.SevMedium
+	// 来自互联网的扫描是常态，低一级：只有内网来源的扫描才是需要优先处理的横向移动信号
+	external := !isPrivateIP(ev.SrcIP)
+	sev, sweepSev := model.SevMedium, model.SevMedium
 	if nPorts >= highScan {
 		sev = model.SevHigh
+	}
+	if external {
+		sev--
+		sweepSev = model.SevLow
 	}
 	fire(bitPortScan, nPorts >= b.th.PortScanPorts, func() model.Hit {
 		return model.Hit{RuleID: "bhv-portscan", Name: "端口扫描", Category: CatPortScan,
@@ -568,13 +584,13 @@ func (b *Behavior) observeFw(ev *model.Event) []model.Hit {
 	if s := w.sweep[ev.DstPort]; len(s) >= b.th.HostSweep {
 		fire(bitSweep, true, func() model.Hit {
 			return model.Hit{RuleID: "bhv-hostsweep", Name: "主机存活/横向扫描", Category: CatHostSweep,
-				Severity: model.SevMedium, Phase: model.PhaseRecon, Evidence: fmt.Sprintf("%s内对 %d 台以上主机的 %d 端口发起连接", win, len(s), ev.DstPort)}
+				Severity: sweepSev, Phase: model.PhaseRecon, Evidence: fmt.Sprintf("%s内对 %d 台以上主机的 %d 端口发起连接", win, len(s), ev.DstPort)}
 		})
 	}
 	if name, ok := authPorts[ev.DstPort]; ok && w.auth[ev.DstPort] >= b.th.BruteConns {
 		fire(bitFwBrute, true, func() model.Hit {
 			return model.Hit{RuleID: "bhv-fwbrute", Name: name + "暴力破解", Category: CatBruteForce,
-				Severity: model.SevHigh, Phase: model.PhaseCredential, Evidence: fmt.Sprintf("%s内对 %s 端口发起 %d 次连接", win, name, w.auth[ev.DstPort])}
+				Severity: model.SevMedium, Phase: model.PhaseCredential, Evidence: fmt.Sprintf("%s内对同一主机的 %s 端口发起 %d 次连接（防火墙日志只能看到连接次数，看不到认证结果）", win, name, w.auth[ev.DstPort])}
 		})
 	}
 	fire(bitFlood, w.events >= b.th.FloodEvents, func() model.Hit {
@@ -594,6 +610,16 @@ func fwResult(ev *model.Event) string {
 		return model.ResultAllowed
 	}
 	return model.ResultUnknown
+}
+
+// SweepHosts 返回来源在当前窗口内探测同一端口的不同主机数（达到 host_sweep 后不再增长）。
+func (b *Behavior) SweepHosts(src string, port int) int {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if w := b.fw[src]; w != nil {
+		return len(w.sweep[port])
+	}
+	return 0
 }
 
 // Size 返回当前跟踪中的窗口数量（用于运行状态展示）。

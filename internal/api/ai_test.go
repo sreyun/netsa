@@ -256,3 +256,64 @@ func TestTriageSimilarAndModels(t *testing.T) {
 		t.Fatalf("模型列表应只允许管理员: %s", got)
 	}
 }
+
+// 模型高置信判为误报：事件等级下调；分析员的结论证明模型不可靠、或关闭开关时不下调。
+func TestTriageDowngrade(t *testing.T) {
+	verdict := `{\"verdict\":\"false_positive\",\"confidence\":95,\"summary\":\"背景扫描\"}`
+	llm := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"choices":[{"message":{"content":"` + verdict + `"}}]}`))
+	}))
+	defer llm.Close()
+	s, st := testServer(t, "", "")
+	s.Learn, _ = learn.Load(learn.Options{})
+	s.AI = ai.New(config.AIConfig{Enabled: true, BaseURL: llm.URL + "/v1", Model: "m", MaxPerHour: 100}, nil)
+	h := s.Handler()
+	newInc := func(i int) uint64 {
+		res := st.Record(&model.Event{Kind: model.KindWeb, SrcIP: "198.51.100." + strconv.Itoa(i), Method: "GET", URI: "/x" + strconv.Itoa(i), Status: 403, Time: time.Now()},
+			[]model.Hit{{RuleID: "r" + strconv.Itoa(i), Name: "n", Category: "SQL注入", Severity: model.SevHigh, Result: model.ResultBlocked}})
+		return res.Alerts[0].IncidentID
+	}
+	triage := func(id uint64) string {
+		rec := do(h, http.MethodPost, "/api/incidents/"+strconv.FormatUint(id, 10)+"/ai", "", nil)
+		if rec.Code != 200 {
+			t.Fatalf("研判: %d %s", rec.Code, rec.Body.String())
+		}
+		return rec.Body.String()
+	}
+	id := newInc(1)
+	if body := triage(id); !strings.Contains(body, `"downgraded"`) {
+		t.Fatalf("响应应说明已下调: %s", body)
+	}
+	if d := st.Incident(id); d.Severity != model.SevMedium || !strings.Contains(d.Notes[len(d.Notes)-1].Action, "下调") {
+		t.Fatalf("应下调: %s %+v", d.Severity, d.Notes)
+	}
+	if rec := do(h, http.MethodPost, "/api/incidents/"+strconv.FormatUint(id, 10), `{"restore_ai":true}`, nil); rec.Code != 200 || st.Incident(id).Severity != model.SevHigh {
+		t.Fatalf("人工撤销: %d %s", rec.Code, rec.Body.String())
+	}
+	// 低置信度不下调
+	verdict = `{\"verdict\":\"false_positive\",\"confidence\":60,\"summary\":\"x\"}`
+	id2 := newInc(2)
+	triage(id2)
+	if st.Incident(id2).Severity != model.SevHigh {
+		t.Fatal("低置信度不应下调")
+	}
+	// 关闭开关不下调
+	verdict = `{\"verdict\":\"false_positive\",\"confidence\":95,\"summary\":\"x\"}`
+	s.AI.Apply(ai.Update{Enabled: true, BaseURL: llm.URL + "/v1", Model: "m", MaxPerHour: 100, NoDowngrade: true}, "admin")
+	id3 := newInc(3)
+	triage(id3)
+	if st.Incident(id3).Severity != model.SevHigh {
+		t.Fatal("关闭开关后不应下调")
+	}
+	// 分析员的结论证明模型不可靠（一致率低于 60%）：不下调
+	s.AI.Apply(ai.Update{Enabled: true, BaseURL: llm.URL + "/v1", Model: "m", MaxPerHour: 100}, "admin")
+	for i := uint64(100); i < 106; i++ {
+		s.Learn.RecordAI(i, learn.AIRecord{Verdict: "false_positive", Confidence: 90, Model: "m"})
+		s.Learn.Feedback(learn.Case{Incident: i, Source: "203.0.113.1", Rules: map[string]int{"x": 1}, Verdict: learn.VerdictTP, User: "ana"})
+	}
+	id4 := newInc(4)
+	triage(id4)
+	if st.Incident(id4).Severity != model.SevHigh {
+		t.Fatal("不可靠的模型不应下调")
+	}
+}

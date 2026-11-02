@@ -302,7 +302,7 @@
     <div class="panel"><h3>精细校准（规则 + 目标） <small id="lnCtxIntro">规则整体准确率正常、只在个别目标上反复误报时，只下调该目标上的命中一级，其他目标不受影响</small></h3>
       <div class="scroll"><table class="table" id="lnCtx"></table></div></div>
     <div class="grid-2">
-      <div class="panel"><h3>外部模型 <small>OpenAI 兼容接口，结论仅供参考；自学习用分析员结论评估其可信度</small><button type="button" class="more need-admin" id="lnAIEdit">配置模型 ›</button></h3><div id="lnAI"></div></div>
+      <div class="panel"><h3>外部模型 <small>支持 OpenAI 与 Anthropic 接口，结论仅供参考；自学习用分析员结论评估其可信度</small><button type="button" class="more need-admin" id="lnAIEdit">配置模型 ›</button></h3><div id="lnAI"></div></div>
       <div class="panel"><h3>合规自检 <small>每小时自动执行等保合规检查，测评项下降时告警；每天校验审计链</small></h3><div id="lnComp"></div></div>
     </div>
     <div class="panel"><h3>进化日志 <small>每一次自动校准、撤销与人工确认都记入审计链</small></h3><div class="scroll"><table class="table" id="lnLog"></table></div></div>
@@ -582,6 +582,7 @@
       <label class="field"><span class="flabel">调用超时（秒）</span><input id="aiTimeout" type="number" min="10" max="1800" step="10"></label>
       <label class="inline"><input type="checkbox" id="aiDesens"> 发送前脱敏（内网地址、口令 / 令牌、手机号、证件号、邮箱；攻击来源公网地址保留）</label>
       <label class="inline"><input type="checkbox" id="aiAuto"> 新出现的高危及以上事件自动研判（结论写入事件处置记录）</label>
+      <label class="inline"><input type="checkbox" id="aiDowngrade"> 模型高置信判为误报时下调事件等级一级（有疑似成功、失陷迹象、涉及核心资产的事件不下调；事件保持待处理，可撤销）</label>
       <div class="hint" id="aiNote"></div>
       <div class="form-msg" id="aiMsg" role="status"></div>
     </div>

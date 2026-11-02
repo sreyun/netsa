@@ -196,6 +196,7 @@ func (p *Pipeline) aggregate(items []item) {
 				it.ev.Action == model.ActionAllow && reach != exposure.ReachNo && reach != exposure.ReachDevice, it.ev.Time)
 		}
 		hits[i] = p.gateExposure(it.ev, hits[i], reach, why)
+		hits[i] = p.tuneFirewall(it.ev, hits[i], reach)
 		hits[i] = p.Suppress.Filter(it.ev, hits[i])
 		hits[i] = p.Learn.Calibrate(it.ev, hits[i]) // 资产漏洞关联之前：有漏洞证据的升级不受校准影响
 		if p.Assets != nil && len(hits[i]) > 0 {
@@ -423,6 +424,56 @@ func (p *Pipeline) gateExposure(ev *model.Event, hits []model.Hit, reach exposur
 		return hits
 	}
 	p.Exposure.AddMuted()
+	return out
+}
+
+// bgScanHosts 是判定为互联网批量扫描的主机数：来源在窗口内探测同一端口的不同主机达到该数量。
+const bgScanHosts = 5
+
+// tuneFirewall 按证据调整防火墙命中的等级，让等级反映实际风险：
+//   - 端口级暴力破解只看到连接次数。会话证据表明确实到达了服务时才按高危，否则保持中危；
+//   - 外部来源批量探测多台主机的同一端口是互联网背景扫描，单次探测按低危。
+//     到达了服务或端口确已对外发布的不降：真实服务被探测仍然值得关注。
+func (p *Pipeline) tuneFirewall(ev *model.Event, hits []model.Hit, reach exposure.Verdict) []model.Hit {
+	if ev.Kind != model.KindFirewall || len(hits) == 0 {
+		return hits
+	}
+	var out []model.Hit
+	edit := func(i int) *model.Hit {
+		if out == nil {
+			out = append([]model.Hit(nil), hits...)
+		}
+		return &out[i]
+	}
+	for i := range hits {
+		h := &hits[i]
+		if h.TagOnly {
+			continue
+		}
+		switch {
+		case h.RuleID == "bhv-fwbrute" && reach == exposure.ReachYes:
+			edit(i).Severity = model.SevHigh
+		case h.Category == detect.CatRiskService || h.Category == detect.CatIoT:
+			if h.Severity <= model.SevLow || reach == exposure.ReachYes || p.Behavior == nil || geo.IsPrivate(ev.SrcIP) {
+				continue
+			}
+			if p.Exposure != nil {
+				if _, published := p.Exposure.Lookup(ev.DstIP, ev.DstPort, ev.Proto); published {
+					continue
+				}
+			}
+			n := p.Behavior.SweepHosts(ev.SrcIP, ev.DstPort)
+			if n < bgScanHosts {
+				continue
+			}
+			e := edit(i)
+			e.Severity = model.SevLow
+			e.Evidence = truncEvidence(e.Evidence + "；同一来源已探测 " + strconv.Itoa(n) + " 台以上主机的该端口，属批量扫描，未发现到达服务的证据")
+		}
+	}
+	if out == nil {
+		return hits
+	}
 	return out
 }
 
