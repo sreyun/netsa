@@ -12,9 +12,13 @@
 ![Go](https://img.shields.io/badge/Go-1.25%2B-00ADD8?logo=go&logoColor=white)
 ![Docker](https://img.shields.io/badge/docker-amd64%20%7C%20arm64-2496ED?logo=docker&logoColor=white)
 
-[快速开始](#快速开始) · [核心能力](#核心能力) · [工作原理](#工作原理) · [支持的日志](#支持的日志) · [文档](#文档)
+**简体中文** · [English](README.en.md) · [繁體中文](README.zh-TW.md) · [日本語](README.ja.md) · [한국어](README.ko.md) · [Español](README.es.md) · [Français](README.fr.md) · [Deutsch](README.de.md) · [Русский](README.ru.md)
+
+[快速开始](#快速开始) · [界面预览](#界面预览) · [核心能力](#核心能力) · [工作原理](#工作原理) · [支持的日志](#支持的日志) · [文档](#文档)
 
 </div>
+
+![态势总览：攻击地图、实时告警与威胁指数](docs/images/overview.png)
 
 ## 为什么是 netsa
 
@@ -61,6 +65,16 @@ go build -o bin/netsa ./cmd/netsa
 ./bin/netsa analyze /var/log/nginx/access.log* /var/log/ufw.log -o report.json
 ./bin/netsa analyze -listen :8080 access.log    # 分析后打开大屏
 ```
+
+## 界面预览
+
+| 安全评估与处置建议 | 攻击面分析 |
+|---|---|
+| ![安全评估](docs/images/assess.png) | ![攻击面分析](docs/images/surface.png) |
+| **事件处置与处置时限** | **自学习与自动校准** |
+| ![事件处置](docs/images/incidents.png) | ![自学习](docs/images/learn.png) |
+
+截图来自内置模拟器生成的演示数据，其中的 IP 与站点均为模拟，可用上面的演示环境自行体验。
 
 ## 核心能力
 
