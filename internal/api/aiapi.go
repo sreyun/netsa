@@ -78,6 +78,24 @@ func (s *Server) incidentFacts(d *store.IncidentDetail, m *ai.Masker) string {
 			ctx = append(ctx, c.Rule+" @ "+c.Target+"：确认攻击 "+strconv.Itoa(c.TP)+" 次、误报 "+strconv.Itoa(c.FP)+" 次")
 		}
 		line("同规则同目标历史研判", strings.Join(ctx, "；"))
+		// 本单位分析员处理过的相似案例（含纠正过模型的判断）：让模型吸取本环境的经验
+		if sim := s.Learn.Similar(ids, targets, d.ID, 5); len(sim) > 0 {
+			sb.WriteString("本单位相似案例（分析员结论）：\n")
+			for _, c := range sim {
+				v := "确认攻击"
+				if c.Verdict == learn.VerdictFP {
+					v = "误报"
+				}
+				item := "- " + c.Rule + " @ " + c.Target + "：" + v
+				if c.Corrected != "" {
+					item += "（模型曾判断为" + ai.VerdictLabel[c.Corrected] + "，被分析员纠正）"
+				}
+				if c.Note != "" {
+					item += "，说明：" + c.Note
+				}
+				sb.WriteString(m.Mask(item) + "\n")
+			}
+		}
 	}
 	sb.WriteString("最近告警（新的在前）：\n")
 	for i, a := range d.AlertList {
@@ -122,8 +140,19 @@ func (s *Server) triage(ctx context.Context, id uint64, user, ip string) (ai.Ver
 	if err == nil {
 		detail += "，结论 " + ai.VerdictLabel[v.Verdict]
 		// 自学习评估的模型可信度写在结论旁边；本次结论在分析员处置后用于更新一致率（不作为学习样本）
-		v.Trust = s.Learn.Trust(v.Model)
-		s.Learn.RecordAI(id, learn.AIRecord{Verdict: v.Verdict, Confidence: v.Confidence, Model: v.Model, Time: v.Time})
+		// 没有得到结论不是模型的判断，不计入一致率的统计
+		if !v.Unparsed {
+			v.Trust = s.Learn.Trust(v.Model)
+			rules, targets := []string{}, []string{}
+			for _, kv := range d.Rules {
+				id, _, _ := strings.Cut(kv.Name, " ")
+				rules = append(rules, id)
+			}
+			for _, kv := range d.Targets {
+				targets = append(targets, kv.Name)
+			}
+			s.Learn.RecordAI(id, learn.AIRecord{Verdict: v.Verdict, Confidence: v.Confidence, Model: v.Model, Rules: rules, Targets: targets, Time: v.Time})
+		}
 		if _, uerr := s.Store.UpdateIncidents([]uint64{id}, "AI（"+v.Model+"）", store.IncidentUpdate{Note: v.Note()}); uerr != nil {
 			log.Printf("[ai] 写入事件 #%d 处置记录失败: %v", id, uerr)
 		}
@@ -156,8 +185,9 @@ func (s *Server) incidentAI(w http.ResponseWriter, r *http.Request) {
 	if sess := sessionOf(r); sess != nil {
 		user = sess.User
 	}
-	extendDeadline(w, 3*time.Minute)
-	ctx, cancel := context.WithTimeout(r.Context(), 150*time.Second)
+	budget := s.AI.CallBudget()
+	extendDeadline(w, budget+30*time.Second)
+	ctx, cancel := context.WithTimeout(r.Context(), budget)
 	defer cancel()
 	v, err := s.triage(ctx, id, user, s.clientIP(r))
 	switch {
@@ -209,7 +239,7 @@ func (s *Server) aiTick(ctx context.Context) {
 			}
 		}()
 		for _, id := range todo {
-			c, cancel := context.WithTimeout(ctx, 150*time.Second)
+			c, cancel := context.WithTimeout(ctx, s.AI.CallBudget())
 			_, err := s.triage(c, id, "系统", "")
 			cancel()
 			if errors.Is(err, ai.ErrRateLimited) {
@@ -258,8 +288,8 @@ func (s *Server) aiTest(w http.ResponseWriter, r *http.Request) {
 	if !decodeForm(w, r, &u) {
 		return
 	}
-	extendDeadline(w, 2*time.Minute)
-	ctx, cancel := context.WithTimeout(r.Context(), 60*time.Second)
+	extendDeadline(w, 4*time.Minute)
+	ctx, cancel := context.WithTimeout(r.Context(), 3*time.Minute)
 	defer cancel()
 	res, err := s.AI.Test(ctx, u)
 	if err == nil && !res.OK {
@@ -281,6 +311,9 @@ func aiAuditDetail(before ai.View, u ai.Update) string {
 	parts := []string{"停用"}
 	if u.Enabled {
 		parts[0] = "启用"
+	}
+	if u.Protocol != "" {
+		parts = append(parts, "协议 "+clipRunes(strings.TrimSpace(u.Protocol), 16))
 	}
 	parts = append(parts, "模型 "+clipRunes(strings.TrimSpace(u.Model), 64))
 	base := clipRunes(strings.TrimRight(strings.TrimSpace(u.BaseURL), "/"), 200)
@@ -311,4 +344,20 @@ func aiAuditDetail(before ai.View, u ai.Update) string {
 	}
 	parts = append(parts, "每小时上限 "+strconv.Itoa(limit)+" 次")
 	return strings.Join(parts, "，")
+}
+
+// aiModels 读取接口提供的模型列表（管理员）：使用界面上尚未保存的地址与密钥，方便选择准确的模型名称。
+func (s *Server) aiModels(w http.ResponseWriter, r *http.Request) {
+	var u ai.Update
+	if !decodeForm(w, r, &u) {
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+	defer cancel()
+	list, err := s.AI.Models(ctx, u)
+	if err != nil {
+		writeError(w, http.StatusBadGateway, err.Error())
+		return
+	}
+	writeJSON(w, map[string]any{"models": list})
 }

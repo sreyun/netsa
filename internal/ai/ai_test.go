@@ -245,3 +245,434 @@ func TestAIConfigValidate(t *testing.T) {
 		}
 	}
 }
+
+// 推理模型与非严格 JSON 的输出：思考过程中的花括号、结束标签、草稿不影响取最终结论；字段类型的常见变体都能识别。
+func TestParseVerdictReasoningOutput(t *testing.T) {
+	answer := `{"verdict":"attack","confidence":90,"summary":"SQL 注入扫描"}`
+	for _, c := range []struct {
+		name, text, verdict string
+		confidence          int
+	}{
+		{"思考过程含花括号", "<think>\n要输出 {\"verdict\":...} 格式，先写草稿 {\"verdict\":\"uncertain\",\"confidence\":10}\n</think>\n\n" + answer, "attack", 90},
+		{"只有结束标签", "要输出 {verdict} 格式\n</think>\n" + answer, "attack", 90},
+		{"思考后带代码块", "<think>想想</think>\n```json\n" + answer + "\n```", "attack", 90},
+		{"正文中先照抄模板再作答", `格式：{"verdict":"attack|false_positive|uncertain","summary":"x"} 结论：` + answer, "attack", 90},
+		{"结论嵌套在外层对象", `{"result":` + answer + `}`, "attack", 90},
+		{"多个候选取最后一个", `{"verdict":"uncertain","confidence":1} {"verdict":"false_positive","confidence":70}`, "false_positive", 70},
+		{"置信度为百分比字符串", `{"verdict":"attack","confidence":"85%"}`, "attack", 85},
+		{"置信度为小数", `{"verdict":"attack","confidence":0.85}`, "attack", 85},
+		{"中文结论", `{"verdict":"疑似误报","confidence":60}`, "false_positive", 60},
+		{"中文否定不算攻击", `{"verdict":"非攻击","confidence":60}`, "false_positive", 60},
+		{"字段名大小写不同", `{"Verdict":"ATTACK","Confidence":70}`, "attack", 70},
+	} {
+		v := ParseVerdict(c.text)
+		if v.Unparsed || v.Verdict != c.verdict || v.Confidence != c.confidence {
+			t.Errorf("%s: %+v", c.name, v)
+		}
+	}
+	if v := ParseVerdict(`{"verdict":"attack","reasons":"单个依据","actions":["封禁",1]}`); len(v.Reasons) != 1 || v.Reasons[0] != "单个依据" || len(v.Actions) != 2 {
+		t.Errorf("依据与建议的变体: %+v", v)
+	}
+	for _, c := range []struct{ name, text string }{
+		{"思考被截断", "<think>先看证据 {\"verdict\":\"attack\"} 还需要"},
+		{"只照抄模板", `{"verdict":"attack|false_positive|uncertain","confidence":1}`},
+		{"大量花括号不卡死", strings.Repeat("{", 1<<20)},
+		{"空输出", ""},
+	} {
+		if v := ParseVerdict(c.text); !v.Unparsed || v.Verdict != "uncertain" {
+			t.Errorf("%s 应未得到结论: %+v", c.name, v.Verdict)
+		}
+	}
+}
+
+// 推理模型：reasoning_content 独立返回、思考用完输出长度时重试一次更高的上限；仍然失败时说明原因，
+// 处置记录能看出是没有结论，而不是模型判断为无法判断。
+func TestTriageReasoningModel(t *testing.T) {
+	var calls []map[string]any
+	reply := func(n int) string { return "" }
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req map[string]any
+		json.NewDecoder(r.Body).Decode(&req)
+		calls = append(calls, req)
+		w.Write([]byte(reply(len(calls))))
+	}))
+	defer srv.Close()
+	const truncated = `{"choices":[{"message":{"content":null,"reasoning_content":"先看证据"},"finish_reason":"length"}]}`
+	const good = `{"choices":[{"message":{"content":"{\"verdict\":\"attack\",\"confidence\":88,\"summary\":\"注入\"}","reasoning_content":"先看证据"},"finish_reason":"stop"}]}`
+	c := New(config.AIConfig{Enabled: true, BaseURL: srv.URL + "/v1", Model: "Qwen3.6-35B-A3B-FP8", MaxPerHour: 40}, nil)
+	c.backoff = time.Millisecond
+	tokens := func(i int) int { return int(calls[i]["max_tokens"].(float64)) }
+
+	reply = func(int) string { return good }
+	v, _, err := c.Triage(context.Background(), "事件摘要")
+	if err != nil || v.Verdict != "attack" || v.Confidence != 88 || len(calls) != 1 || tokens(0) != triageMaxTokens {
+		t.Fatalf("独立的思考字段不影响解析: %+v %v calls=%d", v, err, len(calls))
+	}
+	// vLLM：通过参数关闭思考、要求 JSON 输出，不改动提示文字
+	kw, _ := calls[0]["chat_template_kwargs"].(map[string]any)
+	if kw["enable_thinking"] != false || calls[0]["response_format"] == nil {
+		t.Fatalf("应请求关闭思考与 JSON 输出: %+v", calls[0])
+	}
+	if got := calls[0]["messages"].([]any)[1].(map[string]any)["content"]; got != "事件摘要" {
+		t.Fatalf("能用参数关闭思考时不应改动提示: %v", got)
+	}
+
+	// 第一次被截断，提高上限重试后得到结论
+	calls = nil
+	reply = func(n int) string {
+		if n == 1 {
+			return truncated
+		}
+		return good
+	}
+	if v, _, err = c.Triage(context.Background(), "x"); err != nil || v.Unparsed || v.Verdict != "attack" || len(calls) != 2 || tokens(1) != triageMaxTokens*2 {
+		t.Fatalf("截断后应重试: %+v %v calls=%d", v, err, len(calls))
+	}
+
+	// 重试仍被截断：只重试一次，说明原因并展示思考过程
+	calls = nil
+	reply = func(int) string { return truncated }
+	v, _, err = c.Triage(context.Background(), "x")
+	if err != nil || !v.Unparsed || len(calls) != 2 || !strings.Contains(v.Summary, "长度上限") || v.Raw != "先看证据" {
+		t.Fatalf("重试后仍截断: %+v %v calls=%d", v, err, len(calls))
+	}
+	if n := v.Note(); !strings.Contains(n, "未得到结论") || strings.Contains(n, "置信度") {
+		t.Fatalf("处置记录不应写成模型判断: %s", n)
+	}
+	if st := c.Status(); st.Adapt == nil || !st.Adapt.Thinks || st.Adapt.Parsed != 2 || st.Adapt.Unparsed != 1 || st.Adapt.Truncated != 2 {
+		t.Fatalf("应统计模型的研判表现: %+v", st.Adapt)
+	}
+
+	// 回复不是 JSON：请模型转换格式；其他模型不请求关闭思考
+	calls = nil
+	reply = func(n int) string {
+		if n == 1 {
+			return `{"choices":[{"message":{"content":"我认为这是攻击"},"finish_reason":"stop"}]}`
+		}
+		return good
+	}
+	c2 := New(config.AIConfig{Enabled: true, BaseURL: srv.URL + "/v1", Model: "deepseek-chat", MaxPerHour: 40}, nil)
+	v, _, _ = c2.Triage(context.Background(), "x")
+	if v.Unparsed || v.Verdict != "attack" || len(calls) != 2 || calls[0]["chat_template_kwargs"] != nil {
+		t.Fatalf("应修复格式: %+v calls=%d", v, len(calls))
+	}
+	if got := calls[1]["messages"].([]any)[1].(map[string]any)["content"]; got != "我认为这是攻击" {
+		t.Fatalf("格式修复应发送模型的回复: %v", got)
+	}
+	if st := c2.Status(); st.Adapt.Repaired != 1 {
+		t.Fatalf("修复计数: %+v", st.Adapt)
+	}
+
+	// 修复也失败：说明原因并保留原文
+	calls = nil
+	reply = func(int) string {
+		return `{"choices":[{"message":{"content":"我认为这是攻击"},"finish_reason":"stop"}]}`
+	}
+	v, _, _ = c2.Triage(context.Background(), "x")
+	if !v.Unparsed || len(calls) != 2 || !strings.Contains(v.Summary, "JSON") || v.Raw != "我认为这是攻击" {
+		t.Fatalf("非 JSON 回复: %+v calls=%d", v, len(calls))
+	}
+
+	// JSON 模式下返回空内容：学到后不再发送 response_format
+	calls = nil
+	reply = func(n int) string {
+		if n == 1 {
+			return `{"choices":[{"message":{"content":""},"finish_reason":"stop"}]}`
+		}
+		return good
+	}
+	c3 := New(config.AIConfig{Enabled: true, BaseURL: srv.URL + "/v1", Model: "local-model", MaxPerHour: 40}, nil)
+	if v, _, _ = c3.Triage(context.Background(), "x"); v.Unparsed || len(calls) != 2 || calls[1]["response_format"] != nil {
+		t.Fatalf("空内容应关闭 JSON 模式重试: %+v %v", v, calls)
+	}
+
+	// 测试连接：推理模型被 16 个 token 截断也算连通，并给出提示
+	reply = func(int) string {
+		return `{"choices":[{"message":{"content":"<think>好的，用户"},"finish_reason":"length"}]}`
+	}
+	r, err := c.Test(context.Background(), Update{BaseURL: srv.URL + "/v1", Model: "m", MaxPerHour: 40})
+	if err != nil || !r.OK || r.Reply != "" || !strings.Contains(r.Note, "推理模型") {
+		t.Fatalf("测试连接: %+v %v", r, err)
+	}
+}
+
+// Anthropic 协议：路径、认证头、请求体、内容块与结束原因；x-api-key 被拒绝时自动改用 Authorization。
+func TestAnthropicProtocol(t *testing.T) {
+	var got map[string]any
+	var hdr http.Header
+	var path string
+	bearerOnly := false
+	reply := `{"content":[{"type":"thinking","thinking":"先分析"},{"type":"text","text":"{\"verdict\":\"false_positive\",\"confidence\":75,\"summary\":\"业务请求\"}"}],"stop_reason":"end_turn"}`
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got, hdr, path = nil, r.Header.Clone(), r.URL.Path
+		json.NewDecoder(r.Body).Decode(&got)
+		if bearerOnly && r.Header.Get("Authorization") == "" {
+			http.Error(w, `{"type":"error","error":{"type":"authentication_error","message":"invalid x-api-key"}}`, http.StatusUnauthorized)
+			return
+		}
+		w.Write([]byte(reply))
+	}))
+	defer srv.Close()
+	c := New(config.AIConfig{}, nil)
+	c.backoff = time.Millisecond
+	// 只填主机：自动补 /v1
+	if _, _, err := c.Apply(Update{Enabled: true, Protocol: "anthropic", BaseURL: srv.URL, Model: "anthropic-test-model", APIKey: "sk-ant-test-000000", MaxPerHour: 20}, "admin"); err != nil {
+		t.Fatal(err)
+	}
+	v, _, err := c.Triage(context.Background(), "事件摘要")
+	if err != nil || v.Verdict != "false_positive" || v.Confidence != 75 {
+		t.Fatalf("研判: %+v %v", v, err)
+	}
+	if path != "/v1/messages" || hdr.Get("x-api-key") != "sk-ant-test-000000" || hdr.Get("anthropic-version") == "" || hdr.Get("Authorization") != "" {
+		t.Fatalf("请求: %s %v", path, hdr)
+	}
+	if got["system"] == nil || got["temperature"] != nil || got["thinking"] != nil || got["response_format"] != nil || int(got["max_tokens"].(float64)) != anthropicMaxTokens {
+		t.Fatalf("请求体: %+v", got)
+	}
+	if msgs := got["messages"].([]any); len(msgs) != 1 || msgs[0].(map[string]any)["role"] != "user" {
+		t.Fatalf("messages 只应含用户消息: %+v", msgs)
+	}
+	if st := c.Status(); st.Protocol != "anthropic" || !st.Adapt.Thinks {
+		t.Fatalf("状态: %+v", st)
+	}
+
+	// 网关要求 Authorization：自动改用并记住
+	bearerOnly = true
+	if v, _, err = c.Triage(context.Background(), "x"); err != nil || v.Verdict != "false_positive" {
+		t.Fatalf("改用 Authorization: %+v %v", v, err)
+	}
+	if hdr.Get("Authorization") != "Bearer sk-ant-test-000000" || !c.Status().Adapt.AuthBearer {
+		t.Fatalf("认证头: %v", hdr)
+	}
+
+	// 模型拒绝回答：说明原因，不重试
+	reply = `{"content":[],"stop_reason":"refusal","stop_details":{"type":"refusal","category":"cyber","explanation":"内容策略"}}`
+	if v, _, err = c.Triage(context.Background(), "x"); err != nil || !v.Unparsed || !strings.Contains(v.Summary, "拒绝回答") || !strings.Contains(v.Summary, "cyber") {
+		t.Fatalf("拒绝回答: %+v %v", v, err)
+	}
+	if c.Status().Adapt.Refused != 1 {
+		t.Fatalf("拒答计数: %+v", c.Status().Adapt)
+	}
+	// 输出被截断映射为 length
+	reply = `{"content":[{"type":"text","text":"{\"verd"}],"stop_reason":"max_tokens"}`
+	v, _, _ = c.Triage(context.Background(), "x")
+	if !v.Unparsed || !strings.Contains(v.Summary, "长度上限") || int(got["max_tokens"].(float64)) != anthropicMaxTokens*2 {
+		t.Fatalf("截断: %+v %+v", v, got)
+	}
+}
+
+// 模型适配：从请求被拒绝的错误信息中学习，并记住，下一次不再出错；瞬时错误重试一次。
+func TestAdaptiveRequests(t *testing.T) {
+	var calls []map[string]any
+	handler := func(int, map[string]any) (int, string) { return 200, "" }
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req map[string]any
+		json.NewDecoder(r.Body).Decode(&req)
+		calls = append(calls, req)
+		code, body := handler(len(calls), req)
+		w.WriteHeader(code)
+		w.Write([]byte(body))
+	}))
+	defer srv.Close()
+	const good = `{"choices":[{"message":{"content":"{\"verdict\":\"attack\",\"confidence\":50}"},"finish_reason":"stop"}]}`
+	newClient := func() *Client {
+		c := New(config.AIConfig{Enabled: true, BaseURL: srv.URL + "/v1", Model: "Qwen3.6-35B", MaxPerHour: 100}, nil)
+		c.backoff = time.Millisecond
+		return c
+	}
+	for _, tc := range []struct {
+		name, errMsg string
+		check        func(req map[string]any, p Profile) bool
+	}{
+		{"vLLM 上下文长度（新格式）", `{"message":"'max_tokens' or 'max_completion_tokens' is too large: 4096. This model's maximum context length is 4096 tokens and your request has 1000 input tokens (4096 > 4096 - 1000)."}`,
+			func(req map[string]any, p Profile) bool {
+				return p.MaxTokensCap == 3064 && req["max_tokens"].(float64) == 3064
+			}},
+		{"vLLM 上下文长度（旧格式）", `{"message":"This model's maximum context length is 4096 tokens. However, you requested 5096 tokens (1000 in the messages, 4096 in the completion)."}`,
+			func(req map[string]any, p Profile) bool { return p.MaxTokensCap == 3064 }},
+		{"输出上限", `{"error":{"message":"max_tokens: 4096 > 1024, which is the maximum allowed number of output tokens"}}`,
+			func(req map[string]any, p Profile) bool { return p.MaxTokensCap == 1024 }},
+		{"要求 max_completion_tokens", `{"error":{"message":"Unsupported parameter: 'max_tokens'. Use 'max_completion_tokens' instead."}}`,
+			func(req map[string]any, p Profile) bool {
+				return p.UseMaxCompletion && req["max_tokens"] == nil && req["max_completion_tokens"] != nil
+			}},
+		{"不支持 temperature", `{"error":{"message":"Unsupported value: 'temperature' does not support 0.2"}}`,
+			func(req map[string]any, p Profile) bool { return p.NoTemperature && req["temperature"] == nil }},
+		{"不支持 response_format", `{"error":{"message":"response_format is not supported by this model"}}`,
+			func(req map[string]any, p Profile) bool {
+				return p.NoResponseFormat && req["response_format"] == nil && req["chat_template_kwargs"] != nil
+			}},
+		{"不支持 chat_template_kwargs", `{"error":{"message":"Unrecognized request argument supplied: chat_template_kwargs"}}`,
+			func(req map[string]any, p Profile) bool {
+				last := req["messages"].([]any)[1].(map[string]any)["content"].(string)
+				return p.NoChatKwargs && req["chat_template_kwargs"] == nil && strings.HasSuffix(last, "/no_think")
+			}},
+		{"未点名参数", `{"error":{"message":"invalid request"}}`,
+			func(req map[string]any, p Profile) bool {
+				return p.NoChatKwargs && p.NoResponseFormat && req["response_format"] == nil
+			}},
+	} {
+		c := newClient()
+		calls = nil
+		handler = func(n int, _ map[string]any) (int, string) {
+			if n == 1 {
+				return 400, tc.errMsg
+			}
+			return 200, good
+		}
+		v, _, err := c.Triage(context.Background(), "x")
+		if err != nil || v.Unparsed || len(calls) != 2 {
+			t.Errorf("%s: %+v %v calls=%d", tc.name, v, err, len(calls))
+			continue
+		}
+		p := *c.Status().Adapt
+		if !tc.check(calls[1], p) {
+			t.Errorf("%s: 重试请求 %+v 适配 %+v", tc.name, calls[1], p)
+		}
+		if len(p.Adapted) == 0 {
+			t.Errorf("%s: 应记录适配", tc.name)
+		}
+		// 学到之后：下一次直接成功，不再多发一次失败的请求
+		calls = nil
+		handler = func(int, map[string]any) (int, string) { return 200, good }
+		c.Triage(context.Background(), "x")
+		if len(calls) != 1 || !tc.check(calls[0], *c.Status().Adapt) {
+			t.Errorf("%s: 应记住适配结果: %+v", tc.name, calls)
+		}
+	}
+
+	// 参数都已去掉仍被拒绝：返回错误，不无限重试
+	c := newClient()
+	calls = nil
+	handler = func(int, map[string]any) (int, string) { return 400, `{"error":{"message":"bad model"}}` }
+	if _, _, err := c.Triage(context.Background(), "x"); err == nil || len(calls) > 3 {
+		t.Fatalf("持续被拒绝: %v calls=%d", err, len(calls))
+	}
+
+	// 瞬时错误重试一次；持续失败时返回错误
+	c = newClient()
+	calls = nil
+	handler = func(n int, _ map[string]any) (int, string) {
+		if n == 1 {
+			return 503, "overloaded"
+		}
+		return 200, good
+	}
+	if v, _, err := c.Triage(context.Background(), "x"); err != nil || v.Unparsed || len(calls) != 2 {
+		t.Fatalf("503 应重试: %+v %v calls=%d", v, err, len(calls))
+	}
+	calls = nil
+	handler = func(int, map[string]any) (int, string) { return 503, "overloaded" }
+	if _, _, err := c.Triage(context.Background(), "x"); err == nil || !strings.Contains(err.Error(), "503") || len(calls) != 2 {
+		t.Fatalf("持续 503: %v calls=%d", err, len(calls))
+	}
+
+	// 超时：提示调大超时时间；界面修改的超时立即生效
+	c = newClient()
+	c.mu.Lock()
+	c.set.TimeoutSec = 1
+	c.mu.Unlock()
+	blocked := make(chan struct{})
+	slow := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case <-blocked:
+		case <-r.Context().Done():
+		}
+	}))
+	defer slow.Close()
+	defer close(blocked) // 先放行处理函数，再关闭服务
+	c.mu.Lock()
+	c.set.BaseURL = slow.URL + "/v1"
+	c.mu.Unlock()
+	if _, _, err := c.Triage(context.Background(), "x"); err == nil || !strings.Contains(err.Error(), "超时") {
+		t.Fatalf("超时提示: %v", err)
+	}
+}
+
+// 适配信息与界面配置一起保存，重启后不用重新学习；配置来自配置文件时不写文件（否则重启后会被当成界面配置）。
+func TestProfilePersist(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req map[string]any
+		json.NewDecoder(r.Body).Decode(&req)
+		if req["response_format"] != nil {
+			http.Error(w, `{"error":{"message":"response_format not supported"}}`, 400)
+			return
+		}
+		w.Write([]byte(`{"choices":[{"message":{"content":"{\"verdict\":\"attack\",\"confidence\":50}"},"finish_reason":"stop"}]}`))
+	}))
+	defer srv.Close()
+	path := filepath.Join(t.TempDir(), "ai.json")
+	yaml := New(config.AIConfig{Enabled: true, BaseURL: srv.URL + "/v1", Model: "m"}, nil)
+	yaml.SetPath(path)
+	yaml.Triage(context.Background(), "x")
+	if _, err := os.Stat(path); err == nil {
+		t.Fatal("配置来自配置文件时不应写出 ai.json")
+	}
+	c := New(config.AIConfig{}, nil)
+	c.SetPath(path)
+	if _, _, err := c.Apply(Update{Enabled: true, BaseURL: srv.URL + "/v1", Model: "m", MaxPerHour: 20}, "admin"); err != nil {
+		t.Fatal(err)
+	}
+	c.Triage(context.Background(), "x")
+	c2 := New(config.AIConfig{}, nil)
+	if loaded, err := c2.SetPath(path); !loaded || err != nil {
+		t.Fatal(err)
+	}
+	if st := c2.Status(); st.Adapt == nil || !st.Adapt.NoResponseFormat || st.Adapt.Parsed != 1 {
+		t.Fatalf("重启后应保留适配信息: %+v", st.Adapt)
+	}
+}
+
+// 连接测试：协议选错时自动切换；模型名称不存在时列出接口提供的模型；地址规范化。
+func TestDetectProtocolAndModels(t *testing.T) {
+	var auth string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		auth = r.Header.Get("Authorization")
+		switch r.URL.Path {
+		case "/v1/messages":
+			w.Write([]byte(`{"content":[{"type":"text","text":"OK"}],"stop_reason":"end_turn"}`))
+		case "/v1/models":
+			w.Write([]byte(`{"data":[{"id":"qwen-b"},{"id":"qwen-a"}]}`))
+		default:
+			http.Error(w, `{"detail":"Not Found"}`, 404)
+		}
+	}))
+	defer srv.Close()
+	c := New(config.AIConfig{}, nil)
+	r, err := c.Test(context.Background(), Update{BaseURL: srv.URL + "/v1/chat/completions", Model: "m", MaxPerHour: 20})
+	if err != nil || !r.OK || r.Protocol != "anthropic" || !strings.Contains(r.Note, "自动切换") || r.Reply != "OK" {
+		t.Fatalf("协议探测: %+v %v", r, err)
+	}
+	list, err := c.Models(context.Background(), Update{BaseURL: srv.URL, APIKey: "sk-list-000000", MaxPerHour: 20})
+	if err != nil || len(list) != 2 || list[0] != "qwen-a" || auth != "Bearer sk-list-000000" {
+		t.Fatalf("模型列表: %v %v auth=%q", list, err, auth)
+	}
+	if c.View().KeySet {
+		t.Fatal("读取模型列表不应保存密钥")
+	}
+
+	notFound := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/models" {
+			w.Write([]byte(`{"data":[{"id":"Qwen3.6-35B-A3B-FP8"}]}`))
+			return
+		}
+		http.Error(w, `{"message":"The model 'wrong' does not exist."}`, 404)
+	}))
+	defer notFound.Close()
+	r, err = c.Test(context.Background(), Update{BaseURL: notFound.URL + "/v1", Model: "wrong", MaxPerHour: 20})
+	if err != nil || r.OK || len(r.Models) != 1 || r.Models[0] != "Qwen3.6-35B-A3B-FP8" || r.Protocol != "openai" {
+		t.Fatalf("模型不存在: %+v %v", r, err)
+	}
+	if _, _, err := c.Apply(Update{Enabled: true, Protocol: "grpc", BaseURL: notFound.URL + "/v1", Model: "m", MaxPerHour: 20}, "a"); err == nil {
+		t.Fatal("应拒绝未知协议")
+	}
+	for _, bad := range []Update{
+		{Enabled: true, BaseURL: notFound.URL + "/v1", Model: "m", MaxPerHour: 20, MaxTokens: 10},
+		{Enabled: true, BaseURL: notFound.URL + "/v1", Model: "m", MaxPerHour: 20, TimeoutSec: 5},
+		{Enabled: true, BaseURL: notFound.URL + "/v1", Model: "m", MaxPerHour: 20, Thinking: "maybe"},
+	} {
+		if _, _, err := c.Apply(bad, "a"); err == nil {
+			t.Errorf("应拒绝: %+v", bad)
+		}
+	}
+}

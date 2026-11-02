@@ -41,6 +41,13 @@ func (s *Server) learnFeedback(list []store.IncidentView, user string) {
 				id, _, _ := strings.Cut(kv.Name, " ") // 事件中的规则名为「规则 ID 规则名称」
 				c.Rules[id] += int(kv.Value)
 			}
+			// 最后一条分析员写的说明：说明了为什么这样判断，之后作为相似案例提供给模型
+			for i := len(d.Notes) - 1; i >= 0; i-- {
+				if n := d.Notes[i]; n.Text != "" && n.User != "系统" && !strings.HasPrefix(n.User, "AI") {
+					c.Note = n.Text
+					break
+				}
+			}
 			for i, kv := range d.Targets {
 				if i == 5 {
 					break
@@ -157,8 +164,8 @@ func (s *Server) learnPolicy(w http.ResponseWriter, r *http.Request) {
 		user = sess.User
 	}
 	err := s.Learn.SetPolicy(p, user)
-	s.audit(r, "修改自学习策略", fmt.Sprintf("自动校准 %v（样本 ≥ %d，准确率 ≤ %.0f%%），确认攻击源复现升级 %v（%d 天）",
-		p.Calibrate, p.MinVerdicts, p.MaxPrecision*100, p.Escalate, p.EscalateDays), err)
+	s.audit(r, "修改自学习策略", fmt.Sprintf("自动校准 %v（样本 ≥ %d，准确率 ≤ %.0f%%），确认攻击源复现升级 %v（%d 天），学习窗口 %d 天",
+		p.Calibrate, p.MinVerdicts, p.MaxPrecision*100, p.Escalate, p.EscalateDays, p.WindowDays), err)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
@@ -171,6 +178,10 @@ func (s *Server) learnPolicy(w http.ResponseWriter, r *http.Request) {
 func (s *Server) learnTick(now time.Time) {
 	if s.Learn == nil {
 		return
+	}
+	if now.Sub(s.lastLearn) >= time.Hour { // 样本超过学习窗口后，相应的校准自动撤销
+		s.lastLearn = now
+		s.Learn.Refresh(now)
 	}
 	if s.Cfg.Learn.ComplianceOn() && (s.lastComp.IsZero() || now.Sub(s.lastComp) >= time.Hour) {
 		s.lastComp = now

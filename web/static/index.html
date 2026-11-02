@@ -553,6 +553,8 @@
       <div class="hint">规则研判样本不少于上述数量、且准确率不高于阈值时整体下调一级；同一规则在同一目标上误报不少于 max(3, 样本数 − 2) 次且从未确认为攻击时，只下调该目标。最多低于攻击分类底线一级，响应证明利用成功时仍升为严重。</div>
       <label class="inline"><input type="checkbox" id="lpEsc"> 确认攻击源复现升级：事件被处置为“已处置”的来源再次出现时，低危 / 中危命中升级一级（最多到高危）</label>
       <label class="field"><span class="flabel">有效天数</span><input id="lpDays" type="number" min="1" max="365" step="1"></label>
+      <label class="field"><span class="flabel">学习窗口（天）</span><input id="lpWindow" type="number" min="0" max="3650" step="1"></label>
+      <div class="hint">更早的人工结论不再参与校准与建议，业务变化后旧结论自动失效，相应的校准自动撤销；0 表示不限。</div>
       <div class="hint">保存后立即生效，变化记入进化日志与审计链，并优先于配置文件 learn 段。误报抑制会隐藏告警，始终需要人工采纳，不会自动生效。</div>
       <div class="form-msg" id="lpMsg" role="status"></div>
     </div>
@@ -566,15 +568,18 @@
     <div class="modal-head"><b id="aiTitle">外部模型配置</b><button type="button" class="close" data-close="aiModal" aria-label="关闭">✕</button></div>
     <div class="modal-body">
       <label class="inline"><input type="checkbox" id="aiEnabled"> 启用外部模型（事件详情中可使用“AI 研判”）</label>
+      <label class="field"><span class="flabel">接口协议</span><select id="aiProto"><option value="openai">OpenAI 兼容（/chat/completions）</option><option value="anthropic">Anthropic（/messages）</option></select></label>
       <label class="field"><span class="flabel">模型地址</span><input id="aiBase" spellcheck="false" maxlength="512" placeholder="https://api.deepseek.com/v1"></label>
-      <div class="hint">OpenAI 兼容接口的前缀（到 /v1 为止），平台自动拼接 /chat/completions。公网地址必须使用 https；内网部署的 vLLM / Ollama 可用 http，如 http://10.0.0.20:8000/v1。</div>
-      <label class="field"><span class="flabel">模型名称</span><input id="aiModel" spellcheck="false" maxlength="128" list="aiModelList" placeholder="如 deepseek-chat、qwen-max、glm-4"><datalist id="aiModelList">
-        <option value="deepseek-chat"></option><option value="deepseek-reasoner"></option><option value="qwen-max"></option><option value="qwen-plus"></option>
-        <option value="glm-4"></option><option value="moonshot-v1-32k"></option></datalist></label>
+      <div class="hint">接口前缀（到 /v1 为止），平台按协议自动拼接路径；只填主机时自动补 /v1。公网地址必须使用 https；内网部署的 vLLM 可用 http，如 http://10.0.0.20:8000/v1。vLLM 同时支持两种协议。</div>
+      <label class="field"><span class="flabel">模型名称</span><input id="aiModel" spellcheck="false" maxlength="128" list="aiModelList" placeholder="vLLM 须与 --served-model-name 完全一致"><datalist id="aiModelList"></datalist></label>
+      <div class="hint"><button type="button" class="btn" id="aiListBtn">获取模型列表</button> 从接口读取可用的模型名称，避免手工输入出错。</div>
       <label class="field"><span class="flabel">模型密钥</span><input id="aiKey" type="password" spellcheck="false" maxlength="512" autocomplete="new-password"></label>
       <div class="hint" id="aiKeyHint"></div>
       <label class="inline" id="aiClearRow"><input type="checkbox" id="aiClear"> 不使用密钥（清除已保存的密钥，适用于不需要密钥的内网模型）</label>
       <label class="field"><span class="flabel">每小时上限</span><input id="aiMax" type="number" min="1" max="10000" step="1"></label>
+      <label class="field"><span class="flabel">思考模式</span><select id="aiThinking"><option value="auto">自动（推理模型请求关闭思考，加快研判）</option><option value="off">始终请求关闭</option><option value="on">保留思考（耗时更长）</option></select></label>
+      <label class="field"><span class="flabel">输出长度上限</span><input id="aiTokens" type="number" min="0" max="128000" step="256" placeholder="0 表示自动"></label>
+      <label class="field"><span class="flabel">调用超时（秒）</span><input id="aiTimeout" type="number" min="10" max="1800" step="10"></label>
       <label class="inline"><input type="checkbox" id="aiDesens"> 发送前脱敏（内网地址、口令 / 令牌、手机号、证件号、邮箱；攻击来源公网地址保留）</label>
       <label class="inline"><input type="checkbox" id="aiAuto"> 新出现的高危及以上事件自动研判（结论写入事件处置记录）</label>
       <div class="hint" id="aiNote"></div>

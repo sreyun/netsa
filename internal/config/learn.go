@@ -17,6 +17,8 @@ type LearnConfig struct {
 	// Escalate 被分析员确认为攻击的来源在 escalate_days 天内再次出现时，其低危 / 中危攻击命中升级一级（最多到高危）。
 	Escalate     *bool `yaml:"escalate"`
 	EscalateDays int   `yaml:"escalate_days"` // 默认 30
+	// WindowDays 学习窗口（天）：更早的人工结论不再参与校准与建议。默认 180，负数不限
+	WindowDays int `yaml:"window_days"`
 }
 
 // EscalateOn 返回是否升级已确认攻击来源的复现命中。
@@ -42,6 +44,9 @@ func (c LearnConfig) validate() error {
 	}
 	if c.EscalateDays < 0 || c.EscalateDays > 365 {
 		return fmt.Errorf("learn.escalate_days 应在 0 ~ 365 之间")
+	}
+	if c.WindowDays > 3650 {
+		return fmt.Errorf("learn.window_days 不能超过 3650")
 	}
 	return nil
 }

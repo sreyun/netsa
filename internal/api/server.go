@@ -84,6 +84,7 @@ type Server struct {
 	hashSem    chan struct{}   // 限制同时进行的密码哈希计算
 	lastComp   time.Time       // 上次合规自检（只在后台任务中访问）
 	lastVerify string          // 上次审计链自检的日期
+	lastLearn  time.Time       // 上次按学习窗口刷新校准结果
 	aiBusy     atomic.Bool     // 自动研判进行中
 	aiDone     map[uint64]bool // 已自动研判的事件（只在后台任务中访问）
 	archHealth archiveHealth
@@ -174,6 +175,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/ai/settings", s.aiSettings)
 	mux.HandleFunc("PUT /api/ai/settings", s.aiSettingsUpdate)
 	mux.HandleFunc("POST /api/ai/test", s.aiTest)
+	mux.HandleFunc("POST /api/ai/models", s.aiModels)
 	mux.HandleFunc("GET /metrics", s.cache.wrap(5*time.Second, s.metrics))
 	mux.HandleFunc("GET /api/assets", s.assetList)
 	mux.HandleFunc("GET /api/assets/template", s.assetTemplate)

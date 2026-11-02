@@ -1,12 +1,10 @@
 package ai
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
 	"net/url"
 	"os"
@@ -21,33 +19,61 @@ import (
 // Settings 是外部模型的运行配置。可在 Web 管理页面（自学习 → 外部模型）修改，立即生效，
 // 保存在状态目录的 ai.json（含密钥，文件权限 0600）；界面从未保存过时取配置文件 ai 段与环境变量中的密钥。
 type Settings struct {
-	Enabled bool   `json:"enabled"`
-	BaseURL string `json:"base_url"`
-	Model   string `json:"model"`
+	Enabled  bool   `json:"enabled"`
+	Protocol string `json:"protocol"` // openai / anthropic
+	BaseURL  string `json:"base_url"`
+	Model    string `json:"model"`
 	// APIKey 是界面填写的密钥，只保存在服务端，任何接口都不返回
 	APIKey string `json:"api_key,omitempty"`
 	// KeyFromEnv 表示界面未填写密钥时使用环境变量中的密钥（兼容原有部署方式）；
 	// 在界面填写或清除密钥后不再使用环境变量
 	KeyFromEnv  bool      `json:"key_from_env"`
 	MaxPerHour  int       `json:"max_per_hour"`
+	MaxTokens   int       `json:"max_tokens,omitempty"`  // 研判的输出长度上限，0 为自动
+	TimeoutSec  int       `json:"timeout_sec,omitempty"` // 单次调用超时（秒）
+	Thinking    string    `json:"thinking,omitempty"`    // 思考模式：auto / off / on
 	Desensitize bool      `json:"desensitize"`
 	AutoTriage  bool      `json:"auto_triage"`
 	UpdatedBy   string    `json:"updated_by,omitempty"`
 	Updated     time.Time `json:"updated,omitzero"`
 }
 
+// savedFile 是 ai.json 的内容：配置与模型适配信息。
+type savedFile struct {
+	Settings
+	Profiles map[string]*Profile `json:"profiles,omitempty"`
+}
+
+const defaultTimeoutSec = 120
+
 func normalize(s Settings) Settings {
+	s.Protocol = strings.ToLower(strings.TrimSpace(s.Protocol))
+	if s.Protocol == "" {
+		s.Protocol = ProtoOpenAI
+	}
 	s.BaseURL = strings.TrimRight(strings.TrimSpace(s.BaseURL), "/")
+	for _, tail := range []string{"/chat/completions", "/messages"} { // 粘贴了完整接口地址
+		s.BaseURL = strings.TrimRight(strings.TrimSuffix(s.BaseURL, tail), "/")
+	}
 	s.Model = strings.TrimSpace(s.Model)
 	s.APIKey = strings.TrimSpace(s.APIKey)
 	if s.MaxPerHour <= 0 {
 		s.MaxPerHour = 30
+	}
+	if s.TimeoutSec <= 0 {
+		s.TimeoutSec = defaultTimeoutSec
+	}
+	if s.Thinking == "" {
+		s.Thinking = "auto"
 	}
 	return s
 }
 
 // check 校验配置。未启用时也校验已填写的地址，避免保存一个之后无法启用的配置。
 func (s Settings) check() error {
+	if s.Protocol != ProtoOpenAI && s.Protocol != ProtoAnthropic {
+		return errors.New("接口协议只能是 openai 或 anthropic")
+	}
 	if s.Enabled || s.BaseURL != "" {
 		if err := config.CheckAIEndpoint(s.BaseURL); err != nil {
 			return err
@@ -70,37 +96,44 @@ func (s Settings) check() error {
 	if s.MaxPerHour < 1 || s.MaxPerHour > 10000 {
 		return errors.New("每小时调用上限应在 1 ~ 10000 之间")
 	}
+	if s.MaxTokens != 0 && (s.MaxTokens < 256 || s.MaxTokens > 128000) {
+		return errors.New("输出长度上限应为 0（自动）或 256 ~ 128000")
+	}
+	if s.TimeoutSec < 10 || s.TimeoutSec > 1800 {
+		return errors.New("调用超时应在 10 ~ 1800 秒之间")
+	}
+	if s.Thinking != "auto" && s.Thinking != "off" && s.Thinking != "on" {
+		return errors.New("思考模式只能是 auto、off 或 on")
+	}
 	return nil
 }
 
 // Client 是模型客户端，可并发使用；配置可在运行中替换（进行中的调用使用替换前的配置）。
 type Client struct {
-	mu      sync.Mutex
-	set     Settings
-	envKey  string // 环境变量中的密钥
-	keyEnv  string // 环境变量名
-	path    string // 界面配置的保存位置，为空时只保存在内存中
-	fromUI  bool   // 当前配置来自界面
-	http    *http.Client
-	calls   []time.Time // 近 1 小时的调用时间
-	total   int64
-	failed  int64
-	lastErr string
-	now     func() time.Time
+	mu       sync.Mutex
+	set      Settings
+	profiles map[string]*Profile // 协议 + 主机 + 模型 → 自动学到的适配信息
+	envKey   string              // 环境变量中的密钥
+	keyEnv   string              // 环境变量名
+	path     string              // 界面配置的保存位置，为空时只保存在内存中
+	fromUI   bool                // 当前配置来自界面
+	http     *http.Client        // 超时由每次调用的 context 控制，界面修改后立即生效
+	backoff  time.Duration       // 瞬时错误重试前的等待
+	calls    []time.Time         // 近 1 小时的调用时间
+	total    int64
+	failed   int64
+	lastErr  string
+	now      func() time.Time
 }
 
 // New 以配置文件的 ai 段创建客户端（总是返回非空客户端，未启用时调用会返回 ErrDisabled）。
 // 密钥从 cfg.KeyEnv() 指定的环境变量读取（getenv 便于测试注入，可为 nil）。
 func New(cfg config.AIConfig, getenv func(string) string) *Client {
-	timeout := cfg.Timeout
-	if timeout <= 0 {
-		timeout = 90 * time.Second
-	}
-	c := &Client{keyEnv: cfg.KeyEnv(), http: &http.Client{Timeout: timeout}, now: time.Now}
+	c := &Client{keyEnv: cfg.KeyEnv(), http: &http.Client{}, backoff: 1500 * time.Millisecond, now: time.Now, profiles: map[string]*Profile{}}
 	if getenv != nil {
 		c.envKey = strings.TrimSpace(getenv(c.keyEnv))
 	}
-	c.set = normalize(Settings{Enabled: cfg.Enabled, BaseURL: cfg.BaseURL, Model: cfg.Model, KeyFromEnv: true,
+	c.set = normalize(Settings{Enabled: cfg.Enabled, BaseURL: cfg.BaseURL, Model: cfg.Model, KeyFromEnv: true, TimeoutSec: int(cfg.Timeout / time.Second),
 		MaxPerHour: cfg.MaxPerHour, Desensitize: cfg.DesensitizeOn(), AutoTriage: cfg.AutoTriage})
 	return c
 }
@@ -121,12 +154,17 @@ func (c *Client) SetPath(path string) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	var s Settings
-	if err := json.Unmarshal(data, &s); err != nil {
+	var f savedFile
+	if err := json.Unmarshal(data, &f); err != nil {
 		return false, fmt.Errorf("解析 %s 失败: %w", path, err)
 	}
-	s = normalize(s)
+	s := normalize(f.Settings)
 	c.fromUI = true
+	for k, p := range f.Profiles {
+		if p != nil {
+			c.profiles[k] = p
+		}
+	}
 	if err := s.check(); err != nil {
 		s.Enabled = false
 		c.set = s
@@ -186,19 +224,31 @@ func (c *Client) AutoTriage() bool {
 	return c.set.Enabled && c.set.AutoTriage
 }
 
+// CallBudget 返回一次研判最长耗时：研判最多调用 3 次模型（截断重试、格式修复），每次还可能重试一次瞬时错误。
+func (c *Client) CallBudget() time.Duration {
+	if c == nil {
+		return 3 * time.Minute
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return min(time.Duration(c.set.TimeoutSec)*3*time.Second+30*time.Second, 30*time.Minute)
+}
+
 // Status 是模型接入状态（不含密钥）。
 type Status struct {
-	Enabled     bool   `json:"enabled"`
-	Model       string `json:"model,omitempty"`
-	Endpoint    string `json:"endpoint,omitempty"` // 只含协议与主机
-	KeySet      bool   `json:"key_set"`
-	Desensitize bool   `json:"desensitize"`
-	AutoTriage  bool   `json:"auto_triage"`
-	MaxPerHour  int    `json:"max_per_hour"`
-	UsedHour    int    `json:"used_hour"`
-	Total       int64  `json:"total"`
-	Failed      int64  `json:"failed"`
-	LastError   string `json:"last_error,omitempty"`
+	Enabled     bool     `json:"enabled"`
+	Protocol    string   `json:"protocol,omitempty"`
+	Model       string   `json:"model,omitempty"`
+	Endpoint    string   `json:"endpoint,omitempty"` // 只含协议与主机
+	KeySet      bool     `json:"key_set"`
+	Desensitize bool     `json:"desensitize"`
+	AutoTriage  bool     `json:"auto_triage"`
+	MaxPerHour  int      `json:"max_per_hour"`
+	UsedHour    int      `json:"used_hour"`
+	Total       int64    `json:"total"`
+	Failed      int64    `json:"failed"`
+	LastError   string   `json:"last_error,omitempty"`
+	Adapt       *Profile `json:"adapt,omitempty"` // 平台对该模型的自动适配与研判统计
 }
 
 // endpointOf 只保留协议与主机，不暴露路径。
@@ -221,13 +271,19 @@ func (c *Client) Status() Status {
 	if !c.set.Enabled {
 		return Status{}
 	}
-	return Status{Enabled: true, Model: c.set.Model, Endpoint: endpointOf(c.set.BaseURL), KeySet: c.keyLocked() != "", Desensitize: c.set.Desensitize,
+	st := Status{Enabled: true, Protocol: c.set.Protocol, Model: c.set.Model, Endpoint: endpointOf(c.set.BaseURL), KeySet: c.keyLocked() != "", Desensitize: c.set.Desensitize,
 		AutoTriage: c.set.AutoTriage, MaxPerHour: c.set.MaxPerHour, UsedHour: len(c.recentLocked()), Total: c.total, Failed: c.failed, LastError: c.lastErr}
+	if p := c.profiles[profileKey(c.set)]; p != nil {
+		cp := *p
+		st.Adapt = &cp
+	}
+	return st
 }
 
 // View 是界面展示的配置（不含密钥）。
 type View struct {
 	Enabled     bool      `json:"enabled"`
+	Protocol    string    `json:"protocol"`
 	BaseURL     string    `json:"base_url"`
 	Model       string    `json:"model"`
 	KeySet      bool      `json:"key_set"`
@@ -235,6 +291,9 @@ type View struct {
 	KeyHint     string    `json:"key_hint,omitempty"` // 界面填写的密钥末 4 位，便于核对是否填对
 	KeyEnv      string    `json:"key_env"`
 	MaxPerHour  int       `json:"max_per_hour"`
+	MaxTokens   int       `json:"max_tokens"`
+	TimeoutSec  int       `json:"timeout_sec"`
+	Thinking    string    `json:"thinking"`
 	Desensitize bool      `json:"desensitize"`
 	AutoTriage  bool      `json:"auto_triage"`
 	FromUI      bool      `json:"from_ui"` // 配置来自界面（否则来自配置文件 ai 段）
@@ -248,7 +307,8 @@ func (c *Client) View() View {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	s := c.set
-	v := View{Enabled: s.Enabled, BaseURL: s.BaseURL, Model: s.Model, KeyEnv: c.keyEnv, MaxPerHour: s.MaxPerHour, Desensitize: s.Desensitize,
+	v := View{Enabled: s.Enabled, Protocol: s.Protocol, BaseURL: s.BaseURL, Model: s.Model, KeyEnv: c.keyEnv, MaxPerHour: s.MaxPerHour, MaxTokens: s.MaxTokens,
+		TimeoutSec: s.TimeoutSec, Thinking: s.Thinking, Desensitize: s.Desensitize,
 		AutoTriage: s.AutoTriage, FromUI: c.fromUI, Persist: c.path != "", UpdatedBy: s.UpdatedBy, Updated: s.Updated}
 	switch {
 	case s.APIKey != "":
@@ -266,11 +326,15 @@ func (c *Client) View() View {
 // （清除界面保存的密钥，也不再使用环境变量中的密钥），适用于不需要密钥的内网模型。
 type Update struct {
 	Enabled     bool   `json:"enabled"`
+	Protocol    string `json:"protocol"`
 	BaseURL     string `json:"base_url"`
 	Model       string `json:"model"`
 	APIKey      string `json:"api_key"`
 	ClearKey    bool   `json:"clear_key"`
 	MaxPerHour  int    `json:"max_per_hour"`
+	MaxTokens   int    `json:"max_tokens"`
+	TimeoutSec  int    `json:"timeout_sec"`
+	Thinking    string `json:"thinking"`
 	Desensitize bool   `json:"desensitize"`
 	AutoTriage  bool   `json:"auto_triage"`
 }
@@ -289,8 +353,12 @@ func hostOf(base string) string {
 // mergeLocked 把界面提交的配置与当前配置合并为候选配置（调用方持锁）。
 // 主机变更且沿用原密钥时拒绝：否则拿到管理会话的人只需改一下地址就能把密钥发到自己的服务器上。
 func (c *Client) mergeLocked(u Update) (Settings, error) {
-	s := normalize(Settings{Enabled: u.Enabled, BaseURL: u.BaseURL, Model: u.Model, APIKey: c.set.APIKey, KeyFromEnv: c.set.KeyFromEnv,
-		MaxPerHour: u.MaxPerHour, Desensitize: u.Desensitize, AutoTriage: u.AutoTriage})
+	s := Settings{Enabled: u.Enabled, Protocol: u.Protocol, BaseURL: u.BaseURL, Model: u.Model, APIKey: c.set.APIKey, KeyFromEnv: c.set.KeyFromEnv,
+		MaxPerHour: u.MaxPerHour, MaxTokens: u.MaxTokens, TimeoutSec: u.TimeoutSec, Thinking: u.Thinking, Desensitize: u.Desensitize, AutoTriage: u.AutoTriage}
+	if s.TimeoutSec == 0 {
+		s.TimeoutSec = c.set.TimeoutSec
+	}
+	s = normalize(s)
 	newKey := strings.TrimSpace(u.APIKey)
 	switch {
 	case u.ClearKey:
@@ -330,7 +398,7 @@ func (c *Client) saveLocked() error {
 	if c.path == "" {
 		return nil
 	}
-	data, err := json.MarshalIndent(c.set, "", "  ")
+	data, err := json.MarshalIndent(savedFile{Settings: c.set, Profiles: c.profiles}, "", "  ")
 	if err != nil {
 		return err
 	}
@@ -347,27 +415,37 @@ func (c *Client) saveLocked() error {
 
 // TestResult 是连通性测试结果。
 type TestResult struct {
-	OK        bool   `json:"ok"`
-	LatencyMS int64  `json:"latency_ms"`
-	Model     string `json:"model"`
-	Reply     string `json:"reply,omitempty"`
-	Error     string `json:"error,omitempty"`
+	OK        bool     `json:"ok"`
+	LatencyMS int64    `json:"latency_ms"`
+	Protocol  string   `json:"protocol,omitempty"` // 实际可用的协议（与所选不同时界面会切换）
+	Model     string   `json:"model"`
+	Reply     string   `json:"reply,omitempty"`
+	Note      string   `json:"note,omitempty"`   // 连接正常但值得注意的情况（如推理模型）
+	Models    []string `json:"models,omitempty"` // 模型名称不存在时，接口提供的模型列表
+	Error     string   `json:"error,omitempty"`
 }
 
-// Test 用界面上尚未保存的配置发送一次最小请求，检查地址、密钥与模型名称是否可用。
-// 测试同样占用每小时调用额度（防止被用来刷接口），但不计入失败统计。
-func (c *Client) Test(ctx context.Context, u Update) (TestResult, error) {
-	c.mu.Lock()
+// candidateLocked 取表单对应的候选配置与实际使用的密钥（调用方持锁）。
+func (c *Client) candidateLocked(u Update) (Settings, string, error) {
 	s, err := c.mergeLocked(u)
-	if err == nil && s.Model == "" {
-		err = errors.New("请填写模型名称")
-	}
 	if err == nil {
 		err = config.CheckAIEndpoint(s.BaseURL)
 	}
 	key := s.APIKey
 	if key == "" && s.KeyFromEnv {
 		key = c.envKey
+	}
+	return s, key, err
+}
+
+// Test 用界面上尚未保存的配置发送一次最小请求，检查地址、密钥与模型名称是否可用。
+// 地址不存在时尝试另一种协议；模型不存在时列出接口提供的模型。
+// 测试同样占用每小时调用额度（防止被用来刷接口），但不计入失败统计。
+func (c *Client) Test(ctx context.Context, u Update) (TestResult, error) {
+	c.mu.Lock()
+	s, key, err := c.candidateLocked(u)
+	if err == nil && s.Model == "" {
+		err = errors.New("请填写模型名称")
 	}
 	c.mu.Unlock()
 	if err != nil {
@@ -376,13 +454,47 @@ func (c *Client) Test(ctx context.Context, u Update) (TestResult, error) {
 	if err := c.take(); err != nil {
 		return TestResult{}, err
 	}
+	const system, user = "你是连通性测试助手。", "这是一次连通性测试，请只回复 OK。"
 	start := c.now()
-	text, _, err := c.do(ctx, s, key, "你是连通性测试助手。", "这是一次连通性测试，请只回复 OK。", 16)
-	r := TestResult{OK: err == nil, LatencyMS: c.now().Sub(start).Milliseconds(), Model: s.Model, Reply: clip(text, 100)}
+	reply, _, err := c.do(ctx, s, key, system, user, callOpts{maxTokens: 16})
+	r := TestResult{OK: err == nil, Protocol: s.Protocol, Model: s.Model}
+	var ae *apiError
+	if errors.As(err, &ae) && ae.Status == http.StatusNotFound || errors.As(err, &ae) && ae.Status == http.StatusMethodNotAllowed {
+		lower := strings.ToLower(ae.Msg)
+		if strings.Contains(lower, "model") {
+			r.Models, _ = c.listModels(ctx, s, key)
+		} else {
+			alt := s
+			alt.Protocol = ProtoAnthropic
+			if s.Protocol == ProtoAnthropic {
+				alt.Protocol = ProtoOpenAI
+			}
+			if rep, _, altErr := c.do(ctx, alt, key, system, user, callOpts{maxTokens: 16}); altErr == nil {
+				reply, err = rep, nil
+				r.OK, r.Protocol = true, alt.Protocol
+				r.Note = "该地址使用 " + alt.Protocol + " 协议，已自动切换，保存后生效。"
+			}
+		}
+	}
+	r.LatencyMS, r.Reply = c.now().Sub(start).Milliseconds(), clip(reply.Text, 100)
 	if err != nil {
 		r.Error = err.Error()
+	} else if reply.Thinking != "" {
+		r.Note += "这是带思考过程的推理模型：研判耗时较长，平台已自动请求关闭思考；如果研判提示输出被截断，请在模型服务上关闭思考模式或调高输出长度上限。"
 	}
 	return r, nil
+}
+
+// Models 读取表单对应接口提供的模型列表，用于在界面上选择模型名称。
+func (c *Client) Models(ctx context.Context, u Update) ([]string, error) {
+	u.Enabled = false // 只需要地址，模型名称还没有选
+	c.mu.Lock()
+	s, key, err := c.candidateLocked(u)
+	c.mu.Unlock()
+	if err != nil {
+		return nil, err
+	}
+	return c.listModels(ctx, s, key)
 }
 
 func (c *Client) recentLocked() []time.Time {
@@ -426,67 +538,33 @@ type chatMessage struct {
 	Content string `json:"content"`
 }
 
-// Complete 发送一次对话请求并返回模型输出的文本，同时返回发送的字节数（审计用）。
+// chatReply 是一次模型调用的结果。
+type chatReply struct {
+	Text     string // 正文（已去掉混在其中的思考过程）
+	Thinking string // 思考过程：独立字段 / 内容块，或正文中的 <think> 段
+	Finish   string // 结束原因；length 表示被截断，refusal 表示模型拒绝回答
+	Refusal  string // 拒绝回答的说明
+}
+
+// Complete 发送一次对话请求并返回模型输出的正文，同时返回发送的字节数（审计用）。
 func (c *Client) Complete(ctx context.Context, system, user string) (string, int, error) {
+	r, sent, err := c.complete(ctx, system, user, callOpts{maxTokens: triageMaxTokens})
+	return r.Text, sent, err
+}
+
+func (c *Client) complete(ctx context.Context, system, user string, o callOpts) (chatReply, int, error) {
 	if !c.Enabled() {
-		return "", 0, ErrDisabled
+		return chatReply{}, 0, ErrDisabled
 	}
 	c.mu.Lock()
 	s, key := c.set, c.keyLocked()
 	c.mu.Unlock()
 	if err := c.take(); err != nil {
-		return "", 0, err
+		return chatReply{}, 0, err
 	}
-	text, sent, err := c.do(ctx, s, key, system, user, 2000)
+	r, sent, err := c.do(ctx, s, key, system, user, o)
 	if err != nil {
-		return "", sent, c.fail(err)
+		return chatReply{}, sent, c.fail(err)
 	}
-	return text, sent, nil
-}
-
-// do 调用 OpenAI 兼容的 /chat/completions 接口。密钥只放在请求头中，错误信息中不包含密钥。
-func (c *Client) do(ctx context.Context, s Settings, key, system, user string, maxTokens int) (string, int, error) {
-	body, _ := json.Marshal(map[string]any{
-		"model":       s.Model,
-		"messages":    []chatMessage{{Role: "system", Content: system}, {Role: "user", Content: user}},
-		"max_tokens":  maxTokens,
-		"temperature": 0.2,
-		"stream":      false,
-	})
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, s.BaseURL+"/chat/completions", bytes.NewReader(body))
-	if err != nil {
-		return "", len(body), err
-	}
-	req.Header.Set("Content-Type", "application/json")
-	if key != "" {
-		req.Header.Set("Authorization", "Bearer "+key)
-	}
-	resp, err := c.http.Do(req)
-	if err != nil {
-		return "", len(body), fmt.Errorf("调用模型失败: %w", err)
-	}
-	defer resp.Body.Close()
-	data, err := io.ReadAll(io.LimitReader(resp.Body, 2<<20))
-	if err != nil {
-		return "", len(body), fmt.Errorf("读取模型响应失败: %w", err)
-	}
-	if resp.StatusCode/100 != 2 {
-		msg := strings.TrimSpace(string(data))
-		if key != "" {
-			msg = strings.ReplaceAll(msg, key, "***") // 个别网关会在错误信息中回显请求头
-		}
-		return "", len(body), fmt.Errorf("模型接口返回 %d: %s", resp.StatusCode, clip(msg, 300))
-	}
-	var out struct {
-		Choices []struct {
-			Message struct {
-				Content string `json:"content"`
-			} `json:"message"`
-			FinishReason string `json:"finish_reason"`
-		} `json:"choices"`
-	}
-	if err := json.Unmarshal(data, &out); err != nil || len(out.Choices) == 0 {
-		return "", len(body), errors.New("模型响应格式不符合 OpenAI 兼容接口（缺少 choices）")
-	}
-	return out.Choices[0].Message.Content, len(body), nil
+	return r, sent, nil
 }

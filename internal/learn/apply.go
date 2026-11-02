@@ -49,7 +49,7 @@ func (l *Learner) Policy() (Policy, bool) {
 
 func (l *Learner) policyLocked() Policy {
 	p := Policy{Calibrate: l.opt.Calibrate, MinVerdicts: l.opt.MinVerdicts, MaxPrecision: l.opt.MaxPrecision,
-		Escalate: l.opt.Escalate, EscalateDays: l.opt.EscalateDays}
+		Escalate: l.opt.Escalate, EscalateDays: l.opt.EscalateDays, WindowDays: max(l.opt.WindowDays, 0)}
 	if l.policy != nil {
 		p.UpdatedBy, p.Updated = l.policy.UpdatedBy, l.policy.Updated
 	}
@@ -88,8 +88,8 @@ func describePolicy(p Policy) string {
 		}
 		return "关"
 	}
-	return fmt.Sprintf("自动校准%s（样本 ≥ %d、准确率 ≤ %.0f%%）、确认攻击源复现升级%s（%d 天）",
-		on(p.Calibrate), p.MinVerdicts, p.MaxPrecision*100, on(p.Escalate), p.EscalateDays)
+	return fmt.Sprintf("自动校准%s（样本 ≥ %d、准确率 ≤ %.0f%%）、确认攻击源复现升级%s（%d 天）、学习窗口 %d 天",
+		on(p.Calibrate), p.MinVerdicts, p.MaxPrecision*100, on(p.Escalate), p.EscalateDays, p.WindowDays)
 }
 
 // appliedStats 返回自动生效次数（Applied 的计数为原子变量，无需持锁）。

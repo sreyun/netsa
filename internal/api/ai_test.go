@@ -202,3 +202,57 @@ func TestTriageUsesLearnedHistory(t *testing.T) {
 		t.Fatalf("处置后评估模型: %+v", a)
 	}
 }
+
+// 研判时附带相似案例（分析员说明与纠正过模型的判断），脱敏后发送；读取模型列表只允许管理员，不保存表单中的配置。
+func TestTriageSimilarAndModels(t *testing.T) {
+	var sent string
+	llm := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/models" {
+			w.Write([]byte(`{"data":[{"id":"Qwen3.6-35B-A3B-FP8"}]}`))
+			return
+		}
+		var req struct {
+			Messages []struct{ Content string }
+		}
+		b, _ := io.ReadAll(r.Body)
+		json.Unmarshal(b, &req)
+		sent = req.Messages[len(req.Messages)-1].Content
+		w.Write([]byte(`{"choices":[{"message":{"content":"{\"verdict\":\"attack\",\"confidence\":90,\"summary\":\"注入\"}"}}]}`))
+	}))
+	defer llm.Close()
+	s, st := testServer(t, "", "")
+	s.Learn, _ = learn.Load(learn.Options{Calibrate: true})
+	s.AI = ai.New(config.AIConfig{Enabled: true, BaseURL: llm.URL + "/v1", Model: "m"}, nil)
+	h := s.Handler()
+	for i := 1; i <= 3; i++ {
+		st.Record(&model.Event{Kind: model.KindWeb, SrcIP: "198.51.100." + strconv.Itoa(i), Host: "shop.example.com", Method: "GET",
+			URI: "/api/search?kw=" + strconv.Itoa(i), Time: time.Now()},
+			[]model.Hit{{RuleID: "sqli-bool", Name: "布尔盲注", Category: "SQL注入", Severity: model.SevHigh, Result: model.ResultPassed}})
+	}
+	// 事件 1：模型判为攻击，分析员纠正为误报，说明中带内网地址
+	if rec := do(h, http.MethodPost, "/api/incidents/1/ai", "", nil); rec.Code != 200 {
+		t.Fatalf("研判: %d %s", rec.Code, rec.Body.String())
+	}
+	if rec := do(h, http.MethodPost, "/api/incidents/1", `{"status":"false_positive","note":"10.1.2.3 的搜索词带引号，正常业务"}`, nil); rec.Code != 200 {
+		t.Fatalf("处置: %d %s", rec.Code, rec.Body.String())
+	}
+	if rec := do(h, http.MethodPost, "/api/incidents/2/ai", "", nil); rec.Code != 200 {
+		t.Fatalf("研判: %d %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(sent, "本单位相似案例") || !strings.Contains(sent, "模型曾判断为真实攻击，被分析员纠正") || !strings.Contains(sent, "搜索词带引号") {
+		t.Fatalf("应附带相似案例:\n%s", sent)
+	}
+	if strings.Contains(sent, "10.1.2.3") {
+		t.Fatalf("相似案例中的内网地址应脱敏:\n%s", sent)
+	}
+	if a := s.Learn.Report().AI; len(a) != 1 || a[0].Overcall != 1 {
+		t.Fatalf("模型评估: %+v", a)
+	}
+	rec := do(h, http.MethodPost, "/api/ai/models", `{"base_url":"`+llm.URL+`","protocol":"openai","max_per_hour":10}`, nil)
+	if rec.Code != 200 || !strings.Contains(rec.Body.String(), "Qwen3.6-35B-A3B-FP8") {
+		t.Fatalf("模型列表: %d %s", rec.Code, rec.Body.String())
+	}
+	if got := requiredRole(httptest.NewRequest(http.MethodPost, "/api/ai/models", nil)); got != auth.RoleAdmin {
+		t.Fatalf("模型列表应只允许管理员: %s", got)
+	}
+}

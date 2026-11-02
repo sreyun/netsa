@@ -176,7 +176,7 @@ intel:
 
 detect:
   # 等级判定：规则里的 severity 只是建议值，最终等级由分类底线 + 响应结果统一裁决
-  # （已拦截 / 失败的利用最高为高危，成功利用与失陷迹象才为严重）。详见 README「威胁等级判定」。
+  # （已拦截 / 失败的利用最高为高危，成功利用与失陷迹象才为严重）。详见 docs/detection.md「威胁等级判定」。
   rules_file: ""                 # 自定义规则，例如 configs/rules.example.yaml
   whitelist: []                  # 白名单 IP/网段（只统计流量，不做检测），例如自有监控与扫描器
   success_min_bytes: 1           # 2xx 响应体大于该值才研判为“疑似成功”
@@ -323,6 +323,7 @@ learn:
   max_precision: 0.2
   escalate: true        # 被分析员确认为攻击（事件处置为“已处置”）的来源在 escalate_days 天内再次出现时，低危 / 中危命中升级一级（最多到高危）
   escalate_days: 30
+  window_days: 180     # 学习窗口：更早的人工结论不再参与校准与建议，旧结论自动失效；负数表示不限
   sentinel: true        # 学习平台账号的常用登录网段与时段：异常登录、登录失败暴增、批量导出、高危配置变更时告警
   compliance: true      # 每小时自动执行等保合规自检，测评项下降时告警；每天凌晨校验审计链
 

@@ -498,3 +498,117 @@ func TestEscalationAndPolicy(t *testing.T) {
 		t.Fatalf("重启后应保持界面策略: %+v %v", p, ui)
 	}
 }
+
+// 学习窗口：超过窗口的结论不再参与校准，定期刷新时自动撤销校准；策略改为不限后恢复。
+func TestLearningWindow(t *testing.T) {
+	l, err := Load(Options{Calibrate: true, WindowDays: 30})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var logged []Change
+	l.OnChange = func(c Change) { logged = append(logged, c) }
+	now := time.Now()
+	for i := 1; i <= 3; i++ {
+		c := fpCase(uint64(i), map[string]int{"sqli-bool": 1}, "shop /api/search", "198.51.100."+strconv.Itoa(i), VerdictFP)
+		c.Time = now.Add(-20 * 24 * time.Hour)
+		l.Feedback(c)
+	}
+	hit := []model.Hit{{RuleID: "sqli-bool", Severity: model.SevHigh}}
+	ev := &model.Event{Kind: model.KindWeb, Host: "shop", URI: "/api/search"}
+	if g := l.Calibrate(ev, hit); g[0].Severity != model.SevMedium {
+		t.Fatal("窗口内的结论应生效")
+	}
+	l.Refresh(now.Add(15 * 24 * time.Hour)) // 样本已过去 35 天
+	if g := l.Calibrate(ev, hit); g[0].Severity != model.SevHigh {
+		t.Fatal("超过学习窗口后校准应撤销")
+	}
+	if last := logged[len(logged)-1]; last.Kind != "restore_ctx" || !strings.Contains(last.Detail, "学习窗口") {
+		t.Fatalf("撤销应记入进化日志: %+v", last)
+	}
+	if r := l.Report(); r.Cases != 3 || r.Policy.WindowDays != 30 || len(r.Trend) != 8 || r.Trend[2].FP != 3 {
+		t.Fatalf("样本保留、趋势统计: cases=%d window=%d trend=%+v", r.Cases, r.Policy.WindowDays, r.Trend)
+	}
+	if err := l.SetPolicy(Policy{Calibrate: true, MinVerdicts: 5, MaxPrecision: 0.2, EscalateDays: 30, WindowDays: 0}, "admin"); err != nil {
+		t.Fatal(err)
+	}
+	l.Refresh(now.Add(15 * 24 * time.Hour))
+	if g := l.Calibrate(ev, hit); g[0].Severity != model.SevMedium {
+		t.Fatal("窗口改为不限后校准应恢复")
+	}
+	if err := l.SetPolicy(Policy{Calibrate: true, MinVerdicts: 5, MaxPrecision: 0.2, EscalateDays: 30, WindowDays: 3}, "admin"); err == nil {
+		t.Fatal("应拒绝过短的学习窗口")
+	}
+}
+
+// 相似案例：同一目标、纠正过模型的优先；没有说明也没有纠正的案例没有参考价值。
+func TestSimilarCases(t *testing.T) {
+	l := newLearner(t, "")
+	withNote := func(id uint64, rule, target, note string, v Verdict) Case {
+		c := fpCase(id, map[string]int{rule: 1}, target, "198.51.100.1", v)
+		c.Note = note
+		return c
+	}
+	l.Feedback(withNote(1, "sqli-bool", "shop /api/order", "确认注入，已封禁", VerdictTP))
+	l.Feedback(withNote(2, "sqli-bool", "shop /api/search", "搜索词带引号，正常业务", VerdictFP))
+	l.Feedback(withNote(3, "sqli-bool", "shop /api/search", "", VerdictFP)) // 无说明、无纠正
+	l.Feedback(withNote(4, "xss-dom", "shop /api/search", "无关规则", VerdictFP))
+	l.Feedback(withNote(5, "sqli-bool", "shop /api/other", "", VerdictFP))
+	l.RecordAI(5, AIRecord{Verdict: "attack", Confidence: 90, Model: "m"}) // 分析员纠正过模型
+	got := l.Similar([]string{"sqli-bool"}, []string{"shop /api/search?kw=x"}, 99, 5)
+	if len(got) != 3 || got[0].Target != "shop /api/search" || got[0].Note == "" {
+		t.Fatalf("相似案例: %+v", got)
+	}
+	if got[1].Corrected != "attack" || got[1].Target != "shop /api/other" {
+		t.Fatalf("纠正过模型的案例应排在只是同规则的案例之前: %+v", got)
+	}
+	if g := l.Similar([]string{"sqli-bool"}, []string{"shop /api/search"}, 2, 1); len(g) != 1 || g[0].Note == "搜索词带引号，正常业务" {
+		t.Fatalf("应排除事件自身并限制数量: %+v", g)
+	}
+	long := withNote(6, "r", "t", strings.Repeat("长", 500), VerdictFP)
+	l.Feedback(long)
+	if g := l.Similar([]string{"r"}, nil, 0, 1); len([]rune(g[0].Note)) > 201 {
+		t.Fatalf("说明应截断: %d", len([]rune(g[0].Note)))
+	}
+}
+
+// 可信模型的误报判断形成待确认的建议：一致率不够不生成，不作为样本，不影响校准；确认过攻击的目标不建议。
+func TestAISuggestions(t *testing.T) {
+	l := newLearner(t, "")
+	// 建立模型的可信度：10 个事件全部与分析员一致
+	for i := 1; i <= 10; i++ {
+		id := uint64(i)
+		l.RecordAI(id, AIRecord{Verdict: "attack", Confidence: 90, Model: "m"})
+		l.Feedback(fpCase(id, map[string]int{"r" + strconv.Itoa(i): 1}, "x"+strconv.Itoa(i), "203.0.113.1", VerdictTP))
+	}
+	fp := func(id uint64, model, target string) {
+		l.RecordAI(id, AIRecord{Verdict: "false_positive", Confidence: 85, Model: model, Rules: []string{"sqli-bool"}, Targets: []string{target}})
+	}
+	fp(101, "m", "shop /api/search?a=1")
+	fp(102, "m", "shop /api/search?a=2")
+	if len(l.Report().Suggestions) != 0 {
+		t.Fatal("判断次数不足时不应生成建议")
+	}
+	fp(103, "m", "shop /api/search?a=3")
+	r := l.Report()
+	if len(r.Suggestions) != 1 || r.Suggestions[0].Origin != "ai" || r.Suggestions[0].Target != "shop /api/search" || r.Suggestions[0].FP != 3 || !strings.Contains(r.Suggestions[0].Reason, "待人工确认") {
+		t.Fatalf("模型建议: %+v", r.Suggestions)
+	}
+	hit := []model.Hit{{RuleID: "sqli-bool", Severity: model.SevHigh}}
+	if g := l.Calibrate(&model.Event{Kind: model.KindWeb, Host: "shop", URI: "/api/search"}, hit); g[0].Severity != model.SevHigh || r.Cases != 10 || r.CtxTotal != 0 {
+		t.Fatalf("模型判断不应成为样本或影响校准: %+v", r)
+	}
+	// 没有可信度的模型不生成
+	for i := uint64(201); i <= 203; i++ {
+		fp(i, "other", "shop /api/pay")
+	}
+	for _, s := range l.Report().Suggestions {
+		if s.Target == "shop /api/pay" {
+			t.Fatal("可信度不足的模型不应生成建议")
+		}
+	}
+	// 该目标确认过攻击：不再建议
+	l.Feedback(fpCase(300, map[string]int{"sqli-bool": 1}, "shop /api/search", "203.0.113.2", VerdictTP))
+	if s := l.Report().Suggestions; len(s) != 0 {
+		t.Fatalf("确认过攻击的目标不应建议: %+v", s)
+	}
+}

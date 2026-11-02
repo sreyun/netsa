@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"slices"
 	"sort"
+	"strings"
 	"time"
 )
 
@@ -15,6 +16,8 @@ type AIRecord struct {
 	Verdict    string    `json:"verdict"` // attack / false_positive / uncertain
 	Confidence int       `json:"confidence"`
 	Model      string    `json:"model"`
+	Rules      []string  `json:"rules,omitempty"` // 事件涉及的规则与目标：可信模型的误报判断据此生成待确认的建议
+	Targets    []string  `json:"targets,omitempty"`
 	Time       time.Time `json:"time"`
 }
 
@@ -45,8 +48,13 @@ func (l *Learner) RecordAI(incident uint64, r AIRecord) {
 	if r.Time.IsZero() {
 		r.Time = time.Now()
 	}
+	if len(r.Rules) > 8 {
+		r.Rules = r.Rules[:8]
+	}
+	if len(r.Targets) > 5 {
+		r.Targets = r.Targets[:5]
+	}
 	l.mu.Lock()
-	defer l.mu.Unlock()
 	l.ai[incident] = &r
 	if len(l.ai) > maxAIRecords {
 		ids := make([]uint64, 0, len(l.ai))
@@ -58,8 +66,211 @@ func (l *Learner) RecordAI(incident uint64, r AIRecord) {
 			delete(l.ai, id)
 		}
 	}
-	l.aiStats = l.aiStatsLocked()
 	l.dirty = true
+	changes := l.recomputeLocked(time.Now(), "") // 模型的新判断可能形成待确认的建议
+	l.mu.Unlock()
+	l.emit(changes)
+}
+
+// Refresh 按当前时间重新计算校准结果（由后台任务定期调用）：样本超过学习窗口后，相应的校准自动撤销。
+func (l *Learner) Refresh(now time.Time) {
+	if l == nil {
+		return
+	}
+	l.mu.Lock()
+	changes := l.recomputeLocked(now, "")
+	l.mu.Unlock()
+	l.emit(changes)
+}
+
+// expiredLocked 判断样本是否超过学习窗口。
+func (l *Learner) expiredLocked(c *Case, now time.Time) bool {
+	return l.opt.WindowDays > 0 && now.Sub(c.Time) > time.Duration(l.opt.WindowDays)*24*time.Hour
+}
+
+func clipNote(s string) string {
+	r := []rune(strings.TrimSpace(s))
+	if len(r) > 200 {
+		return string(r[:200]) + "…"
+	}
+	return string(r)
+}
+
+const (
+	trustedAIRate    = 0.8 // 模型的判断可以形成待确认建议所需的一致率
+	trustedAISamples = 10  // 以及已评估的事件数
+	aiSuggestMinConf = 80  // 单次判断的最低置信度
+	aiSuggestMinFP   = 3   // 同一规则 + 目标上的最少判断次数
+)
+
+// aiSuggestionsLocked 让模型帮助发现误报模式：历史一致率足够高的模型，多次以高置信度把同一规则 + 目标判为误报、
+// 分析员尚未处置且该目标从未确认过攻击时，生成待确认的抑制建议。只是建议，模型的判断不会自动生效，也不作为学习样本。
+func (l *Learner) aiSuggestionsLocked(ctx map[[2]string]*ctxStat, have []Suggestion, now time.Time) []Suggestion {
+	trusted := map[string]AIStat{}
+	for _, st := range l.aiStats {
+		if st.Judged >= trustedAISamples && st.Rate >= trustedAIRate {
+			trusted[st.Model] = st
+		}
+	}
+	if len(trusted) == 0 {
+		return nil
+	}
+	exists := map[string]bool{}
+	for _, s := range have {
+		exists[s.ID] = true
+	}
+	tally := map[[2]string]*ctxStat{}
+	names := map[[2]string]string{}
+	for id, r := range l.ai {
+		if _, ok := trusted[r.Model]; !ok || r.Verdict != "false_positive" || r.Confidence < aiSuggestMinConf || l.cases[id] != nil || len(r.Rules) == 0 || len(r.Rules) > 2 {
+			continue
+		}
+		if l.opt.WindowDays > 0 && now.Sub(r.Time) > time.Duration(l.opt.WindowDays)*24*time.Hour {
+			continue
+		}
+		seen := (&Case{Targets: r.Targets}).targets()
+		for _, rule := range r.Rules {
+			for _, t := range seen {
+				k := [2]string{rule, t}
+				if tally[k] == nil {
+					tally[k] = &ctxStat{}
+				}
+				tally[k].fp++
+				if len(tally[k].incidents) < 10 {
+					tally[k].incidents = append(tally[k].incidents, id)
+				}
+				names[k] = r.Model
+			}
+		}
+	}
+	var out []Suggestion
+	for _, k := range sortedCtxKeys(tally) {
+		cs := tally[k]
+		if cs.fp < aiSuggestMinFP || (ctx[k] != nil && ctx[k].tp > 0) {
+			continue
+		}
+		st := trusted[names[k]]
+		s := Suggestion{Kind: "context", RuleID: k[0], Target: k[1], FP: cs.fp, Incidents: cs.incidents, Origin: "ai",
+			Reason: fmt.Sprintf("模型建议（待人工确认）：%s（历史一致率 %.0f%%）%d 次把规则 %s 在 %s 上的命中判为误报，分析员尚未处置", st.Model, st.Rate*100, cs.fp, k[0], k[1])}
+		s.ID = suggestionID(s.Kind, s.RuleID, s.Target, "")
+		if !exists[s.ID] && l.handled[s.ID] == "" {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
+// WeekStat 是一周内分析员结论的统计（第 0 项为最近 7 天）。
+type WeekStat struct {
+	Start time.Time `json:"start"`
+	TP    int       `json:"tp"`
+	FP    int       `json:"fp"`
+}
+
+// weekTrend 统计近 8 周的人工结论。自学习生效后，告警中误报的占比应逐步下降。
+func weekTrend(cases map[uint64]*Case, now time.Time) []WeekStat {
+	const weeks = 8
+	out := make([]WeekStat, weeks)
+	for i := range out {
+		out[i].Start = now.AddDate(0, 0, -7*(i+1))
+	}
+	for _, c := range cases {
+		i := int(now.Sub(c.Time) / (7 * 24 * time.Hour))
+		if i < 0 || i >= weeks {
+			continue
+		}
+		if c.Verdict == VerdictTP {
+			out[i].TP++
+		} else {
+			out[i].FP++
+		}
+	}
+	return out
+}
+
+// SimilarCase 是分析员处理过的相似事件，提供给外部模型作为本单位的经验。
+type SimilarCase struct {
+	Rule      string  `json:"rule"`
+	Target    string  `json:"target"`
+	Verdict   Verdict `json:"verdict"`
+	Note      string  `json:"note,omitempty"`
+	Corrected string  `json:"corrected,omitempty"` // 模型当时的相反判断：分析员纠正过，模型应当重点吸取
+}
+
+// Similar 返回与事件最相关的人工处置案例（不含事件自身）：有处置说明或纠正过模型的案例才有参考价值，
+// 同一目标优先于只是同一规则，纠正过模型的优先于普通案例。
+func (l *Learner) Similar(rules, targets []string, exclude uint64, n int) []SimilarCase {
+	if l == nil || n <= 0 {
+		return nil
+	}
+	want := map[string]bool{}
+	for _, t := range targets {
+		if k := targetKey(t); k != "" {
+			want[k] = true
+		}
+	}
+	type scored struct {
+		SimilarCase
+		score int
+		at    time.Time
+		id    uint64
+	}
+	now := time.Now()
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	var list []scored
+	for id, c := range l.cases {
+		if id == exclude || l.expiredLocked(c, now) || (c.Verdict == VerdictFP && !c.focused()) {
+			continue
+		}
+		corrected := ""
+		if r := l.ai[id]; r != nil && (r.Verdict == "attack" || r.Verdict == "false_positive") && (r.Verdict == "attack") != (c.Verdict == VerdictTP) {
+			corrected = r.Verdict
+		}
+		if c.Note == "" && corrected == "" {
+			continue
+		}
+		rule := ""
+		for _, r := range rules {
+			if _, ok := c.Rules[r]; ok {
+				rule = r
+				break
+			}
+		}
+		if rule == "" {
+			continue
+		}
+		s := scored{SimilarCase: SimilarCase{Rule: rule, Verdict: c.Verdict, Note: c.Note, Corrected: corrected}, score: 1, at: c.Time, id: id}
+		ts := c.targets()
+		if len(ts) > 0 {
+			s.Target = ts[0]
+		}
+		for _, t := range ts {
+			if want[t] {
+				s.Target = t
+				s.score += 2
+				break
+			}
+		}
+		if corrected != "" {
+			s.score++
+		}
+		list = append(list, s)
+	}
+	sort.Slice(list, func(i, j int) bool {
+		if list[i].score != list[j].score {
+			return list[i].score > list[j].score
+		}
+		if !list[i].at.Equal(list[j].at) {
+			return list[i].at.After(list[j].at)
+		}
+		return list[i].id > list[j].id
+	})
+	out := make([]SimilarCase, 0, min(n, len(list)))
+	for i := 0; i < len(list) && i < n; i++ {
+		out = append(out, list[i].SimilarCase)
+	}
+	return out
 }
 
 // aiStatsLocked 按分析员结论计算各模型的研判表现（调用方持锁）。
@@ -127,6 +338,9 @@ func (l *Learner) Trust(model string) string {
 		s := fmt.Sprintf("自学习评估：该模型历史研判与分析员结论一致率 %.0f%%（%d 个事件）", st.Rate*100, st.Judged)
 		if st.Missed > 0 {
 			s += fmt.Sprintf("，其中 %d 次把确认的攻击判为误报", st.Missed)
+		}
+		if st.Judged >= trustedAISamples && st.Rate < 0.5 {
+			s += "；一致率明显偏低，请以人工复核为准"
 		}
 		return s
 	}

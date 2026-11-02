@@ -44,6 +44,8 @@ type Options struct {
 	// Escalate 已被分析员确认为攻击的来源在 EscalateDays 天内再次出现时，攻击命中升级一级（不超过高危）
 	Escalate     bool `json:"escalate"`
 	EscalateDays int  `json:"escalate_days"` // 默认 30
+	// WindowDays 学习窗口（天）：更早的结论不再参与校准与建议，环境变化后旧结论自动失效。0 取默认 180，负数不限
+	WindowDays int `json:"window_days"`
 }
 
 // Policy 是可在 Web 管理页面调整的自学习策略，保存在学习状态中，优先于配置文件。
@@ -53,6 +55,7 @@ type Policy struct {
 	MaxPrecision float64   `json:"max_precision"`
 	Escalate     bool      `json:"escalate"`
 	EscalateDays int       `json:"escalate_days"`
+	WindowDays   int       `json:"window_days"` // 0 表示不限
 	UpdatedBy    string    `json:"updated_by,omitempty"`
 	Updated      time.Time `json:"updated,omitzero"`
 }
@@ -65,6 +68,8 @@ func (p Policy) check() error {
 		return errors.New("准确率阈值应在 1% ~ 99% 之间")
 	case p.EscalateDays < 1 || p.EscalateDays > 365:
 		return errors.New("确认攻击源的有效天数应在 1 ~ 365 之间")
+	case p.WindowDays < 0 || (p.WindowDays > 0 && p.WindowDays < 7) || p.WindowDays > 3650:
+		return errors.New("学习窗口应为 0（不限）或 7 ~ 3650 天")
 	}
 	return nil
 }
@@ -72,6 +77,10 @@ func (p Policy) check() error {
 // apply 把策略写入运行参数（调用方持锁）。
 func (o *Options) apply(p Policy) {
 	o.Calibrate, o.MinVerdicts, o.MaxPrecision, o.Escalate, o.EscalateDays = p.Calibrate, p.MinVerdicts, p.MaxPrecision, p.Escalate, p.EscalateDays
+	o.WindowDays = p.WindowDays
+	if o.WindowDays == 0 {
+		o.WindowDays = -1
+	}
 	o.CtxMinFP = max(3, o.MinVerdicts-2)
 }
 
@@ -105,6 +114,7 @@ type Case struct {
 	Targets  []string       `json:"targets,omitempty"` // 事件的主要攻击目标
 	Verdict  Verdict        `json:"verdict"`
 	User     string         `json:"user"`
+	Note     string         `json:"note,omitempty"` // 分析员的处置说明，作为相似案例提供给外部模型
 	Time     time.Time      `json:"time"`
 }
 
@@ -158,6 +168,7 @@ type Suggestion struct {
 	FP        int      `json:"fp"`
 	Incidents []uint64 `json:"incidents"`
 	Reason    string   `json:"reason"`
+	Origin    string   `json:"origin,omitempty"` // ai：来自可信模型的判断，尚无分析员结论
 }
 
 // Change 是一条进化日志：自动校准、撤销、锁定、采纳建议等。
@@ -230,6 +241,9 @@ func Load(opt Options) (*Learner, error) {
 	}
 	if opt.EscalateDays <= 0 {
 		opt.EscalateDays = 30
+	}
+	if opt.WindowDays == 0 {
+		opt.WindowDays = 180
 	}
 	opt.CtxMinFP = max(3, opt.MinVerdicts-2)
 	l := &Learner{opt: opt, cases: map[uint64]*Case{}, pinned: map[string]bool{}, handled: map[string]string{},
@@ -382,6 +396,7 @@ func (l *Learner) feedbackLocked(c Case, now time.Time) bool {
 		if len(c.Targets) > 5 {
 			c.Targets = c.Targets[:5]
 		}
+		c.Note = clipNote(c.Note)
 		l.cases[c.Incident] = &c
 		if len(l.cases) > maxCases {
 			l.evictLocked()
@@ -460,6 +475,9 @@ func (l *Learner) recomputeLocked(now time.Time, user string) []Change {
 	ctx := map[[2]string]*ctxStat{}
 	src := map[string]*ctxStat{}
 	for _, c := range l.cases {
+		if l.expiredLocked(c, now) {
+			continue
+		}
 		s := src[c.Source]
 		if s == nil {
 			s = &ctxStat{}
@@ -547,7 +565,7 @@ func (l *Learner) recomputeLocked(now time.Time, user string) []Change {
 	}
 	for _, r := range sortedKeys(old.rules) { // 样本被撤回后规则不再出现在统计中
 		if !rules[r] {
-			changes = append(changes, Change{Time: now, Kind: "restore", Rule: r, User: "自学习", Detail: "规则 " + r + " 恢复原等级（研判样本已撤回）"})
+			changes = append(changes, Change{Time: now, Kind: "restore", Rule: r, User: "自学习", Detail: "规则 " + r + " 恢复原等级（研判样本已撤回或超过学习窗口）"})
 		}
 	}
 	sort.Slice(stats, func(i, j int) bool {
@@ -563,6 +581,8 @@ func (l *Learner) recomputeLocked(now time.Time, user string) []Change {
 	for _, c := range changes {
 		l.logLocked(c)
 	}
+
+	l.aiStats = l.aiStatsLocked()
 
 	// 建议：同一规则在同一目标上多次被研判为误报、且从未确认为攻击；同一来源多次被整体研判为误报
 	var sugs []Suggestion
@@ -588,6 +608,7 @@ func (l *Learner) recomputeLocked(now time.Time, user string) []Change {
 			sugs = append(sugs, sg)
 		}
 	}
+	sugs = append(sugs, l.aiSuggestionsLocked(ctx, sugs, now)...)
 	sort.Slice(sugs, func(i, j int) bool {
 		if sugs[i].FP != sugs[j].FP {
 			return sugs[i].FP > sugs[j].FP
@@ -598,7 +619,6 @@ func (l *Learner) recomputeLocked(now time.Time, user string) []Change {
 		sugs = sugs[:100]
 	}
 	l.sugs = sugs
-	l.aiStats = l.aiStatsLocked()
 	return changes
 }
 
@@ -625,7 +645,7 @@ func (l *Learner) calibrateContextsLocked(ctx map[[2]string]*ctxStat, old *snaps
 		if _, still := cal[k]; still {
 			continue
 		}
-		why, who := "研判样本已撤回", "自学习"
+		why, who := "研判样本已撤回或超过学习窗口", "自学习"
 		switch cs := ctx[k]; {
 		case l.pinned[k[0]]:
 			why = "规则已被锁定"
@@ -831,6 +851,8 @@ type Report struct {
 	PolicyUI    bool          `json:"policy_ui"` // 策略来自界面设置（否则来自配置文件）
 	Applied     Applied       `json:"applied"`   // 学习结果在检测中自动生效的次数
 	Confirmed   int           `json:"confirmed"` // 最近一次结论为确认攻击的来源数（复现时升级）
+	Expired     int           `json:"expired"`   // 超过学习窗口、不再参与校准的样本数
+	Trend       []WeekStat    `json:"trend"`     // 近 8 周的人工结论，误报占比下降说明检测在变准
 }
 
 // Report 返回自学习状态概览。
@@ -854,7 +876,12 @@ func (l *Learner) Report() Report {
 		}
 	}
 	r.Cases = len(l.cases)
+	now := time.Now()
+	r.Trend = weekTrend(l.cases, now)
 	for _, c := range l.cases {
+		if l.expiredLocked(c, now) {
+			r.Expired++
+		}
 		if c.Verdict == VerdictTP {
 			r.TP++
 		} else {

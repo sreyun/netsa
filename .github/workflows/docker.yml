@@ -120,7 +120,7 @@ jobs:
           [ -n "$HW_SECRET_KEY" ] || miss="$miss HW_SECRET_KEY"
           if [ -n "$miss" ]; then
             echo "::error::缺少 Secret:$miss"
-            echo "见 README「镜像构建与发布（华为云 SWR）」"
+            echo "见 docs/development.md「镜像构建与发布（华为云 SWR）」"
             exit 1
           fi
 

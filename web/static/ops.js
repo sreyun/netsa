@@ -226,7 +226,7 @@ $('#incAI').addEventListener('click', () => {
       await openIncident(d.id);
       const list = (xs) => (xs || []).map((x) => `<li>${esc(x)}</li>`).join('');
       $('#incAIBox').innerHTML = `<div><b>AI 研判</b> <span class="muted">${esc(v.model)} · 仅供参考，已写入处置记录</span></div>
-        <div class="ai-verdict"><b class="${cls}">${esc(label)}</b> 置信度 ${num(v.confidence)}% · ${esc(v.summary)}</div>
+        <div class="ai-verdict">${v.unparsed ? `<b class="lv-medium">未得到结论</b> · ${esc(v.summary)}` : `<b class="${cls}">${esc(label)}</b> 置信度 ${num(v.confidence)}% · ${esc(v.summary)}`}</div>
         ${(v.reasons || []).length ? `<div class="muted">依据</div><ul>${list(v.reasons)}</ul>` : ''}
         ${(v.actions || []).length ? `<div class="muted">处置建议</div><ul>${list(v.actions)}</ul>` : ''}
         ${v.false_positive_hint ? `<div class="muted">抑制建议：${esc(v.false_positive_hint)}</div>` : ''}
@@ -941,6 +941,21 @@ $('#auVerify').addEventListener('click', () => ntBusy($('#auVerify'), async () =
 const LN_CHANGE = { calibrate: '自动下调', restore: '恢复', calibrate_ctx: '目标级下调', restore_ctx: '目标级恢复', pin: '锁定', unpin: '解锁', apply: '采纳建议', dismiss: '忽略建议', policy: '策略调整' };
 let lnPolicy = null;
 const LN_ANOM = { new_net: '新地址登录', odd_hour: '非常用时段', login_fail: '登录失败暴增', bulk_export: '批量导出', sensitive: '高危变更' };
+// 近 8 周人工结论中的误报占比（从早到晚）：持续下降说明检测在变准
+function lnTrendText(trend) {
+  const pts = (trend || []).slice().reverse().filter((w) => w.tp + w.fp > 0);
+  if (pts.length < 2) return '';
+  return `<br>进化效果：近 ${pts.length} 周有结论的周次，误报占比 ${pts.map((w) => Math.round((w.fp / (w.tp + w.fp)) * 100) + '%').join(' → ')}`;
+}
+// 平台对当前模型的自动适配与研判表现
+function aiAdaptRows(p) {
+  if (!p) return '';
+  const done = p.parsed + p.unparsed;
+  const learned = [p.thinks && '推理模型', p.max_tokens_cap && `输出上限 ${num(p.max_tokens_cap)}`, p.no_response_format && '不支持 JSON 模式', p.no_chat_kwargs && '不支持关闭思考参数',
+    p.no_temperature && '不发送 temperature', p.use_max_completion && '使用 max_completion_tokens', p.auth_bearer && '使用 Authorization 认证'].filter(Boolean);
+  return `<div class="k">研判表现</div><div>${done ? `成功 ${num(p.parsed)} / ${num(done)} 次（${Math.round((p.parsed / done) * 100)}%）` : '尚未研判'}${p.calls ? ` · 平均 ${(p.latency_ms / p.calls / 1000).toFixed(1)} 秒` : ''}${p.repaired ? ` · 修复格式 ${num(p.repaired)} 次` : ''}${p.truncated ? ` · <span class="lv-medium">截断 ${num(p.truncated)} 次</span>` : ''}${p.refused ? ` · <span class="lv-medium">拒答 ${num(p.refused)} 次</span>` : ''}</div>
+    ${learned.length ? `<div class="k">自动适配</div><div>${esc(learned.join(' · '))}</div>` : ''}`;
+}
 async function loadLearn() {
   const { enabled, report: r, ai_status: aiStatus } = await api('/api/learn');
   if (aiStatus) meta.ai = aiStatus;
@@ -956,7 +971,7 @@ async function loadLearn() {
   const incLinks = (ids) => (ids || []).slice(0, 6).map((id) => `<a href="#tab=incidents&incident=${id}">#${id}</a>`).join(' ');
   $('#lnSugs').innerHTML = r.suggestions.length
     ? `<table class="table"><thead><tr><th>条件</th><th>误报</th><th>相关事件</th><th></th></tr></thead><tbody>${r.suggestions.map((s) => `<tr>
-        <td>${s.kind === 'source' ? `来源 <span class="mono">${esc(s.ip)}</span> <span class="muted">（疑似授权扫描 / 内部测试）</span>` : `规则 <span class="mono">${esc(s.rule_id)}</span><div class="mono muted">${esc(s.target)}</div>`}</td>
+        <td>${s.kind === 'source' ? `来源 <span class="mono">${esc(s.ip)}</span> <span class="muted">（疑似授权扫描 / 内部测试）</span>` : `规则 <span class="mono">${esc(s.rule_id)}</span>${s.origin === 'ai' ? ' <span class="chip" title="来自历史一致率高的模型，分析员尚未处置">模型判断</span>' : ''}<div class="mono muted">${esc(s.target)}</div>`}</td>
         <td>${num(s.fp)} 次</td><td class="nowrap">${incLinks(s.incidents)}</td>
         <td class="nowrap">${canOperate() ? `<button type="button" class="btn" data-ln="apply" data-id="${esc(s.id)}">采纳</button> <button type="button" class="btn" data-ln="dismiss" data-id="${esc(s.id)}">忽略</button>` : ''}</td></tr>`).join('')}</tbody></table>`
     : '<div class="muted">暂无建议。分析员把事件处置为“误报”后，同一规则在同一目标上反复误报、或同一来源多次被整体判为误报时，会在这里提示。</div>';
@@ -969,7 +984,9 @@ async function loadLearn() {
   lnPolicy = pol;
   $('#lnPolicy').innerHTML = `自动生效策略：自动校准 <b>${pol.calibrate ? '开启' : '关闭'}</b>（规则级 ${num(r.calibrated)} 条：样本 ≥ ${num(pol.min_verdicts)}、准确率 ≤ ${Math.round(pol.max_precision * 100)}%；目标级 ${num(r.ctx_total)} 处：误报 ≥ ${num(r.options.ctx_min_fp)} 次）`
     + ` · 确认攻击源复现升级 <b>${pol.escalate ? '开启' : '关闭'}</b>（${num(pol.escalate_days)} 天内，当前 ${num(r.confirmed)} 个来源）`
-    + ` · <span>${r.policy_ui ? `界面设置（${esc(pol.updated_by)}，${esc(fmtShort(pol.updated))}）` : '来自配置文件 learn 段'}</span>`;
+    + ` · 学习窗口 <b>${pol.window_days ? `${num(pol.window_days)} 天` : '不限'}</b>${r.expired ? `（${num(r.expired)} 个样本已过期）` : ''}`
+    + ` · <span>${r.policy_ui ? `界面设置（${esc(pol.updated_by)}，${esc(fmtShort(pol.updated))}）` : '来自配置文件 learn 段'}</span>`
+    + lnTrendText(r.trend);
   const pct = (s) => (s.precision < 0 ? '-' : Math.round(s.precision * 100) + '%');
   $('#lnRules').innerHTML = `<thead><tr><th>规则</th><th>确认攻击</th><th>误报</th><th>准确率</th><th>状态</th><th></th></tr></thead><tbody>${r.rules.map((s) => `<tr>
       <td class="mono">${esc(s.rule)}</td><td>${num(s.tp)}</td><td>${num(s.fp)}</td><td>${pct(s)}</td>
@@ -1005,7 +1022,9 @@ async function loadLearn() {
         <div class="k">密钥</div><div>${a.key_set ? '已设置（只保存在服务端，不会回显）' : '<span class="muted">未设置（按无密钥方式调用，适用于内网模型）</span>'}</div>
         <div class="k">脱敏</div><div>${a.desensitize ? '<span class="nt-on">发送前脱敏</span>（内网地址、口令 / 令牌、手机号、证件号、邮箱）' : '<span class="lv-medium">未脱敏</span>（只适用于完全在内网部署的模型）'}</div>
         <div class="k">自动研判</div><div>${a.auto_triage ? '新出现的高危及以上事件自动研判' : '关闭（在事件详情中手动研判）'}</div>
-        <div class="k">调用</div><div>近 1 小时 ${num(a.used_hour)} / ${num(a.max_per_hour)} 次 · 累计 ${num(a.total)} 次${a.failed ? ` · <span class="lv-high">失败 ${num(a.failed)} 次</span>` : ''}${a.last_error ? `<div class="arc-err">${esc(a.last_error)}</div>` : ''}</div></div>`
+        <div class="k">调用</div><div>近 1 小时 ${num(a.used_hour)} / ${num(a.max_per_hour)} 次 · 累计 ${num(a.total)} 次${a.failed ? ` · <span class="lv-high">失败 ${num(a.failed)} 次</span>` : ''}${a.last_error ? `<div class="arc-err">${esc(a.last_error)}</div>` : ''}</div>
+        <div class="k">协议</div><div>${a.protocol === 'anthropic' ? 'Anthropic（/messages）' : 'OpenAI 兼容（/chat/completions）'}</div>
+        ${aiAdaptRows(a.adapt)}</div>`
     : `<div class="muted">未启用。${isAdmin() ? '点击右上角“配置模型”，填写模型地址、模型名称与模型密钥后启用' : '请联系管理员在此页面配置模型地址、名称与密钥'}，即可在事件详情中使用“AI 研判”。支持 DeepSeek、通义千问、智谱、Kimi 等 OpenAI 兼容接口，以及内网部署的 vLLM / Ollama。</div>`) + trust;
   $('#lnLog').innerHTML = `<thead><tr><th>时间</th><th>类型</th><th>操作人</th><th>说明</th></tr></thead><tbody>${r.changes.map((c) => `<tr><td class="nowrap muted">${esc(fmtShort(c.time))}</td>
       <td class="nowrap">${esc(LN_CHANGE[c.kind] || c.kind)}</td><td class="nowrap">${esc(c.user)}</td><td>${esc(c.detail)}</td></tr>`).join('') || empty(4, '暂无记录')}</tbody>`;
@@ -1031,6 +1050,7 @@ $('#lnPolicyEdit').addEventListener('click', () => {
   $('#lpPrec').value = Math.round((p.max_precision || 0.2) * 100);
   $('#lpEsc').checked = !!p.escalate;
   $('#lpDays').value = p.escalate_days || 30;
+  $('#lpWindow').value = p.window_days ?? 180;
   setMsg('#lpMsg', '');
   openModal('lpModal');
   $('#lpCalib').focus();
@@ -1040,6 +1060,7 @@ $('#lpForm').addEventListener('submit', (e) => {
   const f = {
     calibrate: $('#lpCalib').checked, min_verdicts: parseInt($('#lpMin').value, 10) || 0,
     max_precision: (parseFloat($('#lpPrec').value) || 0) / 100, escalate: $('#lpEsc').checked, escalate_days: parseInt($('#lpDays').value, 10) || 0,
+    window_days: parseInt($('#lpWindow').value, 10) || 0,
   };
   ntBusy($('#lpSave'), async () => {
     try {
@@ -1070,6 +1091,10 @@ async function openAIForm() {
   $('#aiClearRow').hidden = !v.key_set;
   $('#aiClear').checked = false;
   $('#aiMax').value = v.max_per_hour || 30;
+  $('#aiProto').value = v.protocol || 'openai';
+  $('#aiThinking').value = v.thinking || 'auto';
+  $('#aiTokens').value = v.max_tokens || 0;
+  $('#aiTimeout').value = v.timeout_sec || 120;
   $('#aiDesens').checked = v.desensitize;
   $('#aiAuto').checked = v.auto_triage;
   const who = v.updated_by ? `最近由 ${esc(v.updated_by)} 于 ${esc(fmtShort(v.updated))} 修改。` : (v.from_ui ? '' : '当前值来自配置文件 ai 段。');
@@ -1085,8 +1110,23 @@ function aiCollect() {
     enabled: $('#aiEnabled').checked, base_url: $('#aiBase').value.trim(), model: $('#aiModel').value.trim(),
     api_key: $('#aiClear').checked ? '' : $('#aiKey').value.trim(), clear_key: $('#aiClear').checked,
     max_per_hour: parseInt($('#aiMax').value, 10) || 30, desensitize: $('#aiDesens').checked, auto_triage: $('#aiAuto').checked,
+    protocol: $('#aiProto').value, thinking: $('#aiThinking').value, max_tokens: parseInt($('#aiTokens').value, 10) || 0,
+    timeout_sec: parseInt($('#aiTimeout').value, 10) || 120,
   };
 }
+$('#aiListBtn').addEventListener('click', () => {
+  const f = aiCollect();
+  if (!f.base_url) { setMsg('#aiMsg', '请先填写模型地址'); return; }
+  setMsg('#aiMsg', '正在读取模型列表…', true);
+  ntBusy($('#aiListBtn'), async () => {
+    try {
+      const { models } = await api('/api/ai/models', 'POST', f);
+      $('#aiModelList').innerHTML = (models || []).map((m) => `<option value="${esc(m)}"></option>`).join('');
+      if ((models || []).length && !$('#aiModel').value) $('#aiModel').value = models[0];
+      setMsg('#aiMsg', (models || []).length ? `接口提供 ${models.length} 个模型：${models.slice(0, 5).join('、')}${models.length > 5 ? ' …' : ''}` : '接口没有返回模型列表，请手工填写', !!(models || []).length);
+    } catch (err) { setMsg('#aiMsg', err.message); }
+  });
+});
 $('#lnAIEdit').addEventListener('click', openAIForm);
 $('#aiClear').addEventListener('change', (e) => { $('#aiKey').disabled = e.target.checked; });
 $('#aiDesens').addEventListener('change', (e) => {
@@ -1113,7 +1153,10 @@ $('#aiTestBtn').addEventListener('click', () => {
   ntBusy($('#aiTestBtn'), async () => {
     try {
       const r = await api('/api/ai/test', 'POST', f);
-      setMsg('#aiMsg', r.ok ? `连接成功：${r.model} 用时 ${(r.latency_ms / 1000).toFixed(1)} 秒${r.reply ? `，回复“${r.reply}”` : ''}。` : `连接失败：${r.error}`, r.ok);
+      if (r.protocol) $('#aiProto').value = r.protocol;
+      if ((r.models || []).length) $('#aiModelList').innerHTML = r.models.map((m) => `<option value="${esc(m)}"></option>`).join('');
+      setMsg('#aiMsg', r.ok ? `连接成功：${r.model} 用时 ${(r.latency_ms / 1000).toFixed(1)} 秒${r.reply ? `，回复“${r.reply}”` : ''}。${r.note || ''}`
+        : `连接失败：${r.error}${(r.models || []).length ? `。接口提供的模型：${r.models.slice(0, 5).join('、')}` : ''}`, r.ok);
     } catch (err) { setMsg('#aiMsg', err.message); }
   });
 });
