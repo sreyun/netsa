@@ -69,7 +69,8 @@ func (s *Server) learnReport(w http.ResponseWriter, r *http.Request) {
 		}
 		rep.Suggestions = out
 	}
-	writeJSON(w, map[string]any{"enabled": s.Learn != nil, "report": rep})
+	// 外部模型的实时接入状态（调用次数、最近错误）随自学习报告一起返回，页面不依赖启动时缓存的元数据
+	writeJSON(w, map[string]any{"enabled": s.Learn != nil, "report": rep, "ai_status": s.AI.Status()})
 }
 
 // learnSuggestion 采纳（创建误报抑制）或忽略一条自学习建议。采纳等同于人工添加抑制规则，需要运营分析员以上权限。

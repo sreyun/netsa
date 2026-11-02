@@ -259,10 +259,17 @@ func (a *app) server(listen string) (*http.Server, error) {
 		RDAP: a.rdap, Static: staticFS(a.cfg), Version: version, Broker: a.broker, Notifier: a.notifier,
 		Archive: a.archive, Suppress: a.suppress, RawLog: a.raw, Assets: a.assets, Exposure: a.exposure, Learn: a.learn, AI: ai.New(a.cfg.AI, os.Getenv),
 	}
+	// 外部模型在 Web 管理页面（自学习 → 外部模型）配置，保存在状态目录的 ai.json；
+	// 界面从未保存过时沿用配置文件 ai 段与环境变量中的密钥
+	if loaded, err := s.AI.SetPath(dataFile(a.cfg, "", "ai.json")); err != nil {
+		log.Printf("[ai] %v", err)
+	} else if loaded {
+		log.Printf("[ai] 已加载界面保存的外部模型配置（%s）", dataFile(a.cfg, "", "ai.json"))
+	}
 	if st := s.AI.Status(); st.Enabled {
-		log.Printf("[ai] 已接入外部模型 %s（%s）：发送前脱敏 %v，自动研判高危事件 %v，每小时最多 %d 次；模型结论仅供参考，不参与自学习", st.Model, st.Endpoint, st.Desensitize, st.AutoTriage, st.MaxPerHour)
+		log.Printf("[ai] 已接入外部模型 %s（%s）：发送前脱敏 %v，自动研判高危事件 %v，每小时最多 %d 次；模型结论仅供参考，不作为自学习样本", st.Model, st.Endpoint, st.Desensitize, st.AutoTriage, st.MaxPerHour)
 		if !st.KeySet {
-			log.Printf("[ai] 提示：未设置环境变量 %s，按无密钥方式调用（适用于内网部署的模型）", a.cfg.AI.KeyEnv())
+			log.Printf("[ai] 提示：未设置模型密钥，按无密钥方式调用（适用于内网部署的模型）")
 		}
 	}
 	a.api = s

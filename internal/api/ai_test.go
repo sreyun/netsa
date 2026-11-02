@@ -5,12 +5,18 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 
 	"netsa/internal/ai"
+	"netsa/internal/audit"
+	"netsa/internal/auth"
 	"netsa/internal/config"
+	"netsa/internal/learn"
 	"netsa/internal/model"
 	"netsa/internal/store"
 )
@@ -64,5 +70,135 @@ func TestIncidentAI(t *testing.T) {
 	}
 	if d.Status != store.IncOpen {
 		t.Fatal("AI 结论不应改变事件状态")
+	}
+}
+
+// 外部模型在 Web 管理页面配置：只有管理员可查看与修改；保存后立即生效；响应与审计中不出现密钥；
+// 改到其他主机必须重新填写密钥；地址变更作为高危变更告警。
+func TestAISettingsAPI(t *testing.T) {
+	llm := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"choices":[{"message":{"content":"OK"}}]}`))
+	}))
+	defer llm.Close()
+	s, _ := testServer(t, "admin", "Adm1n-secret")
+	s.Learn, _ = learn.Load(learn.Options{Sentinel: true})
+	trail, err := audit.Open(t.TempDir(), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.Trail = trail
+	s.AI = ai.New(config.AIConfig{}, nil)
+	path := filepath.Join(t.TempDir(), "ai.json")
+	s.AI.SetPath(path)
+	h := s.Handler()
+	admin := login(t, h, "admin", "Adm1n-secret")
+
+	for _, c := range []struct{ method, path string }{{http.MethodGet, "/api/ai/settings"}, {http.MethodPut, "/api/ai/settings"}, {http.MethodPost, "/api/ai/test"}} {
+		if got := requiredRole(httptest.NewRequest(c.method, c.path, nil)); got != auth.RoleAdmin {
+			t.Errorf("%s %s 应只允许管理员: %s", c.method, c.path, got)
+		}
+	}
+	var resp struct {
+		Settings ai.View
+		Status   ai.Status
+		Warning  string
+	}
+	decode(t, do(h, http.MethodGet, "/api/ai/settings", "", admin).Body.Bytes(), &resp)
+	if resp.Settings.Enabled || !resp.Settings.Persist {
+		t.Fatalf("初始: %+v", resp.Settings)
+	}
+	if rec := do(h, http.MethodPut, "/api/ai/settings", `{"enabled":true,"base_url":"http://api.example.com/v1","model":"m"}`, admin); rec.Code != 400 {
+		t.Fatalf("公网 http 地址应拒绝: %d %s", rec.Code, rec.Body.String())
+	}
+	key := "sk-api-test-0123456789"
+	body := `{"enabled":true,"base_url":"` + llm.URL + `/v1","model":"deepseek-chat","api_key":"` + key + `","max_per_hour":20,"desensitize":true}`
+	rec := do(h, http.MethodPut, "/api/ai/settings", body, admin)
+	if rec.Code != 200 || strings.Contains(rec.Body.String(), key) {
+		t.Fatalf("保存: %d %s", rec.Code, rec.Body.String())
+	}
+	decode(t, rec.Body.Bytes(), &resp)
+	if !resp.Settings.Enabled || resp.Settings.KeySource != "ui" || !resp.Status.Enabled || resp.Status.Model != "deepseek-chat" {
+		t.Fatalf("保存后立即生效: %+v %+v", resp.Settings, resp.Status)
+	}
+	if meta := do(h, http.MethodGet, "/api/meta", "", admin).Body.String(); !strings.Contains(meta, `"model":"deepseek-chat"`) || strings.Contains(meta, key) {
+		t.Fatalf("界面元数据应反映新配置且不含密钥: %s", meta)
+	}
+	if data, _ := os.ReadFile(path); !strings.Contains(string(data), key) {
+		t.Fatal("密钥应保存在服务端配置文件中")
+	}
+	// 改到其他主机却沿用原密钥：拒绝
+	if rec := do(h, http.MethodPut, "/api/ai/settings", `{"enabled":true,"base_url":"https://llm.attacker.example/v1","model":"m","max_per_hour":20,"desensitize":true}`, admin); rec.Code != 400 || !strings.Contains(rec.Body.String(), "重新填写模型密钥") {
+		t.Fatalf("主机变更沿用密钥: %d %s", rec.Code, rec.Body.String())
+	}
+	// 重新填写密钥后允许，作为高危变更告警
+	if rec := do(h, http.MethodPut, "/api/ai/settings", `{"enabled":true,"base_url":"https://llm2.example.com/v1","model":"m","api_key":"sk-other-000000","max_per_hour":20,"desensitize":true}`, admin); rec.Code != 200 {
+		t.Fatalf("重新填写密钥后应允许: %d %s", rec.Code, rec.Body.String())
+	}
+	found := false
+	for _, a := range s.Learn.Report().Anomalies {
+		found = found || strings.Contains(a.Title, "外部模型的地址")
+	}
+	if !found {
+		t.Fatalf("模型地址变更应作为高危变更告警: %+v", s.Learn.Report().Anomalies)
+	}
+	// 测试连接：使用表单中的配置，不改变已保存的配置
+	rec = do(h, http.MethodPost, "/api/ai/test", `{"base_url":"`+llm.URL+`/v1","model":"qwen-max","api_key":"sk-test-0000000","max_per_hour":20}`, admin)
+	var tr ai.TestResult
+	decode(t, rec.Body.Bytes(), &tr)
+	if rec.Code != 200 || !tr.OK || tr.Model != "qwen-max" || s.AI.Model() != "m" {
+		t.Fatalf("测试连接: %d %+v", rec.Code, tr)
+	}
+	var actions []string
+	for _, e := range trail.Search(audit.Query{Limit: 50}) {
+		if strings.Contains(e.Detail, key) || strings.Contains(e.Detail, "sk-other-000000") {
+			t.Fatalf("审计记录中不能出现密钥: %+v", e)
+		}
+		if strings.Contains(e.Action, "外部模型") {
+			actions = append(actions, e.Action+"|"+e.Detail)
+		}
+	}
+	if len(actions) < 4 || !strings.Contains(strings.Join(actions, "\n"), "密钥已更新") {
+		t.Fatalf("配置变更与测试应记入审计: %v", actions)
+	}
+}
+
+// 自学习与外部模型的闭环：研判时附带历史人工结论；模型结论在分析员处置后用于评估一致率，不作为学习样本。
+func TestTriageUsesLearnedHistory(t *testing.T) {
+	var sent string
+	llm := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Messages []struct{ Content string }
+		}
+		b, _ := io.ReadAll(r.Body)
+		json.Unmarshal(b, &req)
+		sent = req.Messages[len(req.Messages)-1].Content
+		w.Write([]byte(`{"choices":[{"message":{"content":"{\"verdict\":\"attack\",\"confidence\":90,\"summary\":\"SQL 注入\"}"}}]}`))
+	}))
+	defer llm.Close()
+	s, st := testServer(t, "", "")
+	s.Learn, _ = learn.Load(learn.Options{Calibrate: true})
+	s.AI = ai.New(config.AIConfig{Enabled: true, BaseURL: llm.URL + "/v1", Model: "deepseek-chat"}, nil)
+	h := s.Handler()
+	for i := 1; i <= 2; i++ {
+		st.Record(&model.Event{Kind: model.KindWeb, SrcIP: "198.51.100." + strconv.Itoa(i), Host: "shop.example.com", Method: "GET",
+			URI: "/api/search?kw=" + strconv.Itoa(i), Time: time.Now()},
+			[]model.Hit{{RuleID: "sqli-bool", Name: "布尔盲注", Category: "SQL注入", Severity: model.SevHigh, Result: model.ResultPassed}})
+	}
+	if rec := do(h, http.MethodPost, "/api/incidents/1", `{"status":"false_positive","note":"搜索接口的正常查询"}`, nil); rec.Code != 200 {
+		t.Fatalf("处置: %d %s", rec.Code, rec.Body.String())
+	}
+	if rec := do(h, http.MethodPost, "/api/incidents/2/ai", "", nil); rec.Code != 200 {
+		t.Fatalf("研判: %d %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(sent, "同规则同目标历史研判：sqli-bool @ shop.example.com /api/search：确认攻击 0 次、误报 1 次") {
+		t.Fatalf("研判应附带历史人工结论:\n%s", sent)
+	}
+	if a := s.Learn.Report().AI; len(a) != 1 || a[0].Pending != 1 || s.Learn.Report().Cases != 1 {
+		t.Fatalf("模型结论只记录、不作为样本: %+v", a)
+	}
+	// 分析员判为误报：模型判为攻击，计为一次「误判为攻击」
+	do(h, http.MethodPost, "/api/incidents/2", `{"status":"false_positive","note":"同样是搜索接口"}`, nil)
+	if a := s.Learn.Report().AI; a[0].Judged != 1 || a[0].Overcall != 1 || a[0].Pending != 0 {
+		t.Fatalf("处置后评估模型: %+v", a)
 	}
 }

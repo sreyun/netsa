@@ -11,6 +11,7 @@ import (
 
 	"netsa/internal/ai"
 	"netsa/internal/auth"
+	"netsa/internal/learn"
 	"netsa/internal/model"
 	"netsa/internal/safe"
 	"netsa/internal/store"
@@ -59,6 +60,24 @@ func (s *Server) incidentFacts(d *store.IncidentDetail, m *ai.Masker) string {
 			}
 		}
 		line("平台历史研判", strings.Join(hist, "；"))
+		// 自学习积累的人工结论：同一来源、同一规则在同一目标上的历史结论（本单位环境中的误报规律）
+		ids := make([]string, 0, len(involved))
+		for id := range involved {
+			ids = append(ids, id)
+		}
+		var targets []string
+		for _, kv := range d.Targets {
+			targets = append(targets, kv.Name)
+		}
+		h := s.Learn.History(d.Key, ids, targets, d.ID)
+		if h.SourceTP+h.SourceFP > 0 {
+			line("该来源历史研判", "确认攻击 "+strconv.Itoa(h.SourceTP)+" 次、误报 "+strconv.Itoa(h.SourceFP)+" 次")
+		}
+		var ctx []string
+		for _, c := range h.Contexts {
+			ctx = append(ctx, c.Rule+" @ "+c.Target+"：确认攻击 "+strconv.Itoa(c.TP)+" 次、误报 "+strconv.Itoa(c.FP)+" 次")
+		}
+		line("同规则同目标历史研判", strings.Join(ctx, "；"))
 	}
 	sb.WriteString("最近告警（新的在前）：\n")
 	for i, a := range d.AlertList {
@@ -93,15 +112,19 @@ func (s *Server) triage(ctx context.Context, id uint64, user, ip string) (ai.Ver
 	if d == nil {
 		return ai.Verdict{}, store.ErrNoIncident
 	}
-	facts := s.incidentFacts(d, ai.NewMasker(s.AI.Desensitize()))
+	desens := s.AI.Desensitize()
+	facts := s.incidentFacts(d, ai.NewMasker(desens))
 	v, sent, err := s.AI.Triage(ctx, facts)
 	detail := "事件 #" + strconv.FormatUint(id, 10) + "，模型 " + s.AI.Model() + "，发送 " + strconv.Itoa(sent) + " 字节"
-	if s.AI.Desensitize() {
+	if desens {
 		detail += "（已脱敏）"
 	}
 	if err == nil {
 		detail += "，结论 " + ai.VerdictLabel[v.Verdict]
-		if _, uerr := s.Store.UpdateIncidents([]uint64{id}, "AI（"+s.AI.Model()+"）", store.IncidentUpdate{Note: v.Note()}); uerr != nil {
+		// 自学习评估的模型可信度写在结论旁边；本次结论在分析员处置后用于更新一致率（不作为学习样本）
+		v.Trust = s.Learn.Trust(v.Model)
+		s.Learn.RecordAI(id, learn.AIRecord{Verdict: v.Verdict, Confidence: v.Confidence, Model: v.Model, Time: v.Time})
+		if _, uerr := s.Store.UpdateIncidents([]uint64{id}, "AI（"+v.Model+"）", store.IncidentUpdate{Note: v.Note()}); uerr != nil {
 			log.Printf("[ai] 写入事件 #%d 处置记录失败: %v", id, uerr)
 		}
 	}
@@ -120,8 +143,8 @@ func (s *Server) triage(ctx context.Context, id uint64, user, ip string) (ai.Ver
 
 // incidentAI 对事件执行 AI 研判（运营分析员以上）。
 func (s *Server) incidentAI(w http.ResponseWriter, r *http.Request) {
-	if s.AI == nil {
-		writeError(w, http.StatusNotFound, "未启用外部模型（配置 ai.enabled 后可用）")
+	if !s.AI.Enabled() {
+		writeError(w, http.StatusNotFound, ai.ErrDisabled.Error())
 		return
 	}
 	id, err := strconv.ParseUint(r.PathValue("id"), 10, 64)
@@ -197,4 +220,95 @@ func (s *Server) aiTick(ctx context.Context) {
 			}
 		}
 	}()
+}
+
+// aiSettings 返回外部模型配置（不含密钥）与接入状态（管理员）。
+func (s *Server) aiSettings(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, map[string]any{"settings": s.AI.View(), "status": s.AI.Status()})
+}
+
+// aiSettingsUpdate 保存外部模型配置并立即生效（管理员）。密钥只写入服务端，审计记录中只记录「已更新 / 未变更」。
+func (s *Server) aiSettingsUpdate(w http.ResponseWriter, r *http.Request) {
+	var u ai.Update
+	if !decodeForm(w, r, &u) {
+		return
+	}
+	user := "anonymous"
+	if sess := sessionOf(r); sess != nil {
+		user = sess.User
+	}
+	before := s.AI.View()
+	v, warn, err := s.AI.Apply(u, user)
+	s.audit(r, "修改外部模型配置", aiAuditDetail(before, u), err)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if v.Enabled {
+		log.Printf("[ai] %s 修改了外部模型配置：%s（%s），立即生效", user, v.Model, v.BaseURL)
+	} else {
+		log.Printf("[ai] %s 停用了外部模型", user)
+	}
+	writeJSON(w, map[string]any{"settings": v, "status": s.AI.Status(), "warning": warn})
+}
+
+// aiTest 用界面上尚未保存的配置测试模型连通性（管理员）。
+func (s *Server) aiTest(w http.ResponseWriter, r *http.Request) {
+	var u ai.Update
+	if !decodeForm(w, r, &u) {
+		return
+	}
+	extendDeadline(w, 2*time.Minute)
+	ctx, cancel := context.WithTimeout(r.Context(), 60*time.Second)
+	defer cancel()
+	res, err := s.AI.Test(ctx, u)
+	if err == nil && !res.OK {
+		err = errors.New(res.Error)
+	}
+	s.audit(r, "测试外部模型连接", u.Model+"（"+clipRunes(strings.TrimSpace(u.BaseURL), 200)+"）", err)
+	switch {
+	case errors.Is(err, ai.ErrRateLimited):
+		writeError(w, http.StatusTooManyRequests, err.Error())
+	case err != nil && !res.OK && res.Model == "":
+		writeError(w, http.StatusBadRequest, err.Error()) // 配置校验未通过，没有发出请求
+	default:
+		writeJSON(w, res)
+	}
+}
+
+// aiAuditDetail 描述一次配置变更（不含密钥）。地址变更与关闭脱敏使用固定措辞，平台行为基线据此识别高危变更。
+func aiAuditDetail(before ai.View, u ai.Update) string {
+	parts := []string{"停用"}
+	if u.Enabled {
+		parts[0] = "启用"
+	}
+	parts = append(parts, "模型 "+clipRunes(strings.TrimSpace(u.Model), 64))
+	base := clipRunes(strings.TrimRight(strings.TrimSpace(u.BaseURL), "/"), 200)
+	if before.BaseURL != "" && base != before.BaseURL {
+		parts = append(parts, "地址变更 "+before.BaseURL+" → "+base)
+	} else {
+		parts = append(parts, "地址 "+base)
+	}
+	switch {
+	case u.ClearKey:
+		parts = append(parts, "不使用密钥")
+	case strings.TrimSpace(u.APIKey) != "":
+		parts = append(parts, "密钥已更新")
+	default:
+		parts = append(parts, "密钥未变更")
+	}
+	if before.Desensitize && !u.Desensitize {
+		parts = append(parts, "关闭发送前脱敏")
+	} else if !u.Desensitize {
+		parts = append(parts, "未脱敏")
+	}
+	if u.AutoTriage {
+		parts = append(parts, "自动研判高危事件")
+	}
+	limit := u.MaxPerHour
+	if limit <= 0 {
+		limit = 30 // 与服务端默认值一致
+	}
+	parts = append(parts, "每小时上限 "+strconv.Itoa(limit)+" 次")
+	return strings.Join(parts, "，")
 }

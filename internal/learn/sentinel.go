@@ -217,6 +217,11 @@ func sensitive(action, detail string) (string, model.Severity) {
 		}
 	case "删除告警机器人":
 		return "删除了告警推送机器人", model.SevMedium
+	case "修改外部模型配置":
+		// 事件摘要会发往模型地址：地址被改到别处、或关闭了发送前脱敏，都可能造成数据外泄
+		if strings.Contains(detail, "地址变更") || strings.Contains(detail, "关闭发送前脱敏") {
+			return "外部模型的地址或脱敏设置被修改（安全事件内容将发往该地址）", model.SevMedium
+		}
 	}
 	return "", 0
 }

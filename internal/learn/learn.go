@@ -3,6 +3,8 @@
 // 设计边界（自学习不能变成新的风险来源）：
 //   - 只从人的结论学习：分析员把事件处置为「已处置」（确认攻击）或「误报」时才计入样本，AI 与系统自动生成的状态不参与；
 //   - 自动调整只降不升、每次最多一级、不越过攻击分类的等级底线，且可随时撤销（锁定规则）；
+//     校准分两种粒度：规则整体准确率持续偏低时整体下调，只在个别目标上反复误报时只下调该目标（规则 + 目标）；
+//   - 外部模型的结论不作为样本，只用分析员的结论评估模型的一致率，并把历史人工结论提供给模型作研判参考；
 //   - 会隐藏告警的动作（误报抑制）只生成建议，必须由人确认采纳；
 //   - 每一次自动调整都记入「进化日志」并写入审计链。
 package learn
@@ -35,6 +37,8 @@ type Options struct {
 	MaxPrecision float64 `json:"max_precision"` // 准确率不高于该值时自动下调一级（默认 0.2）
 	Sentinel     bool    `json:"sentinel"`      // 学习平台账号的行为基线并告警异常操作
 	Compliance   bool    `json:"compliance"`    // 持续合规自检
+	// CtxMinFP 是「规则 + 目标」精细校准所需的最少误报次数（由 MinVerdicts 推导：max(3, MinVerdicts-2)）
+	CtxMinFP int `json:"ctx_min_fp"`
 }
 
 // Verdict 是分析员对一个安全事件的结论。
@@ -71,6 +75,24 @@ type RuleStat struct {
 	Pinned     bool    `json:"pinned"`     // 已锁定：不参与自动校准
 }
 
+// ContextStat 是一条规则在一个目标上的研判统计（精细校准与历史研判参考）。
+//
+// 同一条规则往往只在个别接口上误报（如搜索接口的参数天然带引号），按规则整体下调会连带削弱
+// 该规则在其他目标上的告警；按「规则 + 目标」校准只影响反复误报的那个接口。
+type ContextStat struct {
+	Rule      string   `json:"rule"`
+	Target    string   `json:"target"`
+	TP        int      `json:"tp"`
+	FP        int      `json:"fp"`
+	Incidents []uint64 `json:"incidents,omitempty"`
+}
+
+// snapshot 是热路径使用的校准快照（无锁读取）。
+type snapshot struct {
+	rules map[string]RuleStat
+	ctx   map[[2]string]ContextStat // 规则 + 归一化目标
+}
+
 // Suggestion 是一条需要人工确认的误报抑制建议。
 type Suggestion struct {
 	ID        string   `json:"id"`
@@ -86,7 +108,7 @@ type Suggestion struct {
 // Change 是一条进化日志：自动校准、撤销、锁定、采纳建议等。
 type Change struct {
 	Time   time.Time `json:"time"`
-	Kind   string    `json:"kind"` // calibrate / restore / pin / unpin / apply / dismiss
+	Kind   string    `json:"kind"` // calibrate / restore / calibrate_ctx / restore_ctx / pin / unpin / apply / dismiss
 	Rule   string    `json:"rule,omitempty"`
 	Detail string    `json:"detail"`
 	User   string    `json:"user"`
@@ -107,7 +129,10 @@ type Learner struct {
 	handled   map[string]string // 已采纳 / 已忽略的建议 ID → 处理结果
 	changes   []Change
 	stats     []RuleStat
+	ctxStats  []ContextStat // 已精细校准的「规则 + 目标」
 	sugs      []Suggestion
+	ai        map[uint64]*AIRecord // 外部模型的研判结论（见 aitrust.go），只用于评估模型，不作为样本
+	aiStats   []AIStat
 	users     map[string]*userBase // 平台账号的行为基线（见 sentinel.go）
 	anomalies []Anomaly
 	comp      map[string]string // 合规测评项 → 上次结果（见 compliance.go）
@@ -115,7 +140,7 @@ type Learner struct {
 	dirty     bool
 
 	sent  sentinelState
-	calib atomic.Pointer[map[string]RuleStat]
+	calib atomic.Pointer[snapshot]
 	// saveMu 串行化落盘：后台定时保存与界面操作（处置、锁定、采纳建议）可能同时触发，
 	// 不串行时两次写入共用同一个临时文件，较旧的状态可能最后改名生效、覆盖较新的状态
 	saveMu sync.Mutex
@@ -134,6 +159,7 @@ type state struct {
 	Anomalies []Anomaly            `json:"anomalies,omitempty"`
 	Comp      map[string]string    `json:"compliance,omitempty"`
 	CompHist  []CompPoint          `json:"compliance_history,omitempty"`
+	AI        map[uint64]*AIRecord `json:"ai,omitempty"`
 }
 
 // Load 读取学习状态（文件不存在时从零开始）。
@@ -144,8 +170,9 @@ func Load(opt Options) (*Learner, error) {
 	if opt.MaxPrecision <= 0 || opt.MaxPrecision >= 1 {
 		opt.MaxPrecision = 0.2
 	}
+	opt.CtxMinFP = max(3, opt.MinVerdicts-2)
 	l := &Learner{opt: opt, cases: map[uint64]*Case{}, pinned: map[string]bool{}, handled: map[string]string{},
-		users: map[string]*userBase{}, comp: map[string]string{}}
+		users: map[string]*userBase{}, comp: map[string]string{}, ai: map[uint64]*AIRecord{}}
 	if opt.Path != "" {
 		data, err := os.ReadFile(opt.Path)
 		switch {
@@ -175,6 +202,11 @@ func Load(opt Options) (*Learner, error) {
 			if st.Comp != nil {
 				l.comp = st.Comp
 			}
+			for id, r := range st.AI {
+				if id != 0 && r != nil {
+					l.ai[id] = r
+				}
+			}
 		}
 	}
 	n := len(l.changes)
@@ -195,7 +227,7 @@ func (l *Learner) Save() error {
 		l.mu.Unlock()
 		return nil
 	}
-	st := state{Handled: l.handled, Changes: l.changes, Users: l.users, Anomalies: l.anomalies, Comp: l.comp, CompHist: l.compHist}
+	st := state{Handled: l.handled, Changes: l.changes, Users: l.users, Anomalies: l.anomalies, Comp: l.comp, CompHist: l.compHist, AI: l.ai}
 	for _, c := range l.cases {
 		st.Cases = append(st.Cases, c)
 	}
@@ -413,6 +445,9 @@ func (l *Learner) recomputeLocked(now time.Time, user string) []Change {
 		rules[r] = true
 	}
 	old := l.calib.Load()
+	if old == nil {
+		old = &snapshot{}
+	}
 	calib := map[string]RuleStat{}
 	stats := make([]RuleStat, 0, len(rules))
 	var changes []Change
@@ -426,7 +461,7 @@ func (l *Learner) recomputeLocked(now time.Time, user string) []Change {
 		if st.Calibrated {
 			calib[r] = st
 		}
-		was := old != nil && (*old)[r].Calibrated
+		was := old.rules[r].Calibrated
 		switch {
 		case st.Calibrated && !was:
 			changes = append(changes, Change{Time: now, Kind: "calibrate", Rule: r, User: "自学习",
@@ -444,11 +479,9 @@ func (l *Learner) recomputeLocked(now time.Time, user string) []Change {
 		}
 		stats = append(stats, st)
 	}
-	if old != nil { // 样本被撤回后规则不再出现在统计中
-		for r := range *old {
-			if !rules[r] {
-				changes = append(changes, Change{Time: now, Kind: "restore", Rule: r, User: "自学习", Detail: "规则 " + r + " 恢复原等级（研判样本已撤回）"})
-			}
+	for _, r := range sortedKeys(old.rules) { // 样本被撤回后规则不再出现在统计中
+		if !rules[r] {
+			changes = append(changes, Change{Time: now, Kind: "restore", Rule: r, User: "自学习", Detail: "规则 " + r + " 恢复原等级（研判样本已撤回）"})
 		}
 	}
 	sort.Slice(stats, func(i, j int) bool {
@@ -458,7 +491,9 @@ func (l *Learner) recomputeLocked(now time.Time, user string) []Change {
 		return stats[i].Rule < stats[j].Rule
 	})
 	l.stats = stats
-	l.calib.Store(&calib)
+	ctxCal, ctxChanges := l.calibrateContextsLocked(ctx, old, now, user)
+	changes = append(changes, ctxChanges...)
+	l.calib.Store(&snapshot{rules: calib, ctx: ctxCal})
 	for _, c := range changes {
 		l.logLocked(c)
 	}
@@ -497,30 +532,116 @@ func (l *Learner) recomputeLocked(now time.Time, user string) []Change {
 		sugs = sugs[:100]
 	}
 	l.sugs = sugs
+	l.aiStats = l.aiStatsLocked()
 	return changes
 }
 
-// Calibrate 对准确率持续偏低的规则下调一级（只下调攻击命中，不低于低危；分类底线由统一的等级裁决保证）。
-// 返回的切片为副本，不修改调用方的数据。
-func (l *Learner) Calibrate(hits []model.Hit) []model.Hit {
+// calibrateContextsLocked 计算「规则 + 目标」精细校准：同一规则在同一目标上被研判为误报不少于 CtxMinFP 次、
+// 且在该目标上从未确认为攻击时，该规则在这个目标上的命中自动下调一级。与规则整体校准相互独立，
+// 一次命中最多下调一级；锁定规则同时停止两种校准。返回新的校准表与进化日志。
+func (l *Learner) calibrateContextsLocked(ctx map[[2]string]*ctxStat, old *snapshot, now time.Time, user string) (map[[2]string]ContextStat, []Change) {
+	cal := map[[2]string]ContextStat{}
+	if l.opt.Calibrate {
+		for k, cs := range ctx {
+			if k[1] != "" && cs.tp == 0 && cs.fp >= l.opt.CtxMinFP && !l.pinned[k[0]] {
+				cal[k] = ContextStat{Rule: k[0], Target: k[1], TP: cs.tp, FP: cs.fp, Incidents: cs.incidents}
+			}
+		}
+	}
+	var changes []Change
+	for _, k := range sortedCtxKeys(cal) {
+		if _, was := old.ctx[k]; !was {
+			changes = append(changes, Change{Time: now, Kind: "calibrate_ctx", Rule: k[0], User: "自学习",
+				Detail: fmt.Sprintf("规则 %s 在 %s 上 %d 次被研判为误报、从未确认为攻击，该规则在此目标上的命中等级自动下调一级（不低于攻击分类底线，其他目标不受影响）", k[0], k[1], cal[k].FP)})
+		}
+	}
+	for _, k := range sortedCtxKeys(old.ctx) {
+		if _, still := cal[k]; still {
+			continue
+		}
+		why, who := "研判样本已撤回", "自学习"
+		switch cs := ctx[k]; {
+		case l.pinned[k[0]]:
+			why = "规则已被锁定"
+		case !l.opt.Calibrate:
+			why = "自动校准已关闭"
+		case cs != nil && cs.tp > 0:
+			why = "该目标上出现确认的攻击"
+		}
+		if user != "" {
+			who = user
+		}
+		changes = append(changes, Change{Time: now, Kind: "restore_ctx", Rule: k[0], User: who,
+			Detail: fmt.Sprintf("规则 %s 在 %s 上恢复原等级（%s）", k[0], k[1], why)})
+	}
+	list := make([]ContextStat, 0, len(cal))
+	for _, k := range sortedCtxKeys(cal) {
+		list = append(list, cal[k])
+	}
+	sort.SliceStable(list, func(i, j int) bool { return list[i].FP > list[j].FP })
+	l.ctxStats = list
+	return cal, changes
+}
+
+func sortedKeys[V any](m map[string]V) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
+}
+
+func sortedCtxKeys[V any](m map[[2]string]V) [][2]string {
+	out := make([][2]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i][0] != out[j][0] {
+			return out[i][0] < out[j][0]
+		}
+		return out[i][1] < out[j][1]
+	})
+	return out
+}
+
+// Calibrate 对准确率持续偏低的规则、以及在事件目标上反复误报的「规则 + 目标」下调一级
+// （只下调攻击命中，一次最多一级，不低于低危；分类底线由统一的等级裁决保证）。
+// ev 用于取攻击目标，可为 nil（只按规则整体校准）。返回的切片为副本，不修改调用方的数据。
+func (l *Learner) Calibrate(ev *model.Event, hits []model.Hit) []model.Hit {
 	if l == nil {
 		return hits
 	}
 	m := l.calib.Load()
-	if m == nil || len(*m) == 0 {
+	if m == nil || len(m.rules)+len(m.ctx) == 0 {
 		return hits
 	}
 	var out []model.Hit
+	target, haveTarget := "", false
 	for i := range hits {
-		st, ok := (*m)[hits[i].RuleID]
-		if !ok || hits[i].TagOnly || hits[i].Severity <= model.SevLow {
+		if hits[i].TagOnly || hits[i].Severity <= model.SevLow {
+			continue
+		}
+		note := ""
+		if st, ok := m.rules[hits[i].RuleID]; ok {
+			note = "；自学习校准：该规则研判 " + strconv.Itoa(st.TP+st.FP) + " 次中 " + strconv.Itoa(st.FP) + " 次为误报，等级下调一级"
+		} else if len(m.ctx) > 0 && ev != nil {
+			if !haveTarget { // 目标只在需要时计算一次（热路径）
+				target, haveTarget = targetKey(ev.Target()), true
+			}
+			if cs, ok := m.ctx[[2]string{hits[i].RuleID, target}]; ok {
+				note = "；自学习校准：该规则在此目标上 " + strconv.Itoa(cs.FP) + " 次被研判为误报、从未确认为攻击，等级下调一级"
+			}
+		}
+		if note == "" {
 			continue
 		}
 		if out == nil {
 			out = append([]model.Hit(nil), hits...)
 		}
 		out[i].Severity--
-		out[i].Evidence += "；自学习校准：该规则研判 " + strconv.Itoa(st.TP+st.FP) + " 次中 " + strconv.Itoa(st.FP) + " 次为误报，等级下调一级"
+		out[i].Evidence += note
 	}
 	if out == nil {
 		return hits
@@ -604,21 +725,24 @@ func (l *Learner) Resolve(id, user, result string) error {
 
 // Report 是自学习状态概览。
 type Report struct {
-	Cases       int          `json:"cases"` // 研判样本数
-	TP          int          `json:"tp"`
-	FP          int          `json:"fp"`
-	Rules       []RuleStat   `json:"rules"`
-	Calibrated  int          `json:"calibrated"`
-	Suggestions []Suggestion `json:"suggestions"`
-	Changes     []Change     `json:"changes"` // 最近的进化日志（新的在前）
-	Anomalies   []Anomaly    `json:"anomalies"`
-	Compliance  []CompPoint  `json:"compliance"` // 合规符合率趋势
-	Options     Options      `json:"options"`
+	Cases       int           `json:"cases"` // 研判样本数
+	TP          int           `json:"tp"`
+	FP          int           `json:"fp"`
+	Rules       []RuleStat    `json:"rules"`
+	Calibrated  int           `json:"calibrated"`
+	Contexts    []ContextStat `json:"contexts"` // 已精细校准的「规则 + 目标」（最多 100 条）
+	CtxTotal    int           `json:"ctx_total"`
+	AI          []AIStat      `json:"ai"` // 外部模型研判与分析员结论的一致率
+	Suggestions []Suggestion  `json:"suggestions"`
+	Changes     []Change      `json:"changes"` // 最近的进化日志（新的在前）
+	Anomalies   []Anomaly     `json:"anomalies"`
+	Compliance  []CompPoint   `json:"compliance"` // 合规符合率趋势
+	Options     Options       `json:"options"`
 }
 
 // Report 返回自学习状态概览。
 func (l *Learner) Report() Report {
-	r := Report{Rules: []RuleStat{}, Suggestions: []Suggestion{}, Changes: []Change{}, Anomalies: []Anomaly{}, Compliance: []CompPoint{}}
+	r := Report{Rules: []RuleStat{}, Contexts: []ContextStat{}, AI: []AIStat{}, Suggestions: []Suggestion{}, Changes: []Change{}, Anomalies: []Anomaly{}, Compliance: []CompPoint{}}
 	if l == nil {
 		return r
 	}
@@ -640,6 +764,9 @@ func (l *Learner) Report() Report {
 			r.Calibrated++
 		}
 	}
+	r.CtxTotal = len(l.ctxStats)
+	r.Contexts = append(r.Contexts, l.ctxStats[:min(len(l.ctxStats), 100)]...)
+	r.AI = append(r.AI, l.aiStats...)
 	r.Suggestions = append(r.Suggestions, l.sugs...)
 	for i := len(l.changes) - 1; i >= 0 && len(r.Changes) < 100; i-- {
 		r.Changes = append(r.Changes, l.changes[i])

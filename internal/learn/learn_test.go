@@ -25,6 +25,143 @@ func fpCase(id uint64, rules map[string]int, target, src string, v Verdict) Case
 	return Case{Incident: id, Source: src, Rules: rules, Targets: []string{target}, Verdict: v, User: "ana"}
 }
 
+func changeKinds(list []Change) string {
+	var k []string
+	for _, c := range list {
+		k = append(k, c.Kind)
+	}
+	return strings.Join(k, ",")
+}
+
+func webEvent(host, uri string) *model.Event {
+	return &model.Event{Kind: model.KindWeb, Host: host, URI: uri}
+}
+
+// 规则 + 目标精细校准：规则整体准确率正常、只在个别接口上反复误报时，只下调该接口上的命中。
+func TestContextCalibration(t *testing.T) {
+	l := newLearner(t, "")
+	var logged []Change
+	l.OnChange = func(c Change) { logged = append(logged, c) }
+	// 规则在下单接口上多次确认为攻击，整体准确率正常
+	for i := 1; i <= 6; i++ {
+		l.Feedback(fpCase(uint64(i), map[string]int{"sqli-bool": 1}, "shop /api/order?id="+strconv.Itoa(i), "203.0.113."+strconv.Itoa(i), VerdictTP))
+	}
+	// 搜索接口的参数天然带引号：两次误报还不够，第三次后精细校准
+	for i := 7; i <= 8; i++ {
+		l.Feedback(fpCase(uint64(i), map[string]int{"sqli-bool": 2}, "shop /api/search?kw="+strconv.Itoa(i), "198.51.100."+strconv.Itoa(i), VerdictFP))
+	}
+	hit := []model.Hit{{RuleID: "sqli-bool", Severity: model.SevHigh, Evidence: "x"}}
+	if g := l.Calibrate(webEvent("shop", "/api/search?kw=a'b"), hit); g[0].Severity != model.SevHigh {
+		t.Fatal("误报次数不足时不应校准")
+	}
+	// 涉及大量规则的误报是对来源的判断，不计入规则在该目标上的误报
+	broad := map[string]int{"sqli-bool": 1, "xss-script": 1, "trav-dotdot": 1}
+	l.Feedback(fpCase(20, broad, "shop /api/search", "10.0.8.8", VerdictFP))
+	if r := l.Report(); r.CtxTotal != 0 {
+		t.Fatalf("涉及大量规则的误报不应触发精细校准: %+v", r.Contexts)
+	}
+	l.Feedback(fpCase(9, map[string]int{"sqli-bool": 1}, "shop /api/search?kw=9", "198.51.100.9", VerdictFP))
+	r := l.Report()
+	if r.Calibrated != 0 || r.CtxTotal != 1 || r.Contexts[0].Target != "shop /api/search" || r.Contexts[0].FP != 3 {
+		t.Fatalf("应只校准搜索接口: calibrated=%d %+v", r.Calibrated, r.Contexts)
+	}
+	g := l.Calibrate(webEvent("shop", "/api/search?kw=zzz"), hit)
+	if g[0].Severity != model.SevMedium || !strings.Contains(g[0].Evidence, "此目标上 3 次被研判为误报") || hit[0].Severity != model.SevHigh {
+		t.Fatalf("搜索接口（参数不同）应下调一级: %+v", g)
+	}
+	if g := l.Calibrate(webEvent("shop", "/api/order?id=1"), hit); g[0].Severity != model.SevHigh {
+		t.Fatal("其他目标不受影响")
+	}
+	if g := l.Calibrate(nil, hit); g[0].Severity != model.SevHigh {
+		t.Fatal("没有目标时只按规则整体校准")
+	}
+	// 锁定规则：两种校准都停止；解锁后恢复
+	l.Pin("sqli-bool", "admin", true)
+	if g := l.Calibrate(webEvent("shop", "/api/search"), hit); g[0].Severity != model.SevHigh {
+		t.Fatal("锁定后应恢复原等级")
+	}
+	l.Pin("sqli-bool", "admin", false)
+	if g := l.Calibrate(webEvent("shop", "/api/search"), hit); g[0].Severity != model.SevMedium {
+		t.Fatal("解锁后应恢复精细校准")
+	}
+	// 该接口上出现确认的攻击：自动恢复
+	l.Feedback(fpCase(10, map[string]int{"sqli-bool": 1}, "shop /api/search?kw=union", "203.0.113.50", VerdictTP))
+	if g := l.Calibrate(webEvent("shop", "/api/search"), hit); g[0].Severity != model.SevHigh {
+		t.Fatal("出现确认攻击后应恢复")
+	}
+	want := "calibrate_ctx,pin,restore_ctx,unpin,calibrate_ctx,restore_ctx"
+	if k := changeKinds(logged); k != want || !strings.Contains(logged[len(logged)-1].Detail, "出现确认的攻击") {
+		t.Fatalf("进化日志: %s\n%+v", k, logged)
+	}
+}
+
+// 外部模型的一致率：以分析员结论为准评估模型，结论不作为学习样本；重启后保留。
+func TestAITrust(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "learn.json")
+	l := newLearner(t, path)
+	verdicts := []struct {
+		ai      string
+		conf    int
+		analyst Verdict
+	}{
+		{"attack", 90, VerdictTP}, {"attack", 85, VerdictTP}, {"false_positive", 80, VerdictFP}, {"attack", 60, VerdictFP},
+		{"false_positive", 90, VerdictTP}, {"uncertain", 30, VerdictTP}, {"attack", 95, VerdictTP},
+	}
+	for i, v := range verdicts {
+		id := uint64(i + 1)
+		l.RecordAI(id, AIRecord{Verdict: v.ai, Confidence: v.conf, Model: "deepseek-chat"})
+		if i < 4 && l.Trust("deepseek-chat") != "" {
+			t.Fatal("样本不足 5 个时不应给出一致率")
+		}
+		l.Feedback(fpCase(id, map[string]int{"r" + strconv.Itoa(i): 1}, "t", "198.51.100.1", v.analyst))
+	}
+	l.RecordAI(99, AIRecord{Verdict: "attack", Confidence: 70, Model: "deepseek-chat"}) // 尚无分析员结论
+	r := l.Report()
+	if r.Cases != 7 || len(r.AI) != 1 {
+		t.Fatalf("模型结论不应成为样本: cases=%d ai=%+v", r.Cases, r.AI)
+	}
+	st := r.AI[0]
+	if st.Judged != 6 || st.Agree != 4 || st.Missed != 1 || st.Overcall != 1 || st.Uncertain != 1 || st.Pending != 1 || st.HighConf != 5 || st.HighAgree != 4 {
+		t.Fatalf("统计: %+v", st)
+	}
+	if tr := l.Trust("deepseek-chat"); !strings.Contains(tr, "一致率 67%（6 个事件）") || !strings.Contains(tr, "1 次把确认的攻击判为误报") {
+		t.Fatalf("可信度说明: %s", tr)
+	}
+	if l.Trust("qwen-max") != "" {
+		t.Fatal("没有记录的模型不应给出一致率")
+	}
+	// 分析员撤回结论：该事件回到「尚无分析员结论」
+	l.Feedback(Case{Incident: 1, Verdict: VerdictNone})
+	if st := l.Report().AI[0]; st.Judged != 5 || st.Pending != 2 {
+		t.Fatalf("撤回后: %+v", st)
+	}
+	if err := l.Save(); err != nil {
+		t.Fatal(err)
+	}
+	if st := newLearner(t, path).Report().AI; len(st) != 1 || st[0].Judged != 5 {
+		t.Fatalf("重启后: %+v", st)
+	}
+}
+
+// 历史人工结论：来源与「规则 + 目标」，不含事件自身，供外部模型研判参考。
+func TestHistory(t *testing.T) {
+	l := newLearner(t, "")
+	l.Feedback(fpCase(1, map[string]int{"sqli-bool": 1}, "shop /api/search?kw=1", "198.51.100.7", VerdictFP))
+	l.Feedback(fpCase(2, map[string]int{"sqli-bool": 1}, "shop /api/search?kw=2", "198.51.100.8", VerdictFP))
+	l.Feedback(fpCase(3, map[string]int{"sqli-bool": 1, "xss-dom": 1}, "shop /api/order", "198.51.100.7", VerdictTP))
+	l.Feedback(fpCase(4, map[string]int{"sqli-bool": 1}, "shop /api/search", "198.51.100.7", VerdictFP))
+	h := l.History("198.51.100.7", []string{"sqli-bool"}, []string{"shop /api/search?kw=x", "shop /api/order"}, 4)
+	if h.SourceTP != 1 || h.SourceFP != 1 {
+		t.Fatalf("来源历史（不含事件自身）: %+v", h)
+	}
+	if len(h.Contexts) != 2 || h.Contexts[0].Target != "shop /api/search" || h.Contexts[0].FP != 2 || h.Contexts[1].TP != 1 {
+		t.Fatalf("规则 + 目标历史: %+v", h.Contexts)
+	}
+	if h := l.History("", []string{"xss-script"}, []string{"shop /api/search"}, 0); h.SourceTP+h.SourceFP != 0 || len(h.Contexts) != 0 {
+		t.Fatalf("无关规则不应返回历史: %+v", h)
+	}
+}
+
 // 准确率持续偏低的规则自动下调一级；确认为攻击的样本增加、或管理员锁定后恢复。
 func TestCalibrationLifecycle(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "learn.json")
@@ -35,35 +172,36 @@ func TestCalibrationLifecycle(t *testing.T) {
 		l.Feedback(fpCase(uint64(i), map[string]int{"xss-dom": 3}, "www.example.com/search?q="+strconv.Itoa(i), "198.51.100."+strconv.Itoa(i), VerdictFP))
 	}
 	hit := []model.Hit{{RuleID: "xss-dom", Severity: model.SevMedium, Evidence: "x"}}
-	if got := l.Calibrate(hit); got[0].Severity != model.SevMedium {
+	if got := l.Calibrate(nil, hit); got[0].Severity != model.SevMedium {
 		t.Fatal("样本不足时不应校准")
 	}
 	l.Feedback(fpCase(5, map[string]int{"xss-dom": 1}, "www.example.com/search", "198.51.100.5", VerdictFP))
-	got := l.Calibrate(hit)
+	got := l.Calibrate(nil, hit)
 	if got[0].Severity != model.SevLow || !strings.Contains(got[0].Evidence, "自学习校准") || hit[0].Severity != model.SevMedium {
 		t.Fatalf("5 次误报后应下调一级且不修改调用方数据: %+v", got)
 	}
-	if len(logged) != 1 || logged[0].Kind != "calibrate" {
-		t.Fatalf("应记录一条进化日志: %+v", logged)
+	// 5 次误报都在同一接口上：第 3 次时先触发「规则 + 目标」精细校准，第 5 次时规则整体校准
+	if k := changeKinds(logged); k != "calibrate_ctx,calibrate" {
+		t.Fatalf("进化日志: %s %+v", k, logged)
 	}
 	// 不影响其他规则与仅打标签的命中
 	other := []model.Hit{{RuleID: "sqli-union", Severity: model.SevHigh}, {RuleID: "xss-dom", Severity: model.SevMedium, TagOnly: true}}
-	if g := l.Calibrate(other); g[0].Severity != model.SevHigh || g[1].Severity != model.SevMedium {
+	if g := l.Calibrate(nil, other); g[0].Severity != model.SevHigh || g[1].Severity != model.SevMedium {
 		t.Fatalf("其他规则与标签不应变化: %+v", g)
 	}
 
 	// 重启后状态保持，且不重复记录进化日志
 	l2 := newLearner(t, path)
-	if g := l2.Calibrate(hit); g[0].Severity != model.SevLow {
+	if g := l2.Calibrate(nil, hit); g[0].Severity != model.SevLow {
 		t.Fatal("重启后校准应保持")
 	}
-	if r := l2.Report(); len(r.Changes) != 1 || r.Cases != 5 || r.FP != 5 || r.Calibrated != 1 {
+	if r := l2.Report(); len(r.Changes) != 2 || r.Cases != 5 || r.FP != 5 || r.Calibrated != 1 || r.CtxTotal != 1 {
 		t.Fatalf("重启后的状态: %+v", r)
 	}
 
 	// 管理员锁定规则：立即恢复
 	l2.Pin("xss-dom", "admin", true)
-	if g := l2.Calibrate(hit); g[0].Severity != model.SevMedium {
+	if g := l2.Calibrate(nil, hit); g[0].Severity != model.SevMedium {
 		t.Fatal("锁定后应恢复原等级")
 	}
 	l2.Pin("xss-dom", "admin", false)
@@ -71,7 +209,7 @@ func TestCalibrationLifecycle(t *testing.T) {
 	for i := 6; i <= 7; i++ {
 		l2.Feedback(Case{Incident: uint64(i), Source: "203.0.113.9", Rules: map[string]int{"xss-dom": 1}, Verdict: VerdictTP, User: "ana"})
 	}
-	if g := l2.Calibrate(hit); g[0].Severity != model.SevMedium {
+	if g := l2.Calibrate(nil, hit); g[0].Severity != model.SevMedium {
 		t.Fatal("准确率回升后应恢复")
 	}
 	// 撤回结论（事件重新打开）
@@ -221,7 +359,7 @@ func TestFeedbackBatchAndConcurrentSave(t *testing.T) {
 	}
 	batch = append(batch, Case{Incident: 99, Verdict: VerdictNone}) // 撤回不存在的结论：忽略
 	l.Feedback(batch...)
-	if r := l.Report(); r.Cases != 6 || r.Calibrated != 1 || len(logged) != 1 {
+	if r := l.Report(); r.Cases != 6 || r.Calibrated != 1 || changeKinds(logged) != "calibrate,calibrate_ctx" {
 		t.Fatalf("批量结论: cases=%d calibrated=%d changes=%+v", r.Cases, r.Calibrated, logged)
 	}
 

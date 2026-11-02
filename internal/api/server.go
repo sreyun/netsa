@@ -92,6 +92,9 @@ type Server struct {
 
 func (s *Server) Handler() http.Handler {
 	s.started = time.Now()
+	if s.AI == nil { // 未接入时也提供一个停用的客户端，管理员可在界面中配置并启用
+		s.AI = ai.New(config.AIConfig{}, nil)
+	}
 	s.rdapSem = make(chan struct{}, 4)
 	s.cache = newRespCache()
 	s.hashSem = make(chan struct{}, 4)
@@ -167,6 +170,9 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/incidents/bulk", s.incidentUpdate)
 	mux.HandleFunc("POST /api/incidents/{id}", s.incidentUpdate)
 	mux.HandleFunc("POST /api/incidents/{id}/ai", s.incidentAI)
+	mux.HandleFunc("GET /api/ai/settings", s.aiSettings)
+	mux.HandleFunc("PUT /api/ai/settings", s.aiSettingsUpdate)
+	mux.HandleFunc("POST /api/ai/test", s.aiTest)
 	mux.HandleFunc("GET /metrics", s.cache.wrap(5*time.Second, s.metrics))
 	mux.HandleFunc("GET /api/assets", s.assetList)
 	mux.HandleFunc("GET /api/assets/template", s.assetTemplate)

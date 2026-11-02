@@ -48,21 +48,34 @@ func (c AIConfig) validate() error {
 	if strings.TrimSpace(c.Model) == "" {
 		return fmt.Errorf("ai.model 不能为空")
 	}
-	u, err := url.Parse(strings.TrimSpace(c.BaseURL))
-	if err != nil || u.Host == "" || (u.Scheme != "https" && u.Scheme != "http") {
-		return fmt.Errorf("ai.base_url 应为 http(s)://主机[:端口]/路径，例如 https://api.deepseek.com/v1")
-	}
-	if u.User != nil {
-		return fmt.Errorf("ai.base_url 不能包含账号口令，请通过 ai.api_key_env 指定的环境变量提供密钥")
-	}
-	if u.Scheme == "http" && !privateHost(u.Hostname()) {
-		return fmt.Errorf("ai.base_url 指向公网地址时必须使用 https（日志与告警内容不能明文传输）")
+	if err := CheckAIEndpoint(c.BaseURL); err != nil {
+		return fmt.Errorf("ai.base_url: %w", err)
 	}
 	if c.Timeout < 0 || c.Timeout > 10*time.Minute {
 		return fmt.Errorf("ai.timeout 应在 0 ~ 10 分钟之间")
 	}
 	if c.MaxPerHour < 0 || c.MaxPerHour > 10000 {
 		return fmt.Errorf("ai.max_per_hour 应在 0 ~ 10000 之间")
+	}
+	return nil
+}
+
+// CheckAIEndpoint 校验模型接口地址（配置文件与 Web 管理页面共用）：只允许 http(s)、不含账号口令与查询参数，
+// 指向公网时必须使用 https。
+func CheckAIEndpoint(raw string) error {
+	raw = strings.TrimSpace(raw)
+	u, err := url.Parse(raw)
+	if err != nil || u.Host == "" || (u.Scheme != "https" && u.Scheme != "http") || len(raw) > 512 {
+		return fmt.Errorf("模型地址应为 http(s)://主机[:端口]/路径，例如 https://api.deepseek.com/v1")
+	}
+	if u.User != nil {
+		return fmt.Errorf("模型地址不能包含账号口令，密钥请单独填写")
+	}
+	if u.RawQuery != "" || u.Fragment != "" {
+		return fmt.Errorf("模型地址不能包含查询参数，只填写到接口前缀（如 /v1），平台会自动拼接 /chat/completions")
+	}
+	if u.Scheme == "http" && !privateHost(u.Hostname()) {
+		return fmt.Errorf("模型地址指向公网时必须使用 https（日志与告警内容不能明文传输）")
 	}
 	return nil
 }

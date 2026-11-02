@@ -197,7 +197,7 @@ func (p *Pipeline) aggregate(items []item) {
 		}
 		hits[i] = p.gateExposure(it.ev, hits[i], reach, why)
 		hits[i] = p.Suppress.Filter(it.ev, hits[i])
-		hits[i] = p.Learn.Calibrate(hits[i]) // 资产漏洞关联之前：有漏洞证据的升级不受校准影响
+		hits[i] = p.Learn.Calibrate(it.ev, hits[i]) // 资产漏洞关联之前：有漏洞证据的升级不受校准影响
 		if p.Assets != nil && len(hits[i]) > 0 {
 			hits[i] = p.enrichAssets(it.ev, hits[i])
 		}

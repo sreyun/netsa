@@ -4,7 +4,7 @@
 
 // ---------------- 通用 ----------------
 const STATUS = { open: '待处理', investigating: '处置中', resolved: '已处置', false_positive: '误报', ignored: '忽略' };
-const OPS_MODALS = ['incModal', 'supModal', 'tfModal', 'tokModal', 'sndModal', 'assetModal', 'impModal'];
+const OPS_MODALS = ['incModal', 'supModal', 'tfModal', 'tokModal', 'sndModal', 'assetModal', 'impModal', 'aiModal'];
 let tfForced = false;
 function openModal(id) { rememberFocus(); $('#' + id).hidden = false; }
 function closeModal(id) {
@@ -938,14 +938,15 @@ $('#auVerify').addEventListener('click', () => ntBusy($('#auVerify'), async () =
 }));
 
 // ---------------- 自学习 ----------------
-const LN_CHANGE = { calibrate: '自动下调', restore: '恢复', pin: '锁定', unpin: '解锁', apply: '采纳建议', dismiss: '忽略建议' };
+const LN_CHANGE = { calibrate: '自动下调', restore: '恢复', calibrate_ctx: '目标级下调', restore_ctx: '目标级恢复', pin: '锁定', unpin: '解锁', apply: '采纳建议', dismiss: '忽略建议' };
 const LN_ANOM = { new_net: '新地址登录', odd_hour: '非常用时段', login_fail: '登录失败暴增', bulk_export: '批量导出', sensitive: '高危变更' };
 async function loadLearn() {
-  const { enabled, report: r } = await api('/api/learn');
+  const { enabled, report: r, ai_status: aiStatus } = await api('/api/learn');
+  if (aiStatus) meta.ai = aiStatus;
   const lastComp = (r.compliance || []).slice(-1)[0];
   $('#lnKpis').innerHTML = [
     ['研判样本', num(r.cases), `确认攻击 ${num(r.tp)} · 误报 ${num(r.fp)}`],
-    ['自动校准', num(r.calibrated), r.options.calibrate ? `准确率 ≤ ${Math.round(r.options.max_precision * 100)}% 且样本 ≥ ${r.options.min_verdicts} 时下调一级` : '已关闭'],
+    ['自动校准', num(r.calibrated + r.ctx_total), r.options.calibrate ? `规则 ${num(r.calibrated)} 条 · 目标级 ${num(r.ctx_total)} 处` : '已关闭'],
     ['待确认建议', num(r.suggestions.length), '采纳后创建误报抑制'],
     ['平台安全异常', num(r.anomalies.length), r.options.sentinel ? '最近 100 条' : '已关闭'],
     ['合规符合率', lastComp ? Math.round(lastComp.rate * 100) + '%' : '-', lastComp ? `不符合 ${num(lastComp.fail)} 项 · ${esc(fmtShort(lastComp.time))}` : (r.options.compliance ? '启动后约 2 分钟首次自检' : '已关闭')],
@@ -966,6 +967,13 @@ async function loadLearn() {
       <td class="mono">${esc(s.rule)}</td><td>${num(s.tp)}</td><td>${num(s.fp)}</td><td>${pct(s)}</td>
       <td>${s.pinned ? '<span class="chip">已锁定</span>' : s.calibrated ? '<span class="lv-medium">已自动下调一级</span>' : '<span class="muted">正常</span>'}</td>
       <td>${isAdmin() ? `<button type="button" class="btn" data-ln="${s.pinned ? 'unpin' : 'pin'}" data-rule="${esc(s.rule)}">${s.pinned ? '解锁' : '锁定'}</button>` : ''}</td></tr>`).join('') || empty(6, '暂无研判样本：在“事件处置”中把事件处置为已处置或误报后开始学习')}</tbody>`;
+  $('#lnCtxIntro').textContent = r.options.calibrate
+    ? `规则整体准确率正常、只在个别目标上被研判为误报 ≥ ${r.options.ctx_min_fp} 次且从未确认为攻击时，只下调该目标上的命中一级（不低于攻击分类底线）；该目标出现确认的攻击或锁定规则后自动恢复`
+    : '已关闭（learn.calibrate: false）';
+  const more = r.ctx_total > r.contexts.length ? `<tr><td colspan="5" class="muted">另有 ${num(r.ctx_total - r.contexts.length)} 处未列出</td></tr>` : '';
+  $('#lnCtx').innerHTML = `<thead><tr><th>规则</th><th>目标</th><th>误报</th><th>相关事件</th><th></th></tr></thead><tbody>${r.contexts.map((c) => `<tr>
+      <td class="mono">${esc(c.rule)}</td><td class="mono">${esc(c.target)}</td><td>${num(c.fp)} 次</td><td class="nowrap">${incLinks(c.incidents)}</td>
+      <td>${isAdmin() ? `<button type="button" class="btn" data-ln="pin" data-rule="${esc(c.rule)}" title="锁定后该规则不参与任何自动校准">锁定规则</button>` : ''}</td></tr>`).join('')}${more}${r.contexts.length ? '' : empty(5, '暂无：同一规则在同一目标上反复被处置为误报、且从未确认为攻击后，自动只下调该目标')}</tbody>`;
   const pts = (r.compliance || []).slice(-168);
   if (pts.length > 1) {
     const w = 320, h = 60;
@@ -975,14 +983,22 @@ async function loadLearn() {
   } else {
     $('#lnComp').innerHTML = `<div class="muted">${r.options.compliance ? (pts.length ? `已完成首次自检（符合率 ${Math.round(pts[0].rate * 100)}%），之后每小时一次` : '启动后约 2 分钟执行首次自检') : '已关闭（learn.compliance: false）'}</div>`;
   }
+  // 外部模型：接入状态以 /api/meta 为准（运营分析员也可查看），配置只允许管理员修改
   const a = meta.ai || {};
-  $('#lnAI').innerHTML = a.enabled
+  const pctOf = (n, d) => (d ? Math.round((n / d) * 100) + '%' : '-');
+  const trust = (r.ai || []).length
+    ? `<table class="table ln-trust"><thead><tr><th>模型</th><th title="以分析员的处置结论为准">一致率</th><th>已评估</th><th title="模型判为误报、分析员确认是攻击">漏判</th><th title="模型判为攻击、分析员判为误报">误判为攻击</th><th title="置信度 ≥ 80% 的结论">高置信一致率</th><th>待处置</th></tr></thead><tbody>${r.ai.map((s) => `<tr>
+        <td class="mono">${esc(s.model)}</td><td>${s.rate < 0 ? `<span class="muted">样本不足</span>` : `<b>${Math.round(s.rate * 100)}%</b>`}</td><td>${num(s.judged)}</td>
+        <td>${s.missed ? `<span class="lv-high">${num(s.missed)}</span>` : '0'}</td><td>${num(s.overcall)}</td><td>${pctOf(s.high_agree, s.high_conf)}</td><td>${num(s.pending)}</td></tr>`).join('')}</tbody></table>
+        <div class="muted">分析员把事件处置为已处置 / 误报后，自动与模型当时的结论比对；模型结论不作为学习样本。已评估满 5 个事件后，AI 研判记录中会附上该模型的一致率。</div>`
+    : '';
+  $('#lnAI').innerHTML = (a.enabled
     ? `<div class="kv"><div class="k">模型</div><div class="mono">${esc(a.model)} <span class="muted">${esc(a.endpoint)}</span></div>
-        <div class="k">密钥</div><div>${a.key_set ? '已从环境变量读取' : '<span class="muted">未设置（按无密钥方式调用，适用于内网模型）</span>'}</div>
+        <div class="k">密钥</div><div>${a.key_set ? '已设置（只保存在服务端，不会回显）' : '<span class="muted">未设置（按无密钥方式调用，适用于内网模型）</span>'}</div>
         <div class="k">脱敏</div><div>${a.desensitize ? '<span class="nt-on">发送前脱敏</span>（内网地址、口令 / 令牌、手机号、证件号、邮箱）' : '<span class="lv-medium">未脱敏</span>（只适用于完全在内网部署的模型）'}</div>
         <div class="k">自动研判</div><div>${a.auto_triage ? '新出现的高危及以上事件自动研判' : '关闭（在事件详情中手动研判）'}</div>
         <div class="k">调用</div><div>近 1 小时 ${num(a.used_hour)} / ${num(a.max_per_hour)} 次 · 累计 ${num(a.total)} 次${a.failed ? ` · <span class="lv-high">失败 ${num(a.failed)} 次</span>` : ''}${a.last_error ? `<div class="arc-err">${esc(a.last_error)}</div>` : ''}</div></div>`
-    : '<div class="muted">未启用。配置 ai.enabled、ai.base_url、ai.model，并通过环境变量 NETSA_AI_API_KEY 提供密钥后，可在事件详情中使用“AI 研判”。支持 DeepSeek、通义千问、智谱、Kimi 等 OpenAI 兼容接口，以及内网部署的 vLLM / Ollama。</div>';
+    : `<div class="muted">未启用。${isAdmin() ? '点击右上角“配置模型”，填写模型地址、模型名称与模型密钥后启用' : '请联系管理员在此页面配置模型地址、名称与密钥'}，即可在事件详情中使用“AI 研判”。支持 DeepSeek、通义千问、智谱、Kimi 等 OpenAI 兼容接口，以及内网部署的 vLLM / Ollama。</div>`) + trust;
   $('#lnLog').innerHTML = `<thead><tr><th>时间</th><th>类型</th><th>操作人</th><th>说明</th></tr></thead><tbody>${r.changes.map((c) => `<tr><td class="nowrap muted">${esc(fmtShort(c.time))}</td>
       <td class="nowrap">${esc(LN_CHANGE[c.kind] || c.kind)}</td><td class="nowrap">${esc(c.user)}</td><td>${esc(c.detail)}</td></tr>`).join('') || empty(4, '暂无记录')}</tbody>`;
 }
@@ -996,6 +1012,74 @@ $('#tab-learn').addEventListener('click', (e) => {
   ntBusy(b, async () => {
     try { await api(url, 'POST', {}); } catch (err) { alert(err.message); }
     loadLearn().catch(console.error);
+  });
+});
+
+// ---------------- 外部模型配置（管理员） ----------------
+// 密钥只提交、不回显：留空表示保持原值；更换模型地址的主机时服务端要求重新填写，防止密钥被发到新地址
+async function openAIForm() {
+  let r;
+  try { r = await api('/api/ai/settings'); } catch (err) { alert(err.message); return; }
+  const v = r.settings;
+  $('#aiEnabled').checked = v.enabled;
+  $('#aiBase').value = v.base_url || '';
+  $('#aiModel').value = v.model || '';
+  $('#aiKey').value = '';
+  $('#aiKey').disabled = false;
+  $('#aiKey').placeholder = v.key_set ? '已设置（不修改请留空）' : '模型服务提供的 API Key，如 sk-…';
+  $('#aiKeyHint').textContent = v.key_source === 'ui'
+    ? `已保存界面填写的密钥${v.key_hint ? `（末 4 位 ${v.key_hint}）` : ''}，只保存在服务端，不会回显；更换模型地址的主机时需要重新填写。`
+    : v.key_source === 'env'
+      ? `当前使用环境变量 ${v.key_env} 中的密钥；在此填写后改用界面保存的密钥。`
+      : '密钥只保存在服务端（文件权限 0600），不会回显到页面；不需要密钥的内网模型可留空。';
+  $('#aiClearRow').hidden = !v.key_set;
+  $('#aiClear').checked = false;
+  $('#aiMax').value = v.max_per_hour || 30;
+  $('#aiDesens').checked = v.desensitize;
+  $('#aiAuto').checked = v.auto_triage;
+  const who = v.updated_by ? `最近由 ${esc(v.updated_by)} 于 ${esc(fmtShort(v.updated))} 修改。` : (v.from_ui ? '' : '当前值来自配置文件 ai 段。');
+  $('#aiNote').innerHTML = (v.persist
+    ? '保存后立即生效，无需重启；配置保存在服务端状态目录的 ai.json，优先于配置文件。'
+    : '<span class="nt-warn">未配置状态目录（storage.snapshot）：配置只保存在内存中，重启后恢复为配置文件中的值。</span>') + ' ' + who;
+  setMsg('#aiMsg', '');
+  openModal('aiModal');
+  $('#aiBase').focus();
+}
+function aiCollect() {
+  return {
+    enabled: $('#aiEnabled').checked, base_url: $('#aiBase').value.trim(), model: $('#aiModel').value.trim(),
+    api_key: $('#aiClear').checked ? '' : $('#aiKey').value.trim(), clear_key: $('#aiClear').checked,
+    max_per_hour: parseInt($('#aiMax').value, 10) || 30, desensitize: $('#aiDesens').checked, auto_triage: $('#aiAuto').checked,
+  };
+}
+$('#lnAIEdit').addEventListener('click', openAIForm);
+$('#aiClear').addEventListener('change', (e) => { $('#aiKey').disabled = e.target.checked; });
+$('#aiDesens').addEventListener('change', (e) => {
+  if (!e.target.checked && !confirm('关闭脱敏后，内网地址、口令与个人信息将原样发送给模型，只适用于完全在内网部署的模型。确定关闭？')) e.target.checked = true;
+});
+$('#aiForm').addEventListener('submit', (e) => {
+  e.preventDefault();
+  const f = aiCollect();
+  if (f.enabled && (!f.base_url || !f.model)) { setMsg('#aiMsg', '启用时请填写模型地址与模型名称'); return; }
+  ntBusy($('#aiSave'), async () => {
+    try {
+      const r = await api('/api/ai/settings', 'PUT', f);
+      meta.ai = r.status; // 事件详情中的“AI 研判”按钮随之显示 / 隐藏
+      if (r.warning) alert('配置已生效，但' + r.warning);
+      closeModal('aiModal');
+      loadLearn().catch(console.error);
+    } catch (err) { setMsg('#aiMsg', err.message); }
+  });
+});
+$('#aiTestBtn').addEventListener('click', () => {
+  const f = aiCollect();
+  if (!f.base_url || !f.model) { setMsg('#aiMsg', '请填写模型地址与模型名称后再测试'); return; }
+  setMsg('#aiMsg', '正在测试连接…', true);
+  ntBusy($('#aiTestBtn'), async () => {
+    try {
+      const r = await api('/api/ai/test', 'POST', f);
+      setMsg('#aiMsg', r.ok ? `连接成功：${r.model} 用时 ${(r.latency_ms / 1000).toFixed(1)} 秒${r.reply ? `，回复“${r.reply}”` : ''}。` : `连接失败：${r.error}`, r.ok);
+    } catch (err) { setMsg('#aiMsg', err.message); }
   });
 });
 
