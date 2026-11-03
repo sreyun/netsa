@@ -165,6 +165,27 @@ func TestTechOf(t *testing.T) {
 		"/seeyon/main.do":                "java,seeyon",
 		"/a/b/c/d/wp-content/x":          "",
 		"/static/app.js":                 "",
+		// Node.js 只能从这类路径看出来；sockjs.min.js 是浏览器端的库，常配 Java 后端，不算
+		"/socket.io/":                         "socketio,node",
+		"/_next/static/chunks/main-abc.js":    "nextjs,react,node",
+		"/_nuxt/app.js":                       "nuxt,vue,node",
+		"/sockjs-node/info":                   "node",
+		"/custom/libs/sockjs.min.js":          "",
+		"/_app/immutable/entry/start.4f2a.js": "sveltekit,node",
+		// 前端框架与库
+		"/platform-h5/static/js/mg-date-pick-drawer.vue_vue_type_script_setup_true_lang-d9a47d7d.js": "vue",
+		"/platform-h5/static/js/_plugin-vue_export-helper-c27b6911.js":                               "vue",
+		"/styles/iview/iview.min.css":                 "iview,vue",
+		"/js/chunk-vendors.3f2a9c1b.js":               "vue",
+		"/static/js/main.3f2a9c1b.chunk.js":           "react",
+		"/scripts/main.c5565757aa1ab67745c5.chunk.js": "",
+		"/umi.8c1a2b3d.js":                            "umi,react",
+		"/polyfills.a1b2c3d4e5f6a7b8.js":              "angular",
+		"/lib/angular.min.js":                         "angularjs",
+		"/js/jquery-1.8.3.min.js":                     "jquery",
+		"/assets/bootstrap/3.3.7/js/bootstrap.min.js": "bootstrap",
+		"/reactive.js":                                "",
+		"/lib/element-ui/lib/theme-chalk/index.css":   "element,vue",
 	} {
 		if got := strings.Join(techOf(p), ","); got != want {
 			t.Errorf("%s: %q，期望 %q", p, got, want)
@@ -177,6 +198,24 @@ func TestTechOf(t *testing.T) {
 	} {
 		if got, _ := classify(v); got != want {
 			t.Errorf("classify(%q) = %d，期望 %d", v, got, want)
+		}
+	}
+}
+
+func TestLibVersion(t *testing.T) {
+	for _, c := range []struct{ tech, path, want string }{
+		{"jquery", "/js/jquery-1.8.3.min.js", "1.8.3"},
+		{"jquery", "/cdn/jquery/3.5.1/jquery.min.js", "3.5.1"},
+		{"jquery", "/js/jquery-ui-1.12.1.min.js", ""},
+		{"jquery", "/js/jquery.min.js", ""},
+		{"bootstrap", "/assets/bootstrap/3.3.7/js/bootstrap.min.js", ""},
+		{"bootstrap", "/css/bootstrap-v4.6.2.min.css", "4.6.2"},
+		{"vue", "/js/vue@2.6.14.min.js", "2.6.14"},
+		{"angularjs", "/lib/angular-1.5.8.min.js", "1.5.8"},
+		{"iview", "/styles/iview/iview.min.css", ""},
+	} {
+		if got := libVersion(c.tech, c.path); got != c.want {
+			t.Errorf("libVersion(%s, %s) = %q，期望 %q", c.tech, c.path, got, c.want)
 		}
 	}
 }

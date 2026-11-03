@@ -1092,9 +1092,9 @@ async function loadLearn() {
       + ` · 本次启动以来：按普通文字降为低危 ${num(prof.weak)} 次 · 取值异常 ${num(prof.anomaly)} 次 · 产品不存在判为不适用 ${num(prof.inapplicable)} 次</div>`
     + `<h4>站点与识别出的产品 <small class="muted">共 ${num(prof.site_total)} 个站点；正常访问满 300 次、来自 20 个以上网段后参与判断</small></h4>`
     + (prof.sites.length
-      ? `<div class="scroll"><table class="table"><thead><tr><th>站点</th><th>正常访问</th><th>来源网段</th><th>识别出的产品 / 开发语言</th><th>状态</th></tr></thead><tbody>${prof.sites.map((s) => `<tr>
+      ? `<div class="scroll"><table class="table"><thead><tr><th>站点</th><th>正常访问</th><th>来源网段</th><th>识别出的产品 / 开发语言 / 前端框架</th><th>状态</th></tr></thead><tbody>${prof.sites.map((s) => `<tr>
           <td class="mono nowrap">${esc(s.host)}</td><td class="num">${num(s.reqs)}</td><td class="num">${num(s.nets)}${s.nets >= 32 ? '+' : ''}</td>
-          <td><div class="cell-chips">${s.products.length ? s.products.map((p) => `<span class="chip" title="${esc(`例：${p.sample}（${p.nets} 个网段的访客，${fmtShort(p.first)} 起）`)}">${esc(p.name)}</span>`).join(' ') : '<span class="muted">未识别出特定产品</span>'}</div></td>
+          <td><div class="cell-chips">${s.products.length ? s.products.map((p) => `<span class="chip" title="${esc(`例：${p.sample}（${p.nets} 个网段的访客，${fmtShort(p.first)} 起）`)}">${esc(p.version ? `${p.name} ${p.version}` : p.name)}</span>`).join(' ') : '<span class="muted">未识别出特定产品</span>'}</div></td>
           <td class="nowrap ${s.mature ? '' : 'muted'}">${s.mature ? '参与判断' : '访问量不足'}</td></tr>`).join('')}</tbody></table></div>`
       : atkEmpty('暂无。正常访客成功访问的路径中出现 /wp-content/、.php、.do 这类产品或开发语言的特征时识别。'))
     + '<h4>已生效的参数 <small class="muted">示例，正常访问最多的在前</small></h4>'

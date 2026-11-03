@@ -1,6 +1,7 @@
 package learn
 
 import (
+	"regexp"
 	"slices"
 	"sort"
 	"strings"
@@ -37,12 +38,13 @@ type siteStat struct {
 	Last  time.Time            `json:"last"`
 }
 
-// techSeen 是站点上一个产品 / 开发语言的访问痕迹。
+// techSeen 是站点上一个产品 / 开发语言 / 前端框架的访问痕迹。
 type techSeen struct {
-	Nets   []uint32  `json:"nets"`
-	Hits   uint32    `json:"hits"`
-	Sample string    `json:"sample"` // 示例路径
-	First  time.Time `json:"first"`
+	Nets    []uint32  `json:"nets"`
+	Hits    uint32    `json:"hits"`
+	Sample  string    `json:"sample"`            // 示例路径
+	Version string    `json:"version,omitempty"` // 文件名里带的版本号（jquery-1.8.3.min.js）
+	First   time.Time `json:"first"`
 }
 
 func (s *siteStat) mature() bool { return s.Reqs >= siteMinReqs && len(s.Nets) >= siteMinNets }
@@ -109,6 +111,11 @@ func (st *profileState) observeSiteLocked(host, lp string, nh uint32, at time.Ti
 			t = &techSeen{Sample: clipShape(lp), First: at}
 			s.Tech[k] = t
 		}
+		if t.Version == "" {
+			if v := libVersion(k, lp); v != "" {
+				t.Version, t.Sample = v, clipShape(lp)
+			}
+		}
 		was := len(t.Nets) >= techMinNets
 		t.Hits++
 		addNet(&t.Nets, nh, maxTechNets)
@@ -128,6 +135,9 @@ var techNames = map[string]string{
 	"kingdee": "金蝶", "jeecg": "JeecgBoot", "grafana": "Grafana", "kibana": "Kibana", "minio": "MinIO",
 	"nextjs": "Next.js", "nuxt": "Nuxt", "device": "网络设备 / IoT 管理页面", "hikvision": "海康威视",
 	"docker": "Docker API", "k8s": "Kubernetes API",
+	"node": "Node.js", "socketio": "Socket.IO", "sveltekit": "SvelteKit", "vue": "Vue", "react": "React", "angular": "Angular",
+	"angularjs": "AngularJS", "jquery": "jQuery", "bootstrap": "Bootstrap", "layui": "layui", "element": "Element",
+	"iview": "iView", "umi": "UmiJS",
 }
 
 // 路径中出现即说明使用了该产品的目录名。
@@ -141,6 +151,9 @@ var segTech = map[string]string{
 	"seeyon": "seeyon", "weaver": "weaver", "wui": "weaver", "yyoa": "yonyou", "uapws": "yonyou", "ispirit": "tongda",
 	"ekp": "landray", "webreport": "fanruan", "k3cloud": "kingdee", "jeecg-boot": "jeecg",
 	"jmx-console": "jboss", "web-console": "jboss", "cgi-bin": "cgi", "goform": "device", "boaform": "device", "isapi": "hikvision",
+	// Node.js 后端只有这类路径能看出来：Socket.IO 的连接地址、Next.js / Nuxt / SvelteKit 的资源目录、
+	// 对外暴露的 webpack 开发服务器（sockjs-node、__webpack_hmr）。纯接口的 Node 服务从日志里看不出来
+	"socket.io": "socketio", "sockjs-node": "node", "__webpack_hmr": "node", "iview": "iview", "layui": "layui", "element-ui": "element",
 }
 
 // 文件后缀对应的开发语言。
@@ -152,22 +165,28 @@ var extTech = map[string][]string{
 	".cgi": {"cgi"}, ".pl": {"cgi"},
 }
 
-// 产品隐含的开发语言：出现了 WordPress 也就出现了 PHP。
-var techImplies = map[string]string{
-	"wordpress": "php", "thinkphp": "php", "laravel": "php", "phpmyadmin": "php", "zabbix": "php",
-	"spring": "java", "struts": "java", "weblogic": "java", "jboss": "java", "confluence": "java", "jira": "java",
-	"jenkins": "java", "nacos": "java", "druid": "java", "swagger": "java", "geoserver": "java", "solr": "java",
-	"nexus": "java", "seeyon": "java", "weaver": "java", "yonyou": "java", "landray": "java", "fanruan": "java",
-	"kingdee": "java", "jeecg": "java", "exchange": "aspnet",
+// 产品隐含的开发语言与框架：出现了 WordPress 也就出现了 PHP，Next.js 运行在 Node.js 上、前端是 React。
+var techImplies = map[string][]string{
+	"wordpress": {"php"}, "thinkphp": {"php"}, "laravel": {"php"}, "phpmyadmin": {"php"}, "zabbix": {"php"},
+	"spring": {"java"}, "struts": {"java"}, "weblogic": {"java"}, "jboss": {"java"}, "confluence": {"java"}, "jira": {"java"},
+	"jenkins": {"java"}, "nacos": {"java"}, "druid": {"java"}, "swagger": {"java"}, "geoserver": {"java"}, "solr": {"java"},
+	"nexus": {"java"}, "seeyon": {"java"}, "weaver": {"java"}, "yonyou": {"java"}, "landray": {"java"}, "fanruan": {"java"},
+	"kingdee": {"java"}, "jeecg": {"java"}, "exchange": {"aspnet"},
+	"nextjs": {"react", "node"}, "nuxt": {"vue", "node"}, "sveltekit": {"node"}, "socketio": {"node"},
+	"element": {"vue"}, "iview": {"vue"}, "umi": {"react"},
 }
 
-// techOf 返回请求路径（小写）中出现的产品与开发语言。
+// techOf 返回请求路径（小写）中出现的产品、开发语言与前端框架。
 func techOf(lp string) []string {
 	var out []string
-	add := func(k string) {
-		for k != "" && !slices.Contains(out, k) {
-			out = append(out, k)
-			k = techImplies[k]
+	var add func(k string)
+	add = func(k string) {
+		if k == "" || slices.Contains(out, k) {
+			return
+		}
+		out = append(out, k)
+		for _, x := range techImplies[k] {
+			add(x)
 		}
 	}
 	last := lp[strings.LastIndexByte(lp, '/')+1:]
@@ -194,8 +213,92 @@ func techOf(lp string) []string {
 			add(k)
 		}
 	}
+	if strings.Contains(lp, "/_app/immutable/") {
+		add("sveltekit")
+	}
+	if strings.HasSuffix(last, ".js") || strings.HasSuffix(last, ".mjs") || strings.HasSuffix(last, ".css") {
+		for _, k := range frontendOf(last, lp) {
+			add(k)
+		}
+	}
 	return out
 }
+
+// frontendOf 按脚本、样式的文件名识别前端框架与常用库：打包产物有固定的命名，直接引用的库文件名就是库名。
+func frontendOf(last, lp string) []string {
+	var out []string
+	switch {
+	case strings.Contains(last, ".vue_vue_type") || strings.HasPrefix(last, "_plugin-vue") || strings.HasPrefix(last, "chunk-vendors") ||
+		libFile(last, "vue") || libFile(last, "vuex") || libFile(last, "vue-router"):
+		out = append(out, "vue") // Vite 编译的单文件组件、vue-cli 的公共包、直接引用的 vue.min.js
+	case libFile(last, "react") || libFile(last, "react-dom") || strings.Contains(lp, "/static/js/") && strings.HasSuffix(last, ".chunk.js"):
+		out = append(out, "react") // create-react-app 的 /static/js/*.chunk.js
+	case strings.HasPrefix(last, "umi.") && strings.HasSuffix(last, ".js"):
+		out = append(out, "umi")
+	case strings.HasPrefix(last, "polyfills-es20") || strings.HasPrefix(last, "main-es20") || angularHashed(last):
+		out = append(out, "angular")
+	case libFile(last, "angular"):
+		out = append(out, "angularjs") // angular.min.js 是 1.x，已停止维护
+	}
+	for _, x := range [...]struct{ name, key string }{{"jquery", "jquery"}, {"bootstrap", "bootstrap"}, {"layui", "layui"},
+		{"element-ui", "element"}, {"element-plus", "element"}, {"iview", "iview"}, {"view-design", "iview"}} {
+		if libFile(last, x.name) {
+			out = append(out, x.key)
+		}
+	}
+	return out
+}
+
+// libFile 判断文件名是否以库名开头、后面紧跟 . - @ _（vue.min.js、jquery-1.8.3.min.js；reactive.js 不算 react）。
+func libFile(last, name string) bool {
+	if !strings.HasPrefix(last, name) {
+		return false
+	}
+	if len(last) == len(name) {
+		return true
+	}
+	c := last[len(name)]
+	return c == '.' || c == '-' || c == '@' || c == '_'
+}
+
+// angularHashed 判断是否为 Angular CLI 的打包产物 polyfills.<16 位以上十六进制>.js。
+func angularHashed(last string) bool {
+	h, ok := strings.CutPrefix(last, "polyfills.")
+	if !ok || !strings.HasSuffix(h, ".js") {
+		return false
+	}
+	h = strings.TrimSuffix(h, ".js")
+	return len(h) >= 16 && isHexish(h)
+}
+
+// 记录版本号的库：文件名或上一级目录里常带版本（jquery-1.8.3.min.js、/jquery/1.8.3/jquery.min.js）。
+var versioned = map[string]string{"jquery": "jquery", "bootstrap": "bootstrap", "vue": "vue", "react": "react", "angularjs": "angular", "layui": "layui"}
+
+// libVersion 从路径中取出库的版本号，没有时返回空串。
+func libVersion(tech, lp string) string {
+	name, ok := versioned[tech]
+	if !ok {
+		return ""
+	}
+	dir, last := "", lp
+	if i := strings.LastIndexByte(lp, '/'); i >= 0 {
+		dir, last = lp[:i], lp[i+1:]
+	}
+	if !strings.HasPrefix(last, name) {
+		return ""
+	}
+	if rest := last[len(name):]; rest != "" && (rest[0] == '-' || rest[0] == '@') {
+		if v := leadingVersion(strings.TrimPrefix(rest[1:], "v")); v != "" {
+			return v
+		}
+	}
+	return leadingVersion(dir[strings.LastIndexByte(dir, '/')+1:]) // CDN 的 /库名/版本/文件 目录结构
+}
+
+var reLeadingVersion = regexp.MustCompile(`^\d{1,3}\.\d{1,3}(\.\d{1,4})?`)
+
+// leadingVersion 返回开头形如 1.8 或 1.8.3 的版本号。
+func leadingVersion(s string) string { return reLeadingVersion.FindString(s) }
 
 // 只针对特定产品的漏洞利用规则，及满足其中任意一个即可能存在漏洞的产品 / 开发语言。
 var ruleTech = map[string][]string{
@@ -260,12 +363,13 @@ type SiteReport struct {
 
 // SiteProduct 是站点上识别出的一个产品或开发语言。
 type SiteProduct struct {
-	Key    string    `json:"key"`
-	Name   string    `json:"name"`
-	Sample string    `json:"sample"`
-	Hits   uint32    `json:"hits"`
-	Nets   int       `json:"nets"`
-	First  time.Time `json:"first"`
+	Key     string    `json:"key"`
+	Name    string    `json:"name"`
+	Sample  string    `json:"sample"`
+	Version string    `json:"version,omitempty"`
+	Hits    uint32    `json:"hits"`
+	Nets    int       `json:"nets"`
+	First   time.Time `json:"first"`
 }
 
 func (s *siteStat) report(host string) SiteReport {
@@ -274,7 +378,7 @@ func (s *siteStat) report(host string) SiteReport {
 		if len(t.Nets) < techMinNets {
 			continue
 		}
-		r.Products = append(r.Products, SiteProduct{Key: k, Name: techText([]string{k}), Sample: t.Sample, Hits: t.Hits, Nets: len(t.Nets), First: t.First})
+		r.Products = append(r.Products, SiteProduct{Key: k, Name: techText([]string{k}), Sample: t.Sample, Version: t.Version, Hits: t.Hits, Nets: len(t.Nets), First: t.First})
 	}
 	sort.Slice(r.Products, func(i, j int) bool { return r.Products[i].Hits > r.Products[j].Hits })
 	return r

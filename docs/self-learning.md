@@ -76,7 +76,9 @@
 | 只有语法分析认定、没有命中注入规则的 SQL 注入（`sqli-syntax`），出现在这类参数里 | 同上（引号、括号多的普通文字） |
 | 平时只出现数字、编号、单个词的参数（从未出现过注入符号），出现了引号、括号、尖括号等 | 没有命中规则时生成低危的“参数取值偏离正常形态”；命中规则时在证据中注明 |
 
-**站点产品识别**：从正常访客成功访问（2xx / 304）的路径中识别每个站点使用的产品与开发语言，例如 `/wp-content/` 说明是 WordPress，`.php` 说明有 PHP，`.do`、`.action` 说明是 Java 应用，另外识别致远、泛微、用友、通达、蓝凌 OA、帆软、Nacos、Spring Boot、WebLogic、Exchange 等常见产品。针对特定产品的漏洞利用（ThinkPHP、WebLogic、Exchange、Confluence、F5、GPON 路由器……）、按脚本后缀访问的 WebShell 与敏感文件探测，在站点上从未出现过该产品或开发语言、请求本身也没有成功（404、被拦截、出错）时，攻击不可能得手，最高按低危处置。
+**站点产品识别**：从正常访客成功访问（2xx / 304）的路径中识别每个站点使用的产品与开发语言，例如 `/wp-content/` 说明是 WordPress，`.php` 说明有 PHP，`.do`、`.action` 说明是 Java 应用，另外识别致远、泛微、用友、通达、蓝凌 OA、帆软、Nacos、Spring Boot、WebLogic、Exchange 等常见产品。
+
+同时按脚本、样式的文件名识别前端框架与常用库：Vue（Vite 编译的 `*.vue_vue_type_*.js`、vue-cli 的 `chunk-vendors.*.js`）、React（create-react-app 的 `/static/js/*.chunk.js`）、Angular、AngularJS、UmiJS、jQuery、Bootstrap、layui、Element、iView；文件名或 CDN 目录里带版本号的（`jquery-1.8.3.min.js`、`/jquery/3.5.1/jquery.min.js`）一并记下，便于排查过旧的前端库。Node.js 后端只有出现 `/socket.io/`、Next.js 的 `/_next/`、Nuxt 的 `/_nuxt/`、SvelteKit 的 `/_app/immutable/`、对外暴露的 webpack 开发服务器（`/sockjs-node/`、`/__webpack_hmr`）时才能认出：日志里没有 `X-Powered-By` 这类响应头，只提供接口的 Node 服务看不出来。`sockjs.min.js` 是浏览器端的库，常配 Java 后端，不作为 Node.js 的依据。前端框架只用于展示，不参与漏洞适用性判断。针对特定产品的漏洞利用（ThinkPHP、WebLogic、Exchange、Confluence、F5、GPON 路由器……）、按脚本后缀访问的 WebShell 与敏感文件探测，在站点上从未出现过该产品或开发语言、请求本身也没有成功（404、被拦截、出错）时，攻击不可能得手，最高按低危处置。
 
 **边界**：
 
