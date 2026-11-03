@@ -51,8 +51,25 @@ func (s *Server) visibility(r *http.Request) store.Visibility {
 }
 
 // assessment 返回安全防护评估：七个维度的评分、总评、处置建议、疑似失陷资产与 ATT&CK 矩阵。
+// 页面上的列表只显示排在前面的部分：疑似失陷资产、攻击面发现可能有几千条，全部返回时浏览器要解析、
+// 渲染几 MB 的数据，态势评估页每次刷新都会卡顿一两秒。总数另行返回。
+const (
+	maxAssessCompromised = 200
+	maxSurfaceFindings   = 300
+)
+
 func (s *Server) assessment(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, s.Store.Assess(s.visibility(r)))
+	a := s.Store.Assess(s.visibility(r))
+	a.CompromisedTotal = len(a.Compromised)
+	for _, c := range a.Compromised {
+		if c.Confidence == "high" {
+			a.CompromisedHigh++
+		}
+	}
+	if len(a.Compromised) > maxAssessCompromised {
+		a.Compromised = a.Compromised[:maxAssessCompromised]
+	}
+	writeJSON(w, a)
 }
 
 // allowNetworks 限制访问大屏与 API 的来源网段（server.allow_networks）。本机回环地址始终允许，便于本机运维与健康检查。

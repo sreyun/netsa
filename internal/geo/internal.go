@@ -126,6 +126,32 @@ func SetInternalNetworks(list []string) (effective []string, invalid []string) {
 	return effective, bad
 }
 
+// AddInternalNetworks 追加补充内网段（自学习从防火墙日志识别的网段），已覆盖的跳过，返回实际新增的网段。
+// 采用写时复制，与 IsPrivate 的无锁读取并发安全；调用方需串行调用。
+func AddInternalNetworks(list []string) []string {
+	nets, _ := parseNets(list)
+	s := internalSet.Load()
+	extra := append([]netip.Prefix(nil), s.extra...)
+	var added []string
+	for _, p := range nets {
+		covered := false
+		for _, e := range extra {
+			if e.Bits() <= p.Bits() && e.Contains(p.Addr()) {
+				covered = true
+				break
+			}
+		}
+		if !covered {
+			extra = append(extra, p)
+			added = append(added, p.String())
+		}
+	}
+	if len(added) > 0 {
+		internalSet.Store(&netSet{builtinInternal: s.builtinInternal, builtinReserved: s.builtinReserved, extra: extra})
+	}
+	return added
+}
+
 // InternalNetworks 返回当前生效的全部内网 / 保留网段（内置 + 配置 + 自动探测）。
 func InternalNetworks() []string {
 	s := internalSet.Load()

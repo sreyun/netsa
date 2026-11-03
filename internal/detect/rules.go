@@ -45,6 +45,7 @@ const (
 	CatSpoof       = "IP伪造"
 	CatCrawl       = "数据爬取/越权遍历"
 	CatBeacon      = "可疑外连"
+	CatDestroy     = "破坏性攻击"
 )
 
 // Rule 是一条特征规则。Pattern 匹配的是归一化（解码+小写）后的文本。

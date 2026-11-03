@@ -61,7 +61,7 @@ import (
 
 // version 是构建版本号。默认值用于本地构建；镜像构建通过
 // -ldflags "-X main.version=<tag>" 注入，`netsa version` 与 /api/meta 都会显示注入后的值。
-var version = "1.7.3"
+var version = "1.7.4"
 
 func usage() {
 	fmt.Fprintf(os.Stderr, `netsa %s —— 网络安全态势感知与攻击面分析系统
@@ -238,6 +238,9 @@ func build(cfg *config.Config) (*app, error) {
 		Escalate: cfg.Learn.EscalateOn(), EscalateDays: cfg.Learn.EscalateDays, WindowDays: cfg.Learn.WindowDays}); err != nil {
 		return nil, err
 	}
+	if added := geo.AddInternalNetworks(a.learn.LearnedNets()); len(added) > 0 {
+		log.Printf("[learn] 载入自动识别的内网网段: %s", strings.Join(added, ", "))
+	}
 	if a.exposure.Enforcing() {
 		log.Printf("[exposure] 对外发布服务清单已启用：%d 条映射、%d 个兜底端口；未发布端口上的端口探测与暴力破解只打标签，不产生告警",
 			a.exposure.Count(), len(cfg.Exposure.AllowedPorts))
@@ -248,6 +251,14 @@ func build(cfg *config.Config) (*app, error) {
 		RealIP: pipeline.NewRealIP(cfg.RealIP), Notifier: a.notifier,
 		EnrichLevel: model.ParseSeverity(cfg.Geo.EnrichLevel), OnAlert: a.onAlert, Suppress: a.suppress, Assets: a.assets,
 		Exposure: a.exposure, Learn: a.learn,
+	}
+	// 自学习识别出新的内网网段：已有攻击源按新网段重新定位（不再显示为境外）
+	a.pipe.OnIntranetLearned = func(string) {
+		go func() {
+			if n := a.store.RefreshGeo(a.geo.Relocate); n > 0 {
+				log.Printf("[geo] 按自动识别的内网网段更新了 %d 个攻击源的归属地", n)
+			}
+		}()
 	}
 	a.pipe.SetWhitelist(cfg.Detect.Whitelist)
 	if a.forward, err = forward.New(cfg.Forward, version); err != nil {

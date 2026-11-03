@@ -35,13 +35,13 @@ func (Nginx) Parse(line string) (*model.Event, bool) {
 	if len(line) < 20 {
 		return nil, false
 	}
-	var ip, tm, req, status, bytes, ref, ua, xff, host string
+	var ip, tm, req, status, bytes, ref, ua, xff, host, tail string
 	if f, ok := fastCombined(line); ok && isIP(f.ip) {
-		ip, tm, req, status, bytes, ref, ua, xff = f.ip, f.tm, f.req, f.status, f.bytes, f.ref, f.ua, f.xff
+		ip, tm, req, status, bytes, ref, ua, xff, tail = f.ip, f.tm, f.req, f.status, f.bytes, f.ref, f.ua, f.xff, f.tail
 	} else if m := reNginxCombined.FindStringSubmatch(line); m != nil && isIP(m[1]) {
-		ip, tm, req, status, bytes, ref, ua, xff = m[1], m[3], m[4], m[5], m[6], m[7], m[8], m[9]
+		ip, tm, req, status, bytes, ref, ua, xff, tail = m[1], m[3], m[4], m[5], m[6], m[7], m[8], m[9], m[10]
 	} else if m := reNginxVhost.FindStringSubmatch(line); m != nil && isIP(m[2]) && !isIP(m[1]) {
-		host, ip, tm, req, status, bytes, ref, ua, xff = m[1], m[2], m[4], m[5], m[6], m[7], m[8], m[9], m[10]
+		host, ip, tm, req, status, bytes, ref, ua, xff, tail = m[1], m[2], m[4], m[5], m[6], m[7], m[8], m[9], m[10], m[11]
 	} else {
 		return nil, false
 	}
@@ -61,7 +61,77 @@ func (Nginx) Parse(line string) (*model.Event, bool) {
 	ev.Status, _ = strconv.Atoi(status)
 	ev.Bytes, _ = strconv.ParseInt(bytes, 10, 64)
 	setRequest(ev, unescapeNginx(req))
+	parseTail(ev, tail)
 	return ev, true
+}
+
+// parseTail 读取 combined 格式之后常见的附加字段：请求耗时（$request_time，形如 0.005）与站点名（$host）。
+// 也支持 rt=0.005、host=example.com 这样的键值写法。
+//
+// 通过 syslog 转发时，nginx 的 syslog 标签（如 mg-prd-nginx）在 IP 之前，会被当作 vhost_combined 的站点名；
+// 这时行尾真正的域名更可信：开头的“站点名”不像域名（没有点）而行尾有域名，就以行尾为准。
+func parseTail(ev *model.Event, tail string) {
+	tail = strings.TrimSpace(tail)
+	if tail == "" {
+		return
+	}
+	reqTime, host := -1.0, ""
+	for i, tok := range strings.Fields(tail) {
+		if i >= 8 {
+			break
+		}
+		tok = strings.Trim(tok, `"`)
+		if k, v, ok := strings.Cut(tok, "="); ok {
+			switch strings.ToLower(k) {
+			case "rt", "request_time", "req_time":
+				if f, err := strconv.ParseFloat(v, 64); err == nil && reqTime < 0 {
+					reqTime = f
+				}
+			case "host", "http_host", "server_name", "vhost":
+				if host == "" && looksLikeHost(v) {
+					host = v
+				}
+			}
+			continue
+		}
+		if reqTime < 0 && strings.Contains(tok, ".") {
+			if f, err := strconv.ParseFloat(tok, 64); err == nil && f >= 0 {
+				reqTime = f // 第一个小数是 $request_time；其后的 $upstream_response_time 不覆盖
+				continue
+			}
+		}
+		if host == "" && looksLikeHost(tok) {
+			host = tok
+		}
+	}
+	if reqTime >= 0 {
+		ev.ReqTime = reqTime
+	}
+	if host != "" && (ev.Host == "" || !strings.Contains(ev.Host, ".")) {
+		if h, _, err := net.SplitHostPort(host); err == nil {
+			host = h
+		}
+		ev.Host = strings.ToLower(host)
+	}
+}
+
+// looksLikeHost 判断字段像不像域名（至少含一个点和字母，只含域名字符，可带端口）。IP 不算：行尾的 IP 多是上游地址。
+func looksLikeHost(s string) bool {
+	if len(s) < 4 || len(s) > 253 || !strings.Contains(s, ".") {
+		return false
+	}
+	letter := false
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		switch {
+		case c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z':
+			letter = true
+		case c >= '0' && c <= '9' || c == '.' || c == '-' || c == ':' || c == '_':
+		default:
+			return false
+		}
+	}
+	return letter && s[0] != '.' && s[0] != '-'
 }
 
 // setRequest 拆分请求行 "GET /path HTTP/1.1"；非标准请求行原样保存到 URI。

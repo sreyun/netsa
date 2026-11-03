@@ -98,14 +98,17 @@ type Behavior struct {
 	th        config.Thresholds
 	web       map[string]*webWin
 	fw        map[string]*fwWin
-	logins    map[string]*loginWin // 登录接口 → 全局窗口
-	enum      map[string]*enumWin  // 来源 → 接口遍历窗口
-	beacons   map[string]*beacon   // 内网主机>外部地址:端口 → 连接时间
-	auth      map[string]*authWin  // 认证来源 → 登录失败窗口
-	dns       map[string]*dnsWin   // 内网主机 → DNS 查询窗口
-	errs      map[string]*hostErr  // 站点 → 返回 5xx 的不同来源（区分服务故障与攻击）
-	latest    time.Time            // 已处理事件的最新时间（排除未来时间的异常日志），作为窗口过期的基准
-	lastPrune time.Time            // 上次清理的系统时间
+	logins    map[string]*loginWin   // 登录接口 → 全局窗口
+	enum      map[string]*enumWin    // 来源 → 接口遍历窗口
+	beacons   map[string]*beacon     // 内网主机>外部地址:端口 → 连接时间
+	auth      map[string]*authWin    // 认证来源 → 登录失败窗口
+	dns       map[string]*dnsWin     // 内网主机 → DNS 查询窗口
+	errs      map[string]*hostErr    // 站点 → 返回 5xx 的不同来源（区分服务故障与攻击）
+	slow      map[string]*slowWin    // 来源 → 超时窗口（只为收到过超时的来源建立）
+	attacked  map[string]time.Time   // 来源 → 最近一次命中攻击规则的时间
+	impact    map[string]*hostImpact // 站点 → 超时统计、业务路径可用性与可疑来源
+	latest    time.Time              // 已处理事件的最新时间（排除未来时间的异常日志），作为窗口过期的基准
+	lastPrune time.Time              // 上次清理的系统时间
 }
 
 // maxWindows 是同时跟踪的行为窗口上限：大量不同来源（如伪造源地址的扫描）时不再为新来源建窗口，防止内存耗尽。
@@ -116,11 +119,15 @@ const maxAuthHosts = 256
 
 func NewBehavior(th config.Thresholds) *Behavior {
 	return &Behavior{th: th, web: map[string]*webWin{}, fw: map[string]*fwWin{}, logins: map[string]*loginWin{},
-		enum: map[string]*enumWin{}, beacons: map[string]*beacon{}, auth: map[string]*authWin{}, dns: map[string]*dnsWin{}, errs: map[string]*hostErr{}}
+		enum: map[string]*enumWin{}, beacons: map[string]*beacon{}, auth: map[string]*authWin{}, dns: map[string]*dnsWin{}, errs: map[string]*hostErr{},
+		slow: map[string]*slowWin{}, attacked: map[string]time.Time{}, impact: map[string]*hostImpact{}}
 }
 
 // Observe 处理一个事件并返回触发的行为告警。
-func (b *Behavior) Observe(ev *model.Event) []model.Hit {
+func (b *Behavior) Observe(ev *model.Event) []model.Hit { return b.ObserveHits(ev, nil) }
+
+// ObserveHits 与 Observe 相同，ruleHits 是同一事件命中的攻击规则：用于把攻击之后的写操作与业务受损关联起来。
+func (b *Behavior) ObserveHits(ev *model.Event, ruleHits []model.Hit) []model.Hit {
 	// 出站流量（内网主机访问公网）不做扫描 / 洪泛 / 暴力破解判定：正常上网会连接大量不同的公网地址与端口，
 	// 按入站攻击的阈值判断会产生大量误报；只检测按固定间隔回连同一地址的 C2 心跳。
 	// 内网主机之间的横向扫描（目的为内网地址）仍按入站规则检测。
@@ -156,12 +163,16 @@ func (b *Behavior) Observe(ev *model.Event) []model.Hit {
 		return b.observeBeacon(ev)
 	}
 	if ev.Kind == model.KindWeb {
-		return b.observeWeb(ev)
+		attacked := false
+		for _, h := range ruleHits {
+			attacked = attacked || h.Severity >= model.SevMedium
+		}
+		return b.observeWeb(ev, attacked)
 	}
 	return b.observeFw(ev)
 }
 
-func (b *Behavior) observeWeb(ev *model.Event) []model.Hit {
+func (b *Behavior) observeWeb(ev *model.Event, attacked bool) []model.Hit {
 	w := b.web[ev.SrcIP]
 	if w == nil && len(b.web)+len(b.fw) >= maxWindows {
 		return nil
@@ -253,7 +264,7 @@ func (b *Behavior) observeWeb(ev *model.Event) []model.Hit {
 			hits = append(hits, h)
 		}
 	}
-	return hits
+	return append(hits, b.observeImpact(ev, path, attacked)...)
 }
 
 // distBrute 检测分布式暴力破解（撞库）：同一登录接口在窗口内收到大量来自不同来源的失败登录（401 / 403 / 429）。
@@ -522,6 +533,7 @@ func (b *Behavior) observeFw(ev *model.Event) []model.Hit {
 		b.fw[ev.SrcIP] = w
 	}
 	w.events++
+	internal := InternalSource(ev)
 	highScan := b.th.PortScanPorts * 5
 	if ev.DstPort > 0 {
 		if len(w.ports) < highScan {
@@ -543,7 +555,9 @@ func (b *Behavior) observeFw(ev *model.Event) []model.Hit {
 				s[ev.DstIP] = struct{}{}
 			}
 		}
-		if _, ok := authPorts[ev.DstPort]; ok {
+		// 内部来源被策略放行的连接是业务访问（应用服务器的连接池、定时任务连数据库），连接次数不能说明暴力破解；
+		// 只统计被拒绝的。外部来源的放行连接照常统计
+		if _, ok := authPorts[ev.DstPort]; ok && !(internal && ev.Action == model.ActionAllow) {
 			if w.auth == nil {
 				w.auth, w.authHost = map[int]int{}, map[string]int{}
 			}
@@ -568,7 +582,7 @@ func (b *Behavior) observeFw(ev *model.Event) []model.Hit {
 	}
 	nPorts := len(w.ports)
 	// 来自互联网的扫描是常态，低一级：只有内网来源的扫描才是需要优先处理的横向移动信号
-	external := !isPrivateIP(ev.SrcIP)
+	external := !internal
 	sev, sweepSev := model.SevMedium, model.SevMedium
 	if nPorts >= highScan {
 		sev = model.SevHigh
@@ -670,6 +684,7 @@ func (b *Behavior) prune(now time.Time) {
 			delete(b.errs, h)
 		}
 	}
+	b.pruneImpact(now)
 }
 
 func fmtDur(d time.Duration) string {

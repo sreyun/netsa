@@ -189,21 +189,23 @@ const (
 type Learner struct {
 	opt Options
 
-	mu        sync.Mutex
-	cases     map[uint64]*Case
-	pinned    map[string]bool
-	handled   map[string]string // 已采纳 / 已忽略的建议 ID → 处理结果
-	changes   []Change
-	stats     []RuleStat
-	ctxStats  []ContextStat // 已精细校准的「规则 + 目标」
-	sugs      []Suggestion
-	ai        map[uint64]*AIRecord // 外部模型的研判结论（见 aitrust.go），只用于评估模型，不作为样本
-	aiStats   []AIStat
-	users     map[string]*userBase // 平台账号的行为基线（见 sentinel.go）
-	anomalies []Anomaly
-	comp      map[string]string // 合规测评项 → 上次结果（见 compliance.go）
-	compHist  []CompPoint
-	dirty     bool
+	mu         sync.Mutex
+	cases      map[uint64]*Case
+	pinned     map[string]bool
+	handled    map[string]string // 已采纳 / 已忽略的建议 ID → 处理结果
+	changes    []Change
+	stats      []RuleStat
+	ctxStats   []ContextStat // 已精细校准的「规则 + 目标」
+	sugs       []Suggestion
+	ai         map[uint64]*AIRecord // 外部模型的研判结论（见 aitrust.go），只用于评估模型，不作为样本
+	aiStats    []AIStat
+	users      map[string]*userBase // 平台账号的行为基线（见 sentinel.go）
+	anomalies  []Anomaly
+	comp       map[string]string      // 合规测评项 → 上次结果（见 compliance.go）
+	nets       map[string]*LearnedNet // 从防火墙日志自动学习的内网网段（见 netlearn.go）
+	netPending map[string]*netObs
+	compHist   []CompPoint
+	dirty      bool
 
 	sent    sentinelState
 	calib   atomic.Pointer[snapshot]
@@ -229,6 +231,7 @@ type state struct {
 	CompHist  []CompPoint          `json:"compliance_history,omitempty"`
 	AI        map[uint64]*AIRecord `json:"ai,omitempty"`
 	Policy    *Policy              `json:"policy,omitempty"`
+	Intranet  []LearnedNet         `json:"intranet,omitempty"`
 }
 
 // Load 读取学习状态（文件不存在时从零开始）。
@@ -247,7 +250,7 @@ func Load(opt Options) (*Learner, error) {
 	}
 	opt.CtxMinFP = max(3, opt.MinVerdicts-2)
 	l := &Learner{opt: opt, cases: map[uint64]*Case{}, pinned: map[string]bool{}, handled: map[string]string{},
-		users: map[string]*userBase{}, comp: map[string]string{}, ai: map[uint64]*AIRecord{}}
+		users: map[string]*userBase{}, comp: map[string]string{}, ai: map[uint64]*AIRecord{}, nets: map[string]*LearnedNet{}, netPending: map[string]*netObs{}}
 	l.applied.since = time.Now()
 	if opt.Path != "" {
 		data, err := os.ReadFile(opt.Path)
@@ -283,6 +286,11 @@ func Load(opt Options) (*Learner, error) {
 					l.ai[id] = r
 				}
 			}
+			for i := range st.Intranet {
+				if n := st.Intranet[i]; n.Prefix != "" {
+					l.nets[n.Prefix] = &n
+				}
+			}
 			if p := st.Policy; p != nil && p.check() == nil { // 界面设置的策略优先于配置文件
 				l.policy = p
 				l.opt.apply(*p)
@@ -308,6 +316,7 @@ func (l *Learner) Save() error {
 		return nil
 	}
 	st := state{Handled: l.handled, Changes: l.changes, Users: l.users, Anomalies: l.anomalies, Comp: l.comp, CompHist: l.compHist, AI: l.ai, Policy: l.policy}
+	st.Intranet = l.learnedNetsLocked()
 	for _, c := range l.cases {
 		st.Cases = append(st.Cases, c)
 	}
@@ -853,6 +862,7 @@ type Report struct {
 	Confirmed   int           `json:"confirmed"` // 最近一次结论为确认攻击的来源数（复现时升级）
 	Expired     int           `json:"expired"`   // 超过学习窗口、不再参与校准的样本数
 	Trend       []WeekStat    `json:"trend"`     // 近 8 周的人工结论，误报占比下降说明检测在变准
+	Intranet    []LearnedNet  `json:"intranet"`  // 从防火墙日志自动学习的内网网段
 }
 
 // Report 返回自学习状态概览。
@@ -875,6 +885,7 @@ func (l *Learner) Report() Report {
 			}
 		}
 	}
+	r.Intranet = l.learnedNetsLocked()
 	r.Cases = len(l.cases)
 	now := time.Now()
 	r.Trend = weekTrend(l.cases, now)

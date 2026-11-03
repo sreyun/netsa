@@ -13,6 +13,7 @@ import (
 //	$remote_addr - $remote_user [$time_local] "$request" $status $body_bytes_sent "$http_referer" "$http_user_agent" ["$http_x_forwarded_for"] ...
 type combinedFields struct {
 	ip, tm, req, status, bytes, ref, ua, xff string
+	tail                                     string // XFF 之后的附加字段（如 $request_time $host）
 }
 
 func fastCombined(line string) (f combinedFields, ok bool) {
@@ -74,11 +75,12 @@ func fastCombined(line string) (f combinedFields, ok bool) {
 			return f, false
 		}
 		if strings.HasPrefix(rest, ` "`) {
-			if f.xff, _, ok = quoted(rest[1:]); !ok {
+			if f.xff, rest, ok = quoted(rest[1:]); !ok {
 				return f, false
 			}
 		}
 	}
+	f.tail = rest
 	return f, true
 }
 

@@ -57,6 +57,7 @@ type Compromised struct {
 	FirstSeen  time.Time      `json:"first_seen"`
 	LastSeen   time.Time      `json:"last_seen"`
 	Advice     string         `json:"advice"`
+	evidenced  bool           // 至少有一条带证据的迹象（主机外连、或有证据的攻击成功）
 }
 
 // 攻击成功即意味着可在服务器上执行代码或已植入后门的攻击类型，研判为高置信失陷。
@@ -83,12 +84,17 @@ func (s *Store) compromisedLocked() []*Compromised {
 			out = append(out, c)
 		}
 		cat := strings.TrimPrefix(f.Title, "疑似攻击成功: ")
-		// 主机：命中情报的外连与安全设备报出的恶意软件为高置信；仅凭周期性外连判断的为中置信
-		if kind == "host" && f.Severity >= model.SevHigh || kind == "web" && highImpact[cat] && f.Severity >= model.SevCritical {
+		sev := f.effectiveSev()
+		// 主机：命中情报的外连与安全设备报出的恶意软件为高置信；仅凭周期性外连判断的为中置信。
+		// Web：只有带证据的成功（命令执行、WebShell 等）才是高置信
+		if kind == "host" && sev >= model.SevHigh || kind == "web" && highImpact[cat] && f.Proven {
 			c.Confidence = "high"
 		}
-		if f.Severity > c.Severity {
-			c.Severity = f.Severity
+		if kind == "host" || f.Proven {
+			c.evidenced = true
+		}
+		if sev > c.Severity {
+			c.Severity = sev
 		}
 		c.Indicators = append(c.Indicators, f.Title+"："+f.Evidence)
 		for _, ip := range f.IPs {
@@ -107,9 +113,10 @@ func (s *Store) compromisedLocked() []*Compromised {
 			c.Advice = f.Remediation
 		}
 	}
-	// 同一资产命中多种攻击成功研判（如 SQL 注入成功后又出现 WebShell 访问）时提升为高置信
+	// 同一资产命中多种攻击成功研判（如 SQL 注入成功后又出现 WebShell 访问）时提升为高置信。
+	// 至少要有一条带证据：扫描器会把各类载荷都打一遍，只凭 2xx 的多种“成功”说明不了失陷
 	for _, c := range out {
-		if len(c.Indicators) >= 2 {
+		if len(c.Indicators) >= 2 && c.evidenced {
 			c.Confidence = "high"
 		}
 		sort.Strings(c.Indicators)
@@ -193,15 +200,26 @@ func (s *Store) verifySuccess(ev *model.Event, hits []model.Hit) []model.Hit {
 		switch {
 		case ep.baselineMatches(ev.Bytes):
 			// 复核为「未成功」：撤销成功判定，等级回落到高危封顶（严重需要第二份证据）。
+			// 接口确实存在，盲注成功时页面大小也可能不变，所以不再往下降
 			e := edit(i)
 			e.Result, e.Proven = model.ResultPassed, false
 			e.Severity = min(e.Severity, model.SevHigh)
 			e.Evidence += "（响应大小与该接口正常响应一致，判定为未成功）"
+		case s.surf.homePage(host, normPath(ev.URI), ev.Bytes):
+			// 与站点首页的大小相同：路径不存在，返回的是兜底页面（单页应用把所有路径都返回首页），载荷没有到达应用。
+			// 这是有证据的未成功，最高按中危处置；扫描器打一整套载荷时不会再刷出成片的高危
+			s.surf.catchAll(host, normPath(ev.URI), ev.Bytes) // 同时计入同大小路径统计
+			e := edit(i)
+			e.Result, e.Proven, e.Disproven = model.ResultPassed, false, true
+			e.Severity = min(e.Severity, model.SevMedium)
+			e.Evidence += "（响应与站点首页大小相同，是兜底页面返回的 200，判定为未成功）"
 		case s.surf.catchAll(host, normPath(ev.URI), ev.Bytes):
+			// 只是多个探测路径大小相同：多半是兜底页面，但通过不同漏洞点读到同一个文件时大小也会相同，
+			// 证据不如首页基线，只撤销成功判定、按高危封顶
 			e := edit(i)
 			e.Result, e.Proven = model.ResultPassed, false
 			e.Severity = min(e.Severity, model.SevHigh)
-			e.Evidence += "（响应与站点首页或其他探测路径的大小相同，判定为未成功）"
+			e.Evidence += "（响应与其他探测路径的大小相同，判定为未成功）"
 		case !h.Proven && ep.baselineExceeded(ev.Bytes):
 			e := edit(i)
 			e.Proven = true

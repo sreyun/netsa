@@ -3,6 +3,7 @@ package store
 import (
 	"fmt"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -92,6 +93,28 @@ func TestAlertRingBuffer(t *testing.T) {
 	list := s.Alerts(AlertQuery{Limit: 100})
 	if len(list) != 10 || list[0].ID != 25 || list[9].ID != 16 {
 		t.Fatalf("环形缓冲区应保留最新 10 条且按新到旧排列: n=%d first=%d last=%d", len(list), list[0].ID, list[len(list)-1].ID)
+	}
+}
+
+// 扫描器把各类漏洞载荷都试一遍、全部没有成功：按类型累加的评分会顶到 100，但等级不能是严重。
+func TestScannerBreadthNotCritical(t *testing.T) {
+	s := newTestStore()
+	now := time.Now()
+	for i, cat := range []string{"SQL注入", "命令/代码执行", "目录穿越/文件包含", "已知漏洞利用", "表达式注入", "SSRF", "XXE", "反序列化"} {
+		for j := 0; j < 5; j++ {
+			s.Record(&model.Event{Kind: model.KindWeb, SrcIP: "203.0.113.20", Method: "GET", URI: "/p" + strconv.Itoa(i*10+j), Status: 200, Time: now},
+				[]model.Hit{attackHit("r"+strconv.Itoa(i), cat, model.SevHigh, model.ResultPassed)})
+		}
+	}
+	if p := s.Profile("203.0.113.20"); p.Level != model.SevHigh || p.Score >= levelFloor[model.SevCritical] {
+		t.Fatalf("没有成功证据的大范围扫描最高高危: level=%s score=%.1f", p.Level, p.Score)
+	}
+	// 同样的扫描里有一次有证据的成功：严重
+	ok := attackHit("sqli", "SQL注入", model.SevCritical, model.ResultSuccess)
+	ok.Proven = true
+	s.Record(&model.Event{Kind: model.KindWeb, SrcIP: "203.0.113.20", Method: "GET", URI: "/x", Status: 200, Time: now}, []model.Hit{ok})
+	if p := s.Profile("203.0.113.20"); p.Level != model.SevCritical {
+		t.Fatalf("有证据的成功应为严重: level=%s score=%.1f", p.Level, p.Score)
 	}
 }
 

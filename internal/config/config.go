@@ -294,6 +294,11 @@ type Thresholds struct {
 	// DNS：窗口（fw_window）内同一主机的 NXDOMAIN 查询数、向同一主域名查询的不同子域名数达到阈值
 	DNSNXDomain   int `yaml:"dns_nxdomain"`
 	DNSSubdomains int `yaml:"dns_subdomains"`
+	// 慢请求 / 超时攻击：窗口内同一来源收到网关超时（504 / 408）或耗时超过 slow_request 的响应达到该次数，
+	// 且明显多于同一站点的其他访客。慢速攻击每个请求都要占用后端很久，频率低，按 web_window 统计发现不了
+	TimeoutWindow   time.Duration `yaml:"timeout_window"`
+	TimeoutRequests int           `yaml:"timeout_requests"`
+	SlowRequest     time.Duration `yaml:"slow_request"` // 日志记录了请求耗时（nginx $request_time）时生效
 }
 
 type AlertConfig struct {
@@ -423,6 +428,9 @@ func Default() *Config {
 				AuthUsers:       5,
 				DNSNXDomain:     60,
 				DNSSubdomains:   150,
+				TimeoutWindow:   10 * time.Minute,
+				TimeoutRequests: 20,
+				SlowRequest:     10 * time.Second,
 			},
 		},
 		RawLog: RawLogConfig{RetentionDays: 180},
@@ -630,6 +638,12 @@ func (c *Config) fill() {
 	if t.EnumWindow <= 0 {
 		t.EnumWindow = dt.EnumWindow
 	}
+	if t.TimeoutWindow <= 0 {
+		t.TimeoutWindow = dt.TimeoutWindow
+	}
+	if t.SlowRequest <= 0 {
+		t.SlowRequest = dt.SlowRequest
+	}
 	for _, p := range []struct {
 		v   *int
 		def int
@@ -639,6 +653,7 @@ func (c *Config) fill() {
 		{&t.HostSweep, dt.HostSweep}, {&t.BruteConns, dt.BruteConns}, {&t.FloodEvents, dt.FloodEvents},
 		{&t.DistBruteLogins, dt.DistBruteLogins}, {&t.DistBruteIPs, dt.DistBruteIPs}, {&t.EnumIDs, dt.EnumIDs}, {&t.BeaconConns, dt.BeaconConns},
 		{&t.AuthFailures, dt.AuthFailures}, {&t.AuthUsers, dt.AuthUsers}, {&t.DNSNXDomain, dt.DNSNXDomain}, {&t.DNSSubdomains, dt.DNSSubdomains},
+		{&t.TimeoutRequests, dt.TimeoutRequests},
 		{&c.Detect.AlertsPerRule, d.Detect.AlertsPerRule},
 		{&c.Storage.MaxIPs, d.Storage.MaxIPs}, {&c.Storage.MaxAlerts, d.Storage.MaxAlerts},
 		{&c.Geo.CacheSize, d.Geo.CacheSize},

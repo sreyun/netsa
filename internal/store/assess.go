@@ -80,11 +80,14 @@ type Assessment struct {
 	Actions     []*Action      `json:"actions"`
 	ActionCount map[string]int `json:"action_count"`
 	Compromised []*Compromised `json:"compromised"`
-	Matrix      *AttackMatrix  `json:"matrix"`
-	History     []ScorePoint   `json:"history"` // 评分趋势（每小时一次，最近 30 天）
-	From        time.Time      `json:"from"`
-	To          time.Time      `json:"to"`
-	GeneratedAt time.Time      `json:"generated_at"`
+	// CompromisedTotal、CompromisedHigh 是全部疑似失陷资产与其中高置信的数量（接口只返回排在前面的一部分）
+	CompromisedTotal int           `json:"compromised_total"`
+	CompromisedHigh  int           `json:"compromised_high"`
+	Matrix           *AttackMatrix `json:"matrix"`
+	History          []ScorePoint  `json:"history"` // 评分趋势（每小时一次，最近 30 天）
+	From             time.Time     `json:"from"`
+	To               time.Time     `json:"to"`
+	GeneratedAt      time.Time     `json:"generated_at"`
 }
 
 // assessData 是在读锁内收集的评估所需数据。

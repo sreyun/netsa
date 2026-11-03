@@ -108,6 +108,17 @@ type Finding struct {
 	Count       int64          `json:"count"`
 	FirstSeen   time.Time      `json:"first_seen"`
 	LastSeen    time.Time      `json:"last_seen"`
+	// Proven 表示攻击成功研判有响应码之外的证据。旧版本只凭 2xx 就记为严重，这些历史记录没有该标记，
+	// 按高危显示，不作为严重或高置信失陷的依据
+	Proven bool `json:"proven,omitempty"`
+}
+
+// effectiveSev 返回发现的有效等级：没有证据的攻击成功研判最高高危。
+func (f *Finding) effectiveSev() model.Severity {
+	if f.Category == "攻击成功研判" && !f.Proven && f.Severity > model.SevHigh {
+		return model.SevHigh
+	}
+	return f.Severity
 }
 
 type surface struct {
@@ -128,6 +139,18 @@ const (
 	maxSoftSizes = 64
 	softSamePath = 3 // 不同探测路径返回完全相同大小的次数达到该值即判定为兜底页
 )
+
+// maxFindings 是攻击面发现的数量上限。
+const maxFindings = 5000
+
+// homePage 判断非首页路径的响应大小是否与站点首页的正常响应一致（兜底页面的最强证据）。
+func (sf *surface) homePage(host, path string, bytes int64) bool {
+	if bytes <= 0 || resourceKey(path) == "/" {
+		return false
+	}
+	ep := sf.Endpoints[host+" /"]
+	return ep != nil && ep.baselineMatches(bytes)
+}
 
 // catchAll 判断一个 200 响应是否其实是站点的兜底页面：单页应用把所有路径都返回 index.html、统一错误页返回 200 时，
 // 扫描器探测 /.env、/.git/config、webshell 路径都会得到 200，但拿到的只是首页。判断依据（自动学习，无需配置）：
@@ -432,8 +455,12 @@ func (sf *surface) observeWeb(ev *model.Event, hits []model.Hit, attacked bool) 
 			if rem == "" {
 				rem = "核查该接口是否存在对应漏洞，排查服务器是否已被入侵，并在 WAF 中加入拦截规则"
 			}
-			sf.finding("succ:"+h.Category+":"+key, "疑似攻击成功: "+h.Category, "攻击成功研判", h.Severity, asset,
+			id := "succ:" + h.Category + ":" + key
+			sf.finding(id, "疑似攻击成功: "+h.Category, "攻击成功研判", h.Severity, asset,
 				ev.SrcIP+" "+ev.Method+" 返回 "+strconv.Itoa(ev.Status)+"，"+h.Name+": "+h.Evidence, rem, ev.SrcIP, ev.Time)
+			if f := sf.Findings[id]; f != nil && h.Proven {
+				f.Proven = true
+			}
 		}
 	}
 }
@@ -498,8 +525,18 @@ func (sf *surface) observeFw(ev *model.Event, published bool) {
 func (sf *surface) finding(id, title, cat string, sev model.Severity, asset, evidence, remediation, ip string, t time.Time) {
 	f := sf.Findings[id]
 	if f == nil {
-		if len(sf.Findings) >= 5000 {
-			return
+		if len(sf.Findings) >= maxFindings {
+			// 满了淘汰最久没有再出现的一条：直接丢弃新发现的话，数量到上限后新的真实风险再也记不进来
+			var oldest string
+			for k, x := range sf.Findings {
+				if oldest == "" || x.LastSeen.Before(sf.Findings[oldest].LastSeen) {
+					oldest = k
+				}
+			}
+			if !sf.Findings[oldest].LastSeen.Before(t) {
+				return
+			}
+			delete(sf.Findings, oldest)
 		}
 		f = &Finding{ID: id, Title: title, Category: cat, Severity: sev, Asset: asset, Evidence: evidence, Remediation: remediation, FirstSeen: t}
 		sf.Findings[id] = f

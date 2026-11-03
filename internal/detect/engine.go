@@ -484,7 +484,7 @@ func inspectFirewall(ev *model.Event) []model.Hit {
 	}
 	// 内网主机之间被放行的业务访问（如应用服务器连接数据库）属于正常东西向流量，不作为探测告警；
 	// 内网发起且被拒绝的访问仍然告警，用于发现横向移动。
-	if result == model.ResultAllowed && isPrivateIP(ev.SrcIP) {
+	if result == model.ResultAllowed && InternalSource(ev) {
 		return nil
 	}
 	sev := model.SevLow
@@ -502,14 +502,45 @@ func inspectFirewall(ev *model.Event) []model.Hit {
 	return nil
 }
 
-// IsEgress 判断防火墙事件是否为内网主机访问公网的出站连接（部分设备日志不标注方向，按地址判断）。
+// IsEgress 判断防火墙事件是否为内网主机访问公网的出站连接（部分设备日志不标注方向，按地址与安全域判断）。
 func IsEgress(ev *model.Event) bool {
-	return ev.Kind == model.KindFirewall && ev.DstIP != "" && isPrivateIP(ev.SrcIP) && !isPrivateIP(ev.DstIP)
+	return ev.Kind == model.KindFirewall && ev.DstIP != "" && InternalSource(ev) && !isPrivateIP(ev.DstIP) && zoneSide(ev.DstZone) <= 0
 }
 
 // isPrivateIP 统一使用 geo 包的网段集合（内置 RFC1918 / 保留段 + 配置的内网段 + 本机自动探测的网段），
 // 避免各模块各自维护一套判定导致 172.168.100.0/24 这类内网误用段被当成公网。
 func isPrivateIP(ip string) bool { return geo.IsPrivate(ip) }
+
+// InternalSource 判断事件来源是否在内部：私有或配置的内网地址，或防火墙标明报文来自内部安全域。
+//
+// 企业把 172.168.0.0/16 这类公网段用在内网、又没有配置 geo.intranet 时，只看地址会把内部主机当成外部攻击源，
+// 应用服务器连数据库也会被判为暴力破解；防火墙日志里的安全域（trust、dmz 等）直接说明了报文从哪一侧进来。
+func InternalSource(ev *model.Event) bool {
+	return isPrivateIP(ev.SrcIP) || ev.Kind == model.KindFirewall && zoneSide(ev.SrcZone) > 0
+}
+
+// InternalZone 判断安全域名称是否表示内部一侧（trust、dmz、inside 等）。
+func InternalZone(zone string) bool { return zoneSide(zone) > 0 }
+
+// zoneSide 按安全域名称判断属于内部（1）、外部（-1）还是无法判断（0）。
+// 覆盖华为 / H3C / 山石（trust、untrust、dmz、local）、思科 / ASA（inside、outside）与常见的自定义命名。
+func zoneSide(zone string) int {
+	z := strings.ToLower(strings.TrimSpace(zone))
+	if z == "" {
+		return 0
+	}
+	for _, p := range []string{"untrust", "outside", "wan", "external", "internet", "public", "isp", "外网", "互联网"} {
+		if strings.HasPrefix(z, p) {
+			return -1
+		}
+	}
+	for _, p := range []string{"trust", "inside", "internal", "intranet", "lan", "dmz", "local", "server", "office", "manage", "内网", "办公", "服务器"} {
+		if strings.HasPrefix(z, p) {
+			return 1
+		}
+	}
+	return 0
+}
 
 // 安全设备威胁名称关键字 → 本系统攻击分类与攻击阶段（按顺序匹配，越具体越靠前）。
 // 关键字按“词”匹配避免误判（如 windows 不应匹配 dos）：以 * 结尾表示词前缀，含空格或符号的为短语子串。

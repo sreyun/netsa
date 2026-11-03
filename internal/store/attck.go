@@ -98,6 +98,7 @@ var categoryTechniques = map[string][]string{
 	"暴力破解":       {"T1110"},
 	"IP伪造":       {"T1036"},
 	"CC攻击":       {"T1499"},
+	"破坏性攻击":      {"T1485", "T1499"},
 	"洪水攻击":       {"T1498"},
 	CatC2:        {"T1071"},
 	CatMalware:   {"T1071"},

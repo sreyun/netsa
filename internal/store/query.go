@@ -797,6 +797,7 @@ type SurfaceReport struct {
 	Services       []*Service     `json:"services"`
 	Endpoints      []*Endpoint    `json:"endpoints"`
 	EndpointTotal  int            `json:"endpoint_total"`
+	FindingTotal   int            `json:"finding_total"` // 发现总数（接口只返回排在前面的一部分）
 	Hosts          []KV           `json:"hosts"`
 	Tech           []KV           `json:"tech"`
 	TopPorts       []KV           `json:"top_ports"`
@@ -810,7 +811,7 @@ var findingWeight = [...]int{0, 2, 5, 12, 25}
 func (s *Store) surfaceScoreLocked() int {
 	score := 0
 	for _, f := range s.surf.Findings {
-		score += findingWeight[f.Severity]
+		score += findingWeight[f.effectiveSev()]
 	}
 	if s.surf.ExploitPassed > 20 && s.surf.ExploitBlocked == 0 {
 		score += 10
@@ -831,8 +832,9 @@ func (s *Store) Surface() *SurfaceReport {
 	}
 	for _, f := range sf.Findings {
 		c := *f
+		c.Severity = f.effectiveSev()
 		r.Findings = append(r.Findings, &c)
-		r.SeverityCount[f.Severity.String()]++
+		r.SeverityCount[c.Severity.String()]++
 	}
 	sort.Slice(r.Findings, func(i, j int) bool {
 		a, b := r.Findings[i], r.Findings[j]
@@ -896,6 +898,7 @@ func (s *Store) Surface() *SurfaceReport {
 		name, _ := serviceInfo(p)
 		return itoa(p) + "/" + name
 	})
+	r.FindingTotal = len(r.Findings)
 	return r
 }
 

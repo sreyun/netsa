@@ -43,7 +43,8 @@ var catFloor = map[string]model.Severity{
 	"主机安全事件":     model.SevMedium,
 	"CC攻击":       model.SevMedium,
 	"洪水攻击":       model.SevMedium,
-	"设备威胁告警":     model.SevLow, // 设备已给出自身等级，未归类时只做兜底，不抬高
+	"破坏性攻击":      model.SevHigh, // 业务路径在可疑来源活动后对所有访客失效
+	"设备威胁告警":     model.SevLow,  // 设备已给出自身等级，未归类时只做兜底，不抬高
 	"威胁情报":       model.SevLow,
 	"IP伪造":       model.SevLow,
 	"扫描器":        model.SevLow,
@@ -183,6 +184,10 @@ func Finalize(h *model.Hit) {
 			sev = model.SevHigh
 		}
 	}
+	// 复核证明响应只是兜底页面或接口的正常响应：攻击没有成功，最高中危
+	if h.Disproven && !compromiseEvidence[h.Category] && sev > model.SevMedium {
+		sev = model.SevMedium
+	}
 
 	// 4. 仅打标签的观察不参与告警分级
 	if (h.TagOnly || h.Weak) && sev > model.SevLow {
@@ -235,6 +240,8 @@ func Describe(h *model.Hit, before model.Severity) string {
 		return "仅打标签，不计入告警分级"
 	case h.Weak:
 		return "特征只出现在普通文字中，最高按低危处置"
+	case h.Disproven:
+		return "响应只是兜底页面或正常响应，攻击没有成功，最高按中危处置"
 	case h.Result == model.ResultSuccess:
 		return "只有响应码，不足以确认攻击成功，最高按高危处置"
 	case h.Result == model.ResultBlocked:

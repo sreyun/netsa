@@ -142,7 +142,14 @@ func (s *Server) Handler() http.Handler {
 		res := s.Store.MapData(model.ParseSeverity(r.URL.Query().Get("level")))
 		writeJSON(w, map[string]any{"home": s.Cfg.Home, "data": res})
 	}))
-	mux.HandleFunc("GET /api/surface", cached(3*time.Second, func(w http.ResponseWriter, r *http.Request) { writeJSON(w, s.Store.Surface()) }))
+	mux.HandleFunc("GET /api/surface", cached(3*time.Second, func(w http.ResponseWriter, r *http.Request) {
+		// 发现可能有几千条：页面只显示排在前面的，全部返回会让浏览器解析、渲染几 MB 的数据
+		sr := s.Store.Surface()
+		if len(sr.Findings) > maxSurfaceFindings {
+			sr.Findings = sr.Findings[:maxSurfaceFindings]
+		}
+		writeJSON(w, sr)
+	}))
 	mux.HandleFunc("GET /api/assessment", cached(3*time.Second, s.assessment))
 	mux.HandleFunc("GET /api/sources", s.sources)
 	mux.HandleFunc("GET /api/rules", func(w http.ResponseWriter, r *http.Request) { writeJSON(w, s.Engine.Rules()) })

@@ -612,3 +612,48 @@ func TestAISuggestions(t *testing.T) {
 		t.Fatalf("确认过攻击的目标不应建议: %+v", s)
 	}
 }
+
+// 从防火墙日志自动学习内网网段：达到次数才认定，认定后持久化并记入进化日志，IPv6 不按固定长度推断。
+func TestObserveInternalZone(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "learn.json")
+	l, err := Load(Options{Path: path})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var audited []Change
+	l.OnChange = func(c Change) {
+		audited = append(audited, c)
+		l.Report() // 回调里再次进入学习模块不能死锁
+	}
+	now := time.Now()
+	got := ""
+	for i := 0; i < netLearnEvents; i++ {
+		pfx := l.ObserveInternalZone("172.168.100."+strconv.Itoa(i%7+1), "trust", now)
+		if pfx != "" && i != netLearnEvents-1 {
+			t.Fatalf("第 %d 条就认定了", i+1)
+		}
+		got += pfx
+	}
+	if got != "172.168.100.0/24" || len(audited) != 1 || audited[0].Kind != "intranet" {
+		t.Fatalf("认定结果: %q %+v", got, audited)
+	}
+	if again := l.ObserveInternalZone("172.168.100.9", "trust", now); again != "" {
+		t.Fatal("已认定的网段不再重复")
+	}
+	if l.ObserveInternalZone("2001:db8::1", "trust", now) != "" {
+		t.Fatal("IPv6 不学习")
+	}
+	if err := l.Save(); err != nil {
+		t.Fatal(err)
+	}
+	l2, err := Load(Options{Path: path})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if nets := l2.LearnedNets(); len(nets) != 1 || nets[0] != "172.168.100.0/24" {
+		t.Fatalf("重启后应保留: %v", nets)
+	}
+	if r := l2.Report(); len(r.Intranet) != 1 || r.Intranet[0].Zone != "trust" || len(r.Intranet[0].Hosts) == 0 {
+		t.Fatalf("报告: %+v", r.Intranet)
+	}
+}

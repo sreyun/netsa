@@ -1181,7 +1181,7 @@ async function loadSurface() {
   $('#techChips').innerHTML = ((s.tech || []).map((t) => `<span class="chip">${esc(t.name)} · ${t.value}</span>`).join('') || '<span class="muted">暂无</span>')
     + '<br>' + (s.hosts || []).map((h) => `<span class="chip">站点 ${esc(h.name)} · ${num(h.value)} 次</span>`).join('');
   const sc = s.severity_count || {};
-  $('#findingCount').textContent = `共 ${(s.findings || []).length} 项 · 严重 ${sc.critical || 0} · 高危 ${sc.high || 0} · 中危 ${sc.medium || 0}`;
+  $('#findingCount').textContent = `共 ${num(s.finding_total ?? (s.findings || []).length)} 项 · 严重 ${sc.critical || 0} · 高危 ${sc.high || 0} · 中危 ${sc.medium || 0}`;
   $('#findings').innerHTML = (s.findings || []).slice(0, 120).map((f) => `<div class="finding" style="border-left-color:${LV_COLOR[f.severity]}">
       <div class="ft">${badge(f.severity)}<span>${esc(f.title)}</span><span class="spacer"></span><span class="muted">${esc(f.category)} · ${num(f.count)} 次</span></div>
       <div class="asset">${esc(f.asset)}</div><div class="ev">${esc(f.evidence)}</div>
@@ -1476,9 +1476,10 @@ async function loadAssess() {
   $('#asScore').innerHTML = `<div class="ring" style="--p:${a.score};--c:${c}"><b style="color:${c}">${a.score}</b><span>${esc(a.grade)} · ${esc(a.grade_label)}</span></div>
     <div class="as-verdict" style="border-left-color:${c}">${esc(a.verdict)}</div>`;
   const ac = a.action_count || {};
-  const high = a.compromised.filter((x) => x.confidence === 'high').length;
+  const high = a.compromised_high ?? a.compromised.filter((x) => x.confidence === 'high').length;
+  const compTotal = a.compromised_total ?? a.compromised.length;
   $('#asCounts').innerHTML = ['P0', 'P1', 'P2', 'P3'].map((p) => `<button type="button" class="as-count prio-${p}" data-prio="${p}"><b>${ac[p] || 0}</b><span>${p} ${PRIO[p]}</span></button>`).join('')
-    + `<button type="button" class="as-count comp" data-jump="asCompPanel"><b>${a.compromised.length}</b><span>疑似失陷资产${high ? `（高置信 ${high}）` : ''}</span></button>`;
+    + `<button type="button" class="as-count comp" data-jump="asCompPanel"><b>${num(compTotal)}</b><span>疑似失陷资产${high ? `（高置信 ${high}）` : ''}</span></button>`;
   // 雷达图：未接入数据的维度按 0 分显示并在名称中注明
   chart('cRadar').setOption({
     tooltip: { ...baseTooltip, trigger: 'item', formatter: () => a.dimensions.map((d) => `${esc(d.name)}：${d.score < 0 ? '未接入' : d.score + ' 分'}`).join('<br/>') },
@@ -1506,8 +1507,9 @@ async function loadAssess() {
       <ol class="as-steps">${x.steps.filter(Boolean).map((s) => `<li>${esc(s)}</li>`).join('')}</ol></details>`).join('')
     || '<div class="empty">暂无需要处置的事项</div>';
   // 失陷研判
-  const comp = a.compromised;
-  $('#asCompCount').textContent = comp.length ? `${comp.length} 个资产，高置信 ${high} 个` : '';
+  // 只渲染排在前面的资产：几千行同时渲染会让页面卡住一两秒
+  const comp = a.compromised.slice(0, 100);
+  $('#asCompCount').textContent = compTotal ? `${num(compTotal)} 个资产，高置信 ${num(high)} 个${compTotal > comp.length ? `，显示前 ${comp.length} 个` : ''}` : '';
   $('#asComp').innerHTML = `<colgroup><col style="width:21%"><col style="width:64px"><col style="width:31%"><col style="width:17%"><col style="width:96px"><col></colgroup>
     <thead><tr><th>资产</th><th>置信度</th><th>失陷迹象</th><th>相关地址</th><th>时间</th><th>处置建议</th></tr></thead><tbody>${comp.map((x, i) => `
     <tr class="clickable" data-comp="${i}" title="点击查看相关明细"><td class="mono"><span class="chip ${x.kind === 'host' ? 'warn' : ''}">${x.kind === 'host' ? '主机' : 'Web 资产'}</span> ${esc(x.asset)}</td>

@@ -160,6 +160,12 @@ func (p *IPProfile) recompute() {
 	case p.Score > 0:
 		lvl = model.SevLow
 	}
+	// 严重级攻击源同样要求佐证：出现过严重告警（严重告警本身要求成功证据）或失陷迹象。
+	// 扫描器把各类漏洞载荷都试一遍、全部没有成功时，按攻击类型累加的评分会顶到 100，但它不是严重威胁
+	if lvl == model.SevCritical && floorSev < model.SevCritical {
+		lvl = model.SevHigh
+		p.Score = min(p.Score, levelFloor[model.SevCritical]-0.1)
+	}
 	p.Level = lvl
 }
 

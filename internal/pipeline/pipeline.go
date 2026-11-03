@@ -3,6 +3,7 @@ package pipeline
 
 import (
 	"context"
+	"log"
 	"net/netip"
 	"runtime"
 	"strconv"
@@ -43,11 +44,13 @@ type Pipeline struct {
 	Notifier    *alert.Notifier
 	EnrichLevel model.Severity
 	OnAlert     func(*model.Alert)
-	Suppress    *suppress.Manager // 误报抑制规则（可为空）
-	Raw         *rawlog.Store     // 原始日志留存（可为空）
-	Assets      *assets.Manager   // 资产与漏洞（可为空）
-	Exposure    *exposure.Manager // 对外发布服务清单（DNAT 映射，可为空）
-	Learn       *learn.Learner    // 自学习：按研判准确率校准规则等级（可为空）
+	// OnIntranetLearned 在自学习从防火墙日志识别出新的内网网段后调用（用于按新网段刷新已有攻击源的归属地）
+	OnIntranetLearned func(prefix string)
+	Suppress          *suppress.Manager // 误报抑制规则（可为空）
+	Raw               *rawlog.Store     // 原始日志留存（可为空）
+	Assets            *assets.Manager   // 资产与漏洞（可为空）
+	Exposure          *exposure.Manager // 对外发布服务清单（DNAT 映射，可为空）
+	Learn             *learn.Learner    // 自学习：按研判准确率校准规则等级（可为空）
 
 	whitelist []netip.Prefix
 	processed atomic.Int64
@@ -189,8 +192,9 @@ func (p *Pipeline) aggregate(items []item) {
 	hits := make([][]model.Hit, len(items))
 	for i, it := range items {
 		evs[i], hits[i] = it.ev, it.hits
+		p.learnIntranet(it.ev)
 		if !it.whitelisted && p.Behavior != nil {
-			hits[i] = append(hits[i], p.Behavior.Observe(it.ev)...)
+			hits[i] = append(hits[i], p.Behavior.ObserveHits(it.ev, it.hits)...)
 		}
 		reach, why := exposure.ReachUnknown, ""
 		if it.ev.Kind == model.KindFirewall {
@@ -467,7 +471,7 @@ func (p *Pipeline) tuneFirewall(ev *model.Event, hits []model.Hit, reach exposur
 		case h.RuleID == "bhv-fwbrute" && reach == exposure.ReachYes:
 			edit(i).Severity = model.SevHigh
 		case h.Category == detect.CatRiskService || h.Category == detect.CatIoT:
-			if h.Severity <= model.SevLow || reach == exposure.ReachYes || p.Behavior == nil || geo.IsPrivate(ev.SrcIP) {
+			if h.Severity <= model.SevLow || reach == exposure.ReachYes || p.Behavior == nil || detect.InternalSource(ev) {
 				continue
 			}
 			if p.Exposure != nil {
@@ -493,7 +497,7 @@ func (p *Pipeline) tuneFirewall(ev *model.Event, hits []model.Hit, reach exposur
 // reachOf 按会话证据判断一次放行的外部访问是否到达了服务。只看外部来源被放行的访问：
 // 被拦截的访问已按拦截处理，内网来源属于东西向流量。
 func (p *Pipeline) reachOf(ev *model.Event) (exposure.Verdict, string) {
-	if !p.Exposure.ReachCheck() || ev.Action != model.ActionAllow || ev.SrcIP == "" || geo.IsPrivate(ev.SrcIP) {
+	if !p.Exposure.ReachCheck() || ev.Action != model.ActionAllow || ev.SrcIP == "" || detect.InternalSource(ev) {
 		return exposure.ReachUnknown, ""
 	}
 	return p.Exposure.Reach(ev)
@@ -564,5 +568,22 @@ func (p *Pipeline) OnGeoUpdate(ip string, info *geo.Info) {
 	}
 	if info.Hosting {
 		p.Store.Tag(ip, "IDC/云主机", info.ISP)
+	}
+}
+
+// learnIntranet 把出现在内部安全域、却不在已知内网段的来源地址交给自学习：同一网段多次出现后认定为内网，
+// 立即按内部地址处理。见 learn.ObserveInternalZone。
+func (p *Pipeline) learnIntranet(ev *model.Event) {
+	if p.Learn == nil || ev.Kind != model.KindFirewall || !detect.InternalZone(ev.SrcZone) || ev.SrcIP == "" || geo.IsPrivate(ev.SrcIP) {
+		return
+	}
+	pfx := p.Learn.ObserveInternalZone(ev.SrcIP, ev.SrcZone, ev.Time)
+	if pfx == "" {
+		return
+	}
+	geo.AddInternalNetworks([]string{pfx})
+	log.Printf("[learn] 从防火墙日志识别内网网段 %s（来源安全域 %s）", pfx, ev.SrcZone)
+	if p.OnIntranetLearned != nil {
+		p.OnIntranetLearned(pfx)
 	}
 }

@@ -38,7 +38,7 @@ func TestVerifySuccessEvidence(t *testing.T) {
 		proven        bool
 	}{
 		{"与接口基线一致", "203.0.113.1", "/item?id=1", 3000, "SQL注入", "GET", model.SevHigh, model.ResultPassed, false},
-		{"与站点首页大小相同", "203.0.113.2", "/view?f=x", 5000, "目录穿越/文件包含", "GET", model.SevHigh, model.ResultPassed, false},
+		{"与站点首页大小相同：兜底页面，最高中危", "203.0.113.2", "/view?f=x", 5000, "目录穿越/文件包含", "GET", model.SevMedium, model.ResultPassed, false},
 		{"没有基线", "203.0.113.3", "/other?x=1", 1892, "SQL注入", "GET", model.SevHigh, model.ResultSuccess, false},
 		{"响应变小不算证据", "203.0.113.4", "/item?id=2", 300, "SQL注入", "GET", model.SevHigh, model.ResultSuccess, false},
 		{"响应明显大于基线", "203.0.113.5", "/item?id=3", 30000, "SQL注入", "GET", model.SevCritical, model.ResultSuccess, true},

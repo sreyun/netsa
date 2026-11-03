@@ -87,6 +87,33 @@ func TestNginxFields(t *testing.T) {
 	}
 }
 
+// combined 之后附加的 $request_time $host 不配置 log_format 也能识别；经 syslog 转发时，
+// 开头的 syslog 标签（mg-prd-nginx）不能当成站点名。
+func TestNginxTailFields(t *testing.T) {
+	p := mustAuto(t, "auto", "")
+	for _, c := range []struct {
+		line    string
+		host    string
+		reqTime float64
+	}{
+		{`<182>Nov  3 09:17:48 web01 mg-prd-nginx 14.110.9.178 - - [03/Nov/2026:09:17:48 +0800] "GET /patrol/api/safety/dict?type=accident_type& HTTP/1.1" 401 200 "-" "Redmi2510DRK44C----Android--17--2.4.2.0017" "-" 0.005 mg.hc-yun.com`, "mg.hc-yun.com", 0.005},
+		{`10.1.1.1 - - [22/Oct/2026:10:15:01 +0800] "GET /x HTTP/1.1" 504 160 "-" "UA" "198.51.100.9" 60.001 0.000 API.example.com:8443`, "api.example.com", 60.001},
+		{`10.1.1.1 - - [22/Oct/2026:10:15:01 +0800] "GET /x HTTP/1.1" 200 1 "-" "UA" rt=1.250 host=shop.example.com`, "shop.example.com", 1.25},
+		// 真正的 vhost_combined：开头是域名，行尾没有附加字段
+		{`www.example.com:443 203.0.113.5 - - [22/Oct/2026:10:15:01 +0800] "GET / HTTP/2.0" 200 5 "-" "x"`, "www.example.com", 0},
+		// 行尾的 IP（上游地址）不是站点名
+		{`10.1.1.1 - - [22/Oct/2026:10:15:01 +0800] "GET /x HTTP/1.1" 200 1 "-" "UA" "-" 0.010 10.0.0.8:8080`, "", 0.01},
+	} {
+		ev, ok := p.Parse(c.line)
+		if !ok {
+			t.Fatalf("解析失败: %s", c.line)
+		}
+		if ev.Host != c.host || ev.ReqTime != c.reqTime {
+			t.Errorf("host=%q reqtime=%v，期望 %q %v：%s", ev.Host, ev.ReqTime, c.host, c.reqTime, c.line)
+		}
+	}
+}
+
 func TestCustomLogFormat(t *testing.T) {
 	format := `$remote_addr - $remote_user [$time_local] "$request" $status $body_bytes_sent "$http_referer" "$http_user_agent" "$http_x_forwarded_for" $request_time $host`
 	p := mustAuto(t, "nginx", format)

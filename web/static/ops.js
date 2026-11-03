@@ -1040,8 +1040,13 @@ async function loadLearn() {
   const { enabled, report: r, ai_status: aiStatus } = await api('/api/learn');
   if (aiStatus) meta.ai = aiStatus;
   const lastComp = (r.compliance || []).slice(-1)[0];
+  const nets = r.intranet || [];
   $('#lnKpis').innerHTML = [
     ['研判样本', num(r.cases), `确认攻击 ${num(r.tp)} · 误报 ${num(r.fp)}`],
+    // 不需要人工结论、直接从原始日志学到的内容
+    ['日志自动学习', num(nets.length), nets.length
+      ? `内网网段 ${nets.slice(0, 2).map((n) => esc(n.prefix)).join('、')}${nets.length > 2 ? ` 等 ${num(nets.length)} 个` : ''}`
+      : '从防火墙安全域识别内网网段'],
     ['自动生效', num(r.applied.rule + r.applied.target + r.applied.escalated),
       enabled ? `下调 ${num(r.applied.rule + r.applied.target)} · 升级 ${num(r.applied.escalated)} 次（${esc(fmtShort(r.applied.since))} 启动以来）` : '未启用自学习'],
     ['待确认建议', num(r.suggestions.length), '采纳后创建误报抑制'],
