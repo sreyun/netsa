@@ -643,6 +643,7 @@ func (s *Server) oidcCallback(w http.ResponseWriter, r *http.Request) {
 	id, err := s.OIDC.Finish(r.Context(), state, q.Get("code"))
 	switch {
 	case errors.Is(err, sso.ErrDenied):
+		log.Printf("[oidc] 登录被拒绝: %v", err)
 		fail("denied")
 		return
 	case err != nil:

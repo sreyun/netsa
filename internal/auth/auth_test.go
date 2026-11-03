@@ -319,3 +319,103 @@ func TestExternalAccounts(t *testing.T) {
 		t.Fatalf("账号列表应显示外部来源: %+v", m.Users())
 	}
 }
+
+// 目录服务和身份提供方的用户名不区分大小写：只差大小写的必须是同一个账号，也不能和本地账号混淆。
+func TestExternalNamesIgnoreCase(t *testing.T) {
+	m, initial, err := New(Options{File: filepath.Join(t.TempDir(), "users.json"), TTL: time.Hour})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var seen []string
+	role := "admin"
+	m.SetExternalAuth(func(user, password string) (string, error) {
+		seen = append(seen, user)
+		if password != "dir-pass" {
+			return "", ErrBadCredentials
+		}
+		return role, nil
+	})
+	count := func(name string) (n int) {
+		for _, u := range m.Users() {
+			if strings.EqualFold(u.Name, name) {
+				n++
+			}
+		}
+		return
+	}
+	_, token, err := m.Login("Alice", "dir-pass", "1.1.1.1", "ua")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s, _, err := m.Login("ALICE", "dir-pass", "1.1.1.1", "ua"); err != nil || s.User != "alice" {
+		t.Fatalf("应是同一个账号: %+v %v", s, err)
+	}
+	if count("alice") != 1 {
+		t.Fatalf("不应产生多个账号: %+v", m.Users())
+	}
+	if len(seen) != 2 || seen[0] != "Alice" || seen[1] != "ALICE" {
+		t.Fatalf("目录服务应收到用户输入的原样: %v", seen)
+	}
+	// 用任意一种大小写登录后降级，都要吊销之前的会话
+	role = "viewer"
+	if _, _, err := m.Login("aLiCe", "dir-pass", "1.1.1.1", "ua"); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, ok := m.Verify(token); ok {
+		t.Fatal("降级后旧会话应失效")
+	}
+	// 换大小写不能绕过失败锁定
+	var locked *LockedError
+	for i, name := range []string{"bOB", "BoB", "boB", "BOb", "bob", "BOB"} {
+		_, _, err := m.Login(name, "wrong", "2.2.2.2", "ua")
+		if i < pairMaxFail && !errors.Is(err, ErrBadCredentials) {
+			t.Fatalf("第 %d 次: %v", i, err)
+		}
+		if i == pairMaxFail && !errors.As(err, &locked) {
+			t.Fatalf("换大小写不应绕过锁定: %v", err)
+		}
+	}
+	// 本地账号：目录账号不能用只差大小写的名字绕过“本地优先”
+	before := len(seen)
+	if _, _, err := m.Login("ADMIN", "dir-pass", "3.3.3.3", "ua"); !errors.Is(err, ErrBadCredentials) || len(seen) != before {
+		t.Fatalf("不应走外部认证: %v", err)
+	}
+	if s, _, err := m.Login("ADMIN", initial, "3.3.3.4", "ua"); err != nil || s.User != "admin" {
+		t.Fatalf("本地账号: %+v %v", s, err)
+	}
+	if count("admin") != 1 {
+		t.Fatalf("不应产生同名账号: %+v", m.Users())
+	}
+	// 单点登录同样统一大小写，也不能建成与本地账号只差大小写的名字
+	if _, _, err := m.ExternalLogin("Admin", "admin", "4.4.4.4", "ua"); err == nil {
+		t.Fatal("不能接管本地账号")
+	}
+	if _, _, err := m.ExternalLogin("Carol@Example.com", "viewer", "4.4.4.4", "ua"); err != nil {
+		t.Fatal(err)
+	}
+	if s, _, err := m.ExternalLogin("carol@example.COM", "viewer", "4.4.4.4", "ua"); err != nil || s.User != "carol@example.com" {
+		t.Fatalf("单点登录: %+v %v", s, err)
+	}
+	if count("carol@example.com") != 1 {
+		t.Fatalf("不应产生多个账号: %+v", m.Users())
+	}
+}
+
+// 本地账号允许大写；开启目录服务后，只差大小写的目录账号不能建成新账号。
+func TestExternalCannotShadowMixedCaseLocal(t *testing.T) {
+	m, _, err := New(Options{File: filepath.Join(t.TempDir(), "users.json"), TTL: time.Hour})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := m.CreateUser("Ops", "viewer", "Strong-pass-456"); err != nil {
+		t.Fatal(err)
+	}
+	calls := 0
+	m.SetExternalAuth(func(user, password string) (string, error) { calls++; return "admin", nil })
+	if _, _, err := m.Login("ops", "dir-pass", "1.1.1.1", "ua"); !errors.Is(err, ErrBadCredentials) || calls != 0 {
+		t.Fatalf("不应走外部认证: %v calls=%d", err, calls)
+	}
+	if s, _, err := m.Login("Ops", "Strong-pass-456", "1.1.1.1", "ua"); err != nil || s.User != "Ops" {
+		t.Fatalf("本地账号: %+v %v", s, err)
+	}
+}

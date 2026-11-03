@@ -30,6 +30,7 @@ on:
 
 permissions:
   contents: read
+  id-token: write # 镜像签名（cosign 无密钥签名）
 
 concurrency:
   group: docker-${{ github.ref }}
@@ -180,6 +181,7 @@ jobs:
           echo "镜像可执行，规则加载正常，版本 ${built}"
 
       - name: 构建并推送（多架构）
+        id: build
         uses: docker/build-push-action@v6
         with:
           context: .
@@ -221,6 +223,17 @@ jobs:
           artifact-name: netsa-${{ steps.meta.outputs.version }}.spdx.json
           upload-release-assets: false
 
+      - name: 安装 cosign
+        continue-on-error: true
+        uses: sigstore/cosign-installer@v4.1.2
+
+      - name: 镜像签名
+        id: sign
+        continue-on-error: true
+        env:
+          IMAGE: ${{ env.SWR_REGISTRY }}/${{ env.SWR_NAMESPACE }}/${{ env.IMAGE_NAME }}@${{ steps.build.outputs.digest }}
+        run: cosign sign --yes "$IMAGE"
+
       - name: 保存扫描报告
         if: always()
         continue-on-error: true
@@ -241,7 +254,7 @@ jobs:
             echo
             echo "架构：\`${PLATFORMS}\`　版本：\`${{ steps.meta.outputs.version }}\`"
             echo
-            echo "漏洞扫描：${{ steps.trivy.outcome }}　SBOM：${{ steps.sbom.outcome }}（见本次运行的 Artifacts）"
+            echo "漏洞扫描：${{ steps.trivy.outcome }}　SBOM：${{ steps.sbom.outcome }}（见本次运行的 Artifacts）　签名：${{ steps.sign.outcome }}"
             echo
             echo "拉取：\`docker pull ${SWR_REGISTRY}/${SWR_NAMESPACE}/${IMAGE_NAME}:${{ steps.meta.outputs.version }}\`"
           } >> "$GITHUB_STEP_SUMMARY"

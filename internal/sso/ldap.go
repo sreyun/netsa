@@ -20,12 +20,15 @@ import (
 var ErrDenied = errors.New("账号没有平台访问权限，请联系管理员配置组映射")
 
 // MapRole 把外部账号的组映射为平台角色，取最高的权限；匹配不到时使用默认角色。组名比较不区分大小写，
-// 既可以写完整的 DN，也可以只写 CN。
+// 既可以写完整的 DN 或路径，也可以只写短名（CN 或路径的最后一段）。
 func MapRole(m config.RoleMap, groups []string) string {
 	has := func(list []string) bool {
 		for _, want := range list {
+			if want == "" {
+				continue
+			}
 			for _, g := range groups {
-				if strings.EqualFold(want, g) || strings.EqualFold(want, groupCN(g)) {
+				if strings.EqualFold(want, g) || strings.EqualFold(want, groupShortName(g)) {
 					return true
 				}
 			}
@@ -43,12 +46,25 @@ func MapRole(m config.RoleMap, groups []string) string {
 	return m.DefaultRole
 }
 
-func groupCN(dn string) string {
-	first, _, _ := strings.Cut(dn, ",")
+// groupShortName 取组的短名：DN 取 CN；Keycloak 默认写完整路径（/部门/soc），取最后一段。
+func groupShortName(g string) string {
+	if strings.HasPrefix(g, "/") {
+		p := strings.TrimRight(g, "/")
+		return p[strings.LastIndex(p, "/")+1:]
+	}
+	first, _, _ := strings.Cut(g, ",")
 	if k, v, ok := strings.Cut(first, "="); ok && strings.EqualFold(strings.TrimSpace(k), "cn") {
 		return strings.TrimSpace(v)
 	}
-	return dn
+	return g
+}
+
+// deniedError 说明账号带了哪些组，管理员才能看出是组映射写错了，还是身份提供方根本没有发组。
+func deniedError(groups []string) error {
+	if len(groups) > 20 {
+		groups = groups[:20]
+	}
+	return fmt.Errorf("%w（收到的组: %q）", ErrDenied, groups)
 }
 
 // LDAP 用 LDAP 校验账号密码。
@@ -140,9 +156,10 @@ func (l *LDAP) Authenticate(user, password string) (string, error) {
 	if err := c.Bind(entry.DN, password); err != nil {
 		return "", errors.New("用户名或密码错误")
 	}
-	role := MapRole(l.cfg.RoleMap, entry.GetAttributeValues(l.cfg.GroupAttr))
+	groups := entry.GetAttributeValues(l.cfg.GroupAttr)
+	role := MapRole(l.cfg.RoleMap, groups)
 	if role == "" {
-		return "", ErrDenied
+		return "", deniedError(groups)
 	}
 	return role, nil
 }

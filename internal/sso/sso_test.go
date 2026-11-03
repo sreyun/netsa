@@ -10,6 +10,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -203,11 +204,38 @@ func TestMapRole(t *testing.T) {
 		{[]string{"staff"}, "", "viewer"},
 		{[]string{"sales"}, "", ""},
 		{nil, "viewer", "viewer"},
+		// Keycloak 默认写完整路径
+		{[]string{"/soc"}, "", "analyst"},
+		{[]string{"/dept/SOC"}, "", "analyst"},
+		{[]string{"/soc/"}, "", "analyst"},
+		{[]string{"/soc/sub"}, "", ""},
+		{[]string{"/"}, "", ""},
+		// 不以 / 开头的不当作路径
+		{[]string{"dept/soc"}, "", ""},
 	} {
 		m.DefaultRole = c.def
 		if got := MapRole(m, c.groups); got != c.want {
 			t.Errorf("%v: %q，期望 %q", c.groups, got, c.want)
 		}
+	}
+	// 配置里写完整路径时只匹配这一个路径
+	full := config.RoleMap{AdminGroups: []string{"/dept/admins"}}
+	if got := MapRole(full, []string{"/dept/admins"}); got != "admin" {
+		t.Errorf("完整路径: %q", got)
+	}
+	if got := MapRole(full, []string{"/other/admins"}); got != "" {
+		t.Errorf("其他路径下的同名组不应匹配: %q", got)
+	}
+	// 空的配置项不能匹配空的组名
+	if got := MapRole(config.RoleMap{AdminGroups: []string{""}}, []string{"/", ""}); got != "" {
+		t.Errorf("空组名不应匹配: %q", got)
+	}
+}
+
+func TestDeniedErrorListsGroups(t *testing.T) {
+	err := deniedError([]string{"/sales"})
+	if !errors.Is(err, ErrDenied) || !strings.Contains(err.Error(), "/sales") {
+		t.Fatalf("应包含收到的组: %v", err)
 	}
 }
 

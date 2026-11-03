@@ -407,7 +407,14 @@ func (o *OIDC) identity(claims map[string]any) (*Identity, error) {
 	}
 	role := MapRole(o.cfg.RoleMap, groups)
 	if role == "" {
-		return nil, ErrDenied
+		return nil, fmt.Errorf("账号 %q: %w", clipName(user), deniedError(groups))
 	}
 	return &Identity{Username: user, Role: role}, nil
+}
+
+func clipName(s string) string {
+	if len(s) > 64 {
+		return s[:64]
+	}
+	return s
 }

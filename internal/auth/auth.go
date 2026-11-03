@@ -338,6 +338,10 @@ func (m *Manager) Login(user, password, ip, agent string) (*Session, string, err
 	now := m.now()
 	m.mu.Lock()
 	m.reloadIfChanged()
+	typed := user
+	if local := m.users[user]; m.ext != nil && (local == nil || local.External != "") {
+		user = canonicalExternalName(user)
+	}
 	for _, k := range []struct{ key, reason string }{
 		{"ip:" + ip, "来源 IP 已锁定"}, {"p:" + user + "|" + ip, "账号在该来源已锁定"}, {"u:" + user, "账号已锁定"},
 	} {
@@ -354,6 +358,7 @@ func (m *Manager) Login(user, password, ip, agent string) (*Session, string, err
 		hash, external = u.Hash, u.External
 	}
 	ext := m.ext
+	conflict := u == nil && m.foldConflictLocked(user, extSourceLDAP)
 	m.mu.Unlock()
 
 	// 哈希计算耗时较长，在锁外进行；账号不存在时同样计算一次，避免通过响应时间探测账号
@@ -362,9 +367,10 @@ func (m *Manager) Login(user, password, ip, agent string) (*Session, string, err
 	switch {
 	case u != nil && external == "":
 		ok = VerifyPassword(hash, password)
-	case ext != nil && (u == nil || external == extSourceLDAP) && validExternalName(user):
-		// 本地账号优先，避免目录服务里的同名账号接管本地管理员
-		role, err := ext(user, password)
+	case ext != nil && !conflict && (u == nil || external == extSourceLDAP) && validExternalName(user):
+		// 本地账号优先，避免目录服务里的同名账号接管本地管理员。目录服务收到的是用户输入的原样，
+		// 个别目录的属性区分大小写
+		role, err := ext(typed, password)
 		if err != nil {
 			if !errors.Is(err, ErrBadCredentials) {
 				log.Printf("[auth] 外部认证失败（%s）: %v", user, err)
@@ -1021,6 +1027,21 @@ func (m *Manager) SetExternalAuth(f ExternalAuth) {
 
 func validExternalName(name string) bool { return nameRe.MatchString(name) }
 
+// canonicalExternalName 统一外部账号名的大小写。目录服务和身份提供方的用户名不区分大小写，不统一的话
+// Alice 和 alice 会变成两个账号：删除或降级其中一个后另一个仍然有效，失败锁定也能靠换大小写绕过。
+func canonicalExternalName(name string) string { return strings.ToLower(name) }
+
+// foldConflictLocked 判断是否已有只是大小写不同、来源也不同的账号（调用方持锁）。
+// 外部账号不能建成与本地账号看起来相同的名字，否则审计记录里无法区分。
+func (m *Manager) foldConflictLocked(name, source string) bool {
+	for n, u := range m.users {
+		if u.External != source && strings.EqualFold(n, name) {
+			return true
+		}
+	}
+	return false
+}
+
 // upsertExternalLocked 创建或更新外部账号（调用方持锁）。角色降低时吊销已签发的会话。
 func (m *Manager) upsertExternalLocked(name, role, source string, now time.Time) *User {
 	u := m.users[name]
@@ -1043,11 +1064,12 @@ func (m *Manager) ExternalLogin(name, role, ip, agent string) (*Session, string,
 	if !validExternalName(name) || !ValidRole(role) {
 		return nil, "", fmt.Errorf("外部账号名 %q 或角色不符合要求", clipUTF8(name, 64))
 	}
+	name = canonicalExternalName(name)
 	now := m.now()
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.reloadIfChanged()
-	if u := m.users[name]; u != nil && u.External != extSourceOIDC {
+	if m.foldConflictLocked(name, extSourceOIDC) {
 		m.recordLocked(name, ip, agent, false, "外部身份与同名的本地账号冲突")
 		return nil, "", fmt.Errorf("账号 %s 已存在，不能用单点登录接管", name)
 	}
