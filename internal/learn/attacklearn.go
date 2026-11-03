@@ -451,12 +451,39 @@ func requestShape(ev *model.Event) (string, bool) {
 	if lp == "/" && query == "" || lp == "/favicon.ico" || lp == "/robots.txt" {
 		return "", false
 	}
-	for _, e := range staticExt {
-		if strings.HasSuffix(lp, e) {
-			return "", false
+	if isStatic(lp) {
+		return "", false
+	}
+	var keys []string
+	for _, kv := range strings.Split(query, "&") {
+		k, _, _ := strings.Cut(kv, "=")
+		if k != "" && len(keys) < 16 && !slices.Contains(keys, k) {
+			keys = append(keys, strings.ToLower(k))
 		}
 	}
-	segs := strings.Split(lp, "/")
+	sort.Strings(keys)
+	shape := ev.Method + " " + pathShape(lp)
+	if len(keys) > 0 {
+		shape += "?" + strings.Join(keys, "&")
+	}
+	if len(shape) > 300 {
+		return "", false
+	}
+	return shape, true
+}
+
+func isStatic(lowerPath string) bool {
+	for _, e := range staticExt {
+		if strings.HasSuffix(lowerPath, e) {
+			return true
+		}
+	}
+	return false
+}
+
+// pathShape 把小写路径中的纯数字段、长十六进制段、超长段替换为占位符，同一接口的不同对象归为一种形态。
+func pathShape(lowerPath string) string {
+	segs := strings.Split(lowerPath, "/")
 	for i, s := range segs {
 		switch {
 		case s == "":
@@ -468,22 +495,7 @@ func requestShape(ev *model.Event) (string, bool) {
 			segs[i] = "{s}"
 		}
 	}
-	var keys []string
-	for _, kv := range strings.Split(query, "&") {
-		k, _, _ := strings.Cut(kv, "=")
-		if k != "" && len(keys) < 16 && !slices.Contains(keys, k) {
-			keys = append(keys, strings.ToLower(k))
-		}
-	}
-	sort.Strings(keys)
-	shape := ev.Method + " " + strings.Join(segs, "/")
-	if len(keys) > 0 {
-		shape += "?" + strings.Join(keys, "&")
-	}
-	if len(shape) > 300 {
-		return "", false
-	}
-	return shape, true
+	return strings.Join(segs, "/")
 }
 
 func allDigits(s string) bool {

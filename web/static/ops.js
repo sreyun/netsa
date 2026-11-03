@@ -1043,11 +1043,13 @@ async function loadLearn() {
   const lastComp = (r.compliance || []).slice(-1)[0];
   const nets = r.intranet || [];
   const atk = r.attack || { auto_sources: [], auto_total: 0, campaigns: [], learned_rules: [], candidates: 0 };
+  const prof = r.profile || { params: 0, mature: 0, free_text: 0, strict: 0, samples: [], sites: [], site_total: 0, weak: 0, anomaly: 0, inapplicable: 0 };
+  const products = prof.sites.reduce((n, s) => n + s.products.length, 0);
   $('#lnKpis').innerHTML = [
     ['研判样本', num(r.cases), `确认攻击 ${num(r.tp)} · 误报 ${num(r.fp)}`],
     // 不需要人工结论、直接从原始日志与 AI 研判学到的内容
-    ['日志自动学习', num(nets.length + atk.auto_total + atk.campaigns.length + atk.learned_rules.length),
-      `内网网段 ${num(nets.length)} · 攻击源 ${num(atk.auto_total)} · 攻击活动 ${num(atk.campaigns.length)} · 观察规则 ${num(atk.learned_rules.length)}`],
+    ['日志自动学习', num(nets.length + atk.auto_total + atk.campaigns.length + atk.learned_rules.length + prof.mature + products),
+      `内网网段 ${num(nets.length)} · 攻击源 ${num(atk.auto_total)} · 攻击活动 ${num(atk.campaigns.length)} · 观察规则 ${num(atk.learned_rules.length)} · 参数 ${num(prof.mature)} · 站点产品 ${num(products)}`],
     ['自动生效', num(r.applied.rule + r.applied.target + r.applied.escalated),
       enabled ? `下调 ${num(r.applied.rule + r.applied.target)} · 升级 ${num(r.applied.escalated)} 次（${esc(fmtShort(r.applied.since))} 启动以来）` : '未启用自学习'],
     ['待确认建议', num(r.suggestions.length), '采纳后创建误报抑制'],
@@ -1062,7 +1064,7 @@ async function loadLearn() {
         <td class="nowrap">${canOperate() ? `<button type="button" class="btn" data-ln="apply" data-id="${esc(s.id)}">采纳</button> <button type="button" class="btn" data-ln="dismiss" data-id="${esc(s.id)}">忽略</button>` : ''}</td></tr>`).join('')}</tbody></table>`
     : '<div class="muted">暂无建议。分析员把事件处置为“误报”后，同一规则在同一目标上反复误报、或同一来源多次被整体判为误报时，会在这里提示。</div>';
   // 从日志与 AI 自动学到的攻击行为
-  const AUTO_KIND = { evidence: '成功证据', ai: '模型研判', campaign: '同一攻击活动' };
+  const AUTO_KIND = { evidence: '成功证据', ai: '模型研判', campaign: '同一攻击活动', callback: '攻击后回连' };
   const atkEmpty = (s) => `<div class="muted">${s}</div>`;
   $('#lnAttack').innerHTML = `<h4>自动确认的攻击源 <small class="muted">共 ${num(atk.auto_total)} 个，显示最近 ${num(atk.auto_sources.length)} 个</small></h4>`
     + (atk.auto_sources.length
@@ -1084,6 +1086,22 @@ async function loadLearn() {
           <td class="num">${num(x.hits)}</td><td class="nowrap muted">${esc(fmtShort(x.time))}</td>
           <td class="nowrap">${isAdmin() ? `<button type="button" class="btn" data-ln="${x.disabled ? 'enable' : 'disable'}" data-rule="${esc(x.id)}">${x.disabled ? '启用' : '停用'}</button>` : (x.disabled ? '已停用' : '')}</td></tr>`).join('')}</tbody></table></div>`
       : atkEmpty(`暂无。同一种请求形态被 3 个以上已确认攻击源使用、没有命中任何规则、正常访客从未使用时，生成低危观察规则。`));
+  // 从正常流量学到的参数取值与站点产品
+  const SHAPE = { text: '普通文字', strict: '数字 / 编号 / 单个词' };
+  $('#lnProfile').innerHTML = `<div class="ln-policy">正在统计 ${num(prof.params)} 个参数，已生效 ${num(prof.mature)} 个（普通文字 ${num(prof.free_text)} · 数字 / 编号 ${num(prof.strict)}）`
+      + ` · 本次启动以来：按普通文字降为低危 ${num(prof.weak)} 次 · 取值异常 ${num(prof.anomaly)} 次 · 产品不存在判为不适用 ${num(prof.inapplicable)} 次</div>`
+    + `<h4>站点与识别出的产品 <small class="muted">共 ${num(prof.site_total)} 个站点；正常访问满 300 次、来自 20 个以上网段后参与判断</small></h4>`
+    + (prof.sites.length
+      ? `<div class="scroll"><table class="table"><thead><tr><th>站点</th><th>正常访问</th><th>来源网段</th><th>识别出的产品 / 开发语言</th><th>状态</th></tr></thead><tbody>${prof.sites.map((s) => `<tr>
+          <td class="mono nowrap">${esc(s.host)}</td><td class="num">${num(s.reqs)}</td><td class="num">${num(s.nets)}${s.nets >= 32 ? '+' : ''}</td>
+          <td><div class="cell-chips">${s.products.length ? s.products.map((p) => `<span class="chip" title="${esc(`例：${p.sample}（${p.nets} 个网段的访客，${fmtShort(p.first)} 起）`)}">${esc(p.name)}</span>`).join(' ') : '<span class="muted">未识别出特定产品</span>'}</div></td>
+          <td class="nowrap ${s.mature ? '' : 'muted'}">${s.mature ? '参与判断' : '访问量不足'}</td></tr>`).join('')}</tbody></table></div>`
+      : atkEmpty('暂无。正常访客成功访问的路径中出现 /wp-content/、.php、.do 这类产品或开发语言的特征时识别。'))
+    + '<h4>已生效的参数 <small class="muted">示例，正常访问最多的在前</small></h4>'
+    + (prof.samples.length
+      ? `<div class="scroll"><table class="table"><thead><tr><th>站点 路径?参数</th><th>平时的取值</th><th>正常访问</th><th>来源网段</th></tr></thead><tbody>${prof.samples.map((p) => `<tr>
+          <td class="mono">${esc(p.key)}</td><td class="nowrap">${esc(SHAPE[p.shape] || p.shape)}</td><td class="num">${num(p.n)}</td><td class="num">${num(p.nets)}${p.nets >= 32 ? '+' : ''}</td></tr>`).join('')}</tbody></table></div>`
+      : atkEmpty('暂无。同一个参数有 200 次以上正常取值、来自 20 个以上网段后生效。'));
   $('#lnAnoms').innerHTML = r.anomalies.length
     ? `<table class="table"><tbody>${r.anomalies.map((a) => `<tr><td class="nowrap muted">${esc(fmtShort(a.time))}</td><td class="nowrap">${badge(a.severity)} ${esc(LN_ANOM[a.kind] || a.kind)}</td>
         <td><b>${esc(a.title)}</b><div class="muted">${esc(a.detail)}</div></td></tr>`).join('')}</tbody></table>`

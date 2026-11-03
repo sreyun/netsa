@@ -3,6 +3,7 @@ module netsa
 go 1.25.0
 
 require (
+	github.com/corazawaf/libinjection-go v0.3.5
 	github.com/go-asn1-ber/asn1-ber v1.5.8-0.20250403174932-29230038a667
 	github.com/go-ldap/ldap/v3 v3.4.11
 	github.com/jackc/pgx/v5 v5.9.2

@@ -85,6 +85,7 @@ func (l *Learner) Refresh(now time.Time) {
 	l.mu.Lock()
 	changes := l.recomputeLocked(now, "")
 	l.pruneAttackLocked(now, l.opt.EscalateDays)
+	l.pruneProfileLocked(now)
 	l.mu.Unlock()
 	l.emit(changes)
 }

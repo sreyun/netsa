@@ -152,6 +152,20 @@ const (
 	per = model.PhasePersistence
 )
 
+// phpFuncsIO、phpFuncsCB 是改编自 OWASP CRS 933150 函数表的 PHP 危险函数（code-php 已覆盖的除外），带括号出现时才算调用。
+// 去掉了 copy、glob、rename、touch 这类普通英文单词：“photo copy (2).jpg”这样的文件名会误报。
+// 分成两组：每条规则的函数名不超过预过滤能枚举的个数（maxExact），否则预过滤只剩一个括号，带括号的正常请求都要跑正则。
+const (
+	phpFuncsIO = `fsockopen|pfsockopen|file_get_contents|fopen|readfile|show_source|highlight_file|move_uploaded_file|` +
+		`stream_socket_client|stream_context_create|stream_get_contents|curl_exec|curl_init|symlink|mkdir|rmdir|unlink|tempnam|` +
+		`tmpfile|scandir|opendir|readdir|chgrp|getenv|putenv|get_defined_vars|ini_get_all|ini_set|ini_alter|` +
+		`posix_getpwuid|posix_kill|posix_mkfifo|posix_setuid|posix_uname|escapeshellcmd|escapeshellarg`
+	phpFuncsCB = `array_filter|array_map|array_reduce|array_walk|array_walk_recursive|array_diff_ukey|array_udiff|array_uintersect|` +
+		`bzdecompress|convert_uudecode|gzdecode|gzuncompress|hex2bin|mb_ereg_replace|ob_start|parse_str|preg_replace|` +
+		`preg_replace_callback|register_shutdown_function|register_tick_function|set_error_handler|set_exception_handler|` +
+		`unserialize|usort|uasort|uksort|var_dump|var_export|print_r`
+)
+
 var builtinRules = []Rule{
 	// ---------------- SQL 注入 ----------------
 	rule("sqli-union", "UNION联合查询注入", CatSQLi, "high", ex, "uri", `\bunion\s+(all\s+|distinct\s+)?\(?\s*select\b`),
@@ -164,6 +178,8 @@ var builtinRules = []Rule{
 	rule("sqli-stacked", "堆叠查询注入", CatSQLi, "high", ex, "uri", `['"\d\)]\s*;\s*(drop|alter|create|truncate|insert|update|delete|exec|execute|declare|shutdown)\b`),
 	rule("sqli-func", "SQL函数注入特征", CatSQLi, "high", ex, "uri", `\b(concat(_ws)?|group_concat|char|chr|substr(ing)?|ascii|ord|hex|unhex|mid|version|database|schema|current_user)\s*\(.*\bselect\b|@@(version|datadir|hostname|basedir)\b|\bselect\b.+\bfrom\b.+\bwhere\b`),
 	rule("sqli-comment", "SQL注释截断", CatSQLi, "high", ex, "uri", `['"\)]\s*(--|#)(\s|$|-|\+)`),
+	// 改编自 CRS 942550 / 942151：PostgreSQL 的类型转换与 JSON 运算，libinjection 识别不了这类写法
+	rule("sqli-pgcast", "PostgreSQL类型转换注入", CatSQLi, "high", ex, "uri", `['"\)]\s*::\s*(int|integer|bigint|smallint|numeric|text|varchar|char|json|jsonb|bool|boolean|regclass|oid)\b`),
 
 	// ---------------- XSS ----------------
 	rule("xss-script", "Script标签注入", CatXSS, "high", ex, "uri", `<\s*/?\s*script\b`),
@@ -181,11 +197,26 @@ var builtinRules = []Rule{
 
 	// ---------------- 命令 / 代码执行 ----------------
 	rule("cmd-inject", "系统命令注入", CatCmdExec, "high", ex, "uri", `(;|\|\|?|&&|\$\(|`+"`"+`)\s*(id|whoami|uname|cat|ls|dir|wget|curl|tftp|nc|ncat|netcat|bash|sh|zsh|ping|nslookup|dig|echo|chmod|chown|rm|python[23]?|perl|php|ruby|powershell|cmd|certutil|bitsadmin|telnet|busybox|ifconfig|ipconfig|net|systeminfo|tasklist|ps|hostname|sleep)(\s|$|[;|&)<>]|`+"`"+`)`),
+	// 改编自 OWASP CRS 932235 / 932260 的命令表：只取不是普通英文单词的命令；find、cd、head 这类常见单词只在跟着绝对路径时算
+	rule("cmd-inject-ext", "系统命令注入", CatCmdExec, "high", ex, "uri", `(;|\|\|?|&&|\$\(|`+"`"+`|\n)\s*((awk|gawk|sed|lua|base64|xxd|printenv|crontab|socat|netstat|useradd|usermod|gunzip|zcat|bzcat|xzcat|zstdcat|scp|ssh|sudo|nohup|setsid|xargs|chattr|pkill|killall|lsof|getent|openssl|gcc|c89|c99|tclsh|whereis|vim?|nano|python3?\.\d+)(\s|$|[;|&)<>]|`+"`"+`)|(find|cd|head|tail|more|less|cut|sort|file|stat|tac|nl|od|column|fold|touch|tee|cp|mv)\s+(-\S+\s+)*/)`),
+	// 改编自 CRS 932140 与 PowerShell 命令表：Windows FOR 循环执行命令、PowerShell 下载执行、系统自带程序的滥用（LOLBins）
+	rule("cmd-win-for", "Windows命令注入", CatCmdExec, "high", ex, "uri", `\bfor\s+(/[dflr]\s+([a-z]:\\\S*\s+)?)*%%?[a-z]\w*\s+in\s*\(.*\)\s*do\b`),
+	rule("cmd-windows", "Windows命令注入", CatCmdExec, "high", ex, "uri", `\biex\s*\(|\b(invoke-expression|invoke-webrequest|invoke-restmethod|start-process|downloadstring|downloadfile|add-mppreference|set-mppreference)\b|new-object\s+(system\.)?net\.webclient|\bcertutil(\.exe)?\s+-(urlcache|decode)|\bbitsadmin(\.exe)?\s+/transfer|\bmshta(\.exe)?\s+(https?|javascript|vbscript):|\bregsvr32(\.exe)?\s+/s|\brundll32(\.exe)?\s+\S+,`),
 	rule("cmd-download", "下载执行恶意载荷", CatCmdExec, "critical", ex, "uri", `\b(wget|curl|tftp|lwp-download)\b.{0,40}(https?|ftp)://|\b(wget|curl)\s+-[a-z]*\s|\bchmod\s+\+?[0-7x]{1,4}\s|/tmp/[a-z0-9._-]+\s*;\s*(sh|\./)|\bbusybox\s+(wget|tftp)`),
 	rule("cmd-shell", "反弹Shell/命令解释器调用", CatCmdExec, "critical", ex, "uri", `/bin/(ba|z|da|c|tc)?sh\b|\bcmd(\.exe)?\s*/c\b|powershell(\.exe)?\s+-|/dev/(tcp|udp)/|\bnc(\.exe)?\s+-[a-z]*e\b|\bbash\s+-i\b|\bsh\s+-c\b|\bmkfifo\b|\bpython[23]?\s+-c\b`),
 	rule("cmd-ifs", "IFS空格绕过", CatCmdExec, "high", ex, "uri", `\$\{ifs\}|\$ifs\$9|\$\{ifs%`),
 	rule("code-php", "PHP代码执行", CatCmdExec, "high", ex, "uri", `\b(eval|assert|system|exec|shell_exec|passthru|popen|proc_open|pcntl_exec|call_user_func(_array)?|create_function|file_put_contents|fwrite|fputs|base64_decode|gzinflate|str_rot13|phpinfo)\s*\(`),
 	rule("code-java", "Java代码执行", CatCmdExec, "critical", ex, "uri", `java\.lang\.(runtime|processbuilder|system|class)\b|getruntime\s*\(|processbuilder|javax\.script|\bnashorn\b|\bnew\s+java\.`),
+	// 改编自 CRS 933150 的 PHP 函数表：只取原有规则没有、正常请求里不会带括号出现的函数；
+	// 以及 CRS 933180 / 933210 的变量函数调用 $a(1)、(system)('id') 这类 WebShell 常用的混淆写法
+	rule("code-php-ext", "PHP危险函数调用", CatCmdExec, "high", ex, "uri", `\b(`+phpFuncsIO+`)\s*\(`),
+	rule("code-php-cb", "PHP危险函数调用", CatCmdExec, "high", ex, "uri", `\b(`+phpFuncsCB+`)\s*\(`),
+	rule("code-php-var", "PHP变量函数调用", CatCmdExec, "high", ex, "uri", `(^|[^\w$])\$\$?[a-z_]\w*\(`),
+	rule("code-php-wrap", "PHP变量函数调用", CatCmdExec, "high", ex, "uri", `\(\s*['"]?(eval|assert|system|exec|shell_exec|passthru|popen|proc_open)['"]?\s*\)\s*\(`),
+	// 改编自 CRS 944130 的 Java 类名表：去掉 java.lang.String 这类正常文档里也会出现的类；按前缀匹配（java.io.InputStreamReader 同样命中）
+	rule("code-java-class", "Java危险类引用", CatCmdExec, "high", ex, "uri", `\b(com\.opensymphony\.xwork2|com\.sun\.org\.apache|freemarker\.(core|template|ext\.rhino)|java\.io\.(bufferedinputstream|bufferedreader|bytearrayinputstream|bytearrayoutputstream|chararrayreader|datainputstream|file|fileoutputstream|filepermission|filewriter|filterinputstream|filteroutputstream|filterreader|inputstream|linenumberreader|objectinputstream|objectoutputstream|outputstream|pipedoutputstream|pipedreader|printstream|pushbackinputstream|reader|stringreader)|java\.lang\.(process|reflect|runtime|system|class)|java\.net\.(httpurlconnection|jarurlconnection|datagramsocket|multicastsocket|serversocket|socket|url)|java\.nio\.file|java\.beans\.xmldecoder?|javassist|javax\.naming\.initialcontext|javax\.script\.scriptenginemanager|javax\.xml\.(parsers|stream)|org\.apache\.(commons|struts2?)|org\.dom4j\.io\.saxreader|org\.jdom2\.input\.saxbuilder|org\.omg\.corba|org\.xml\.sax|propertyutilsbean|sun\.reflect)`),
+	// 改编自 CRS 934100：Node.js 代码注入、node-serialize 反序列化
+	rule("code-node", "Node.js代码注入", CatCmdExec, "high", ex, "uri", `child_process|process\.mainmodule|\brequire\s*\(\s*['"`+"`"+`](fs|net|vm|os)['"`+"`"+`]\s*\)|_\$\$nd_func\$\$_|__js_function|\bnew\s+function\s*\(|\.constructor\s*\(\s*['"`+"`"+`]return\b`),
 
 	// ---------------- 表达式注入 ----------------
 	rule("log4shell", "Log4j JNDI注入(Log4Shell)", CatExpr, "critical", ex, "any", `\$\{\s*(jndi|j\$\{|\$\{(lower|upper|::-|env|sys|date|base64|main|java|k8s|docker|spring|web|bundle|ctx|marker|sd|map)[^}]*\})`),
@@ -196,7 +227,8 @@ var builtinRules = []Rule{
 	// ---------------- SSRF / XXE / 反序列化 ----------------
 	rule("ssrf-metadata", "云元数据访问(SSRF)", CatSSRF, "high", ex, "uri", `169\.254\.169\.254|metadata\.google\.internal|100\.100\.100\.200|metadata\.tencentyun\.com|/latest/meta-data|/computemetadata/`),
 	rule("ssrf-proto", "危险协议SSRF", CatSSRF, "high", ex, "uri", `\b(gopher|dict|ldaps?|tftp|jar|netdoc|sftp)://`),
-	rule("ssrf-internal", "内网地址SSRF探测", CatSSRF, "high", ex, "uri", `[?&][^=&]*=\s*(https?://)?(127\.0\.0\.1|localhost|0\.0\.0\.0|\[::1?\]|0x7f|2130706433|10\.\d{1,3}\.\d{1,3}\.\d{1,3}|192\.168\.\d{1,3}\.\d{1,3}|172\.(1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3})(:\d+)?([/?#&]|$)`),
+	// localhost 的各种写法改编自 CRS 934190
+	rule("ssrf-internal", "内网地址SSRF探测", CatSSRF, "high", ex, "uri", `[?&][^=&]*=\s*(https?://)?(127\.0\.0\.1|localhost[46]?(\.localdomain[46]?)?|ip6-(localhost|loopback)|ipv6-localhost|0\.0\.0\.0|\[::1?\]|\[::ffff:(127\.0\.0\.1|7f00:1)\]|0x7f(000001)?|0177\.0+\.0+\.0*1|017700000001|2130706433|10\.\d{1,3}\.\d{1,3}\.\d{1,3}|192\.168\.\d{1,3}\.\d{1,3}|172\.(1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3})(:\d+)?([/?#&]|$)`),
 	rule("xxe", "XML外部实体注入", CatXXE, "high", ex, "uri", `<!entity|<!doctype[^>]*\[|\bsystem\s+['"](file|http|ftp|php|expect|jar)|xmlns:xi=|<xi:include`),
 	rule("deser-fastjson", "Fastjson反序列化", CatDeser, "critical", ex, "uri", `"?@type"?\s*:\s*"(com\.sun|org\.apache|java\.|com\.alibaba|br\.com|org\.springframework|ch\.qos|com\.mchange|org\.hibernate)`),
 	rule("deser-generic", "反序列化载荷", CatDeser, "high", ex, "uri", `\bro0ab|aced0005|\bysoserial\b|com\.sun\.rowset\.jdbcrowsetimpl|org\.apache\.commons\.collections|templatesimpl|\$\$bcel\$\$|o:\d+:"[a-z_\\]+":\d+:\{`),

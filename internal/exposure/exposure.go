@@ -189,6 +189,61 @@ func (m *Manager) Configured(dstIP string, port int, proto string) bool {
 	return ok
 }
 
+// Own 判断目的地址端口是否为本单位自己对外发布的服务：清单中写明了公网地址的映射（或整个地址已发布），
+// 或由会话证据自动识别。只写了端口的映射与兜底端口（allowed_ports）不区分公网地址，
+// 不能说明某个外部地址属于本单位，不计入——否则内网主机定时连接任意外部地址的 443 端口都会被当成内部调用。
+func (m *Manager) Own(dstIP string, port int, proto string) bool {
+	if m == nil {
+		return false
+	}
+	ip := normIP(dstIP)
+	if ip == "" {
+		return false
+	}
+	if _, ok := m.hosts[ip]; ok {
+		return true
+	}
+	if port <= 0 || port > 65535 {
+		return false
+	}
+	proto = normProto(proto)
+	if _, ok := m.exact[key(ip, port, proto)]; ok {
+		return true
+	}
+	if _, ok := m.exact[key(ip, port, "any")]; ok {
+		return true
+	}
+	return m.isLearned(ip, port, proto)
+}
+
+// OwnIP 判断地址是否为本单位对外发布服务使用的公网地址（任一端口）。内部用户经出口 NAT 访问自己的网站时，
+// Web 日志里的来源就是这个地址。
+func (m *Manager) OwnIP(addr string) bool {
+	if m == nil {
+		return false
+	}
+	ip := normIP(addr)
+	if ip == "" {
+		return false
+	}
+	if _, ok := m.hosts[ip]; ok {
+		return true
+	}
+	for k := range m.exact {
+		if strings.HasPrefix(k, ip+"|") {
+			return true
+		}
+	}
+	m.learnMu.RLock()
+	defer m.learnMu.RUnlock()
+	for _, l := range m.learned {
+		if l.ip == ip {
+			return true
+		}
+	}
+	return false
+}
+
 func (m *Manager) find(ip string, port int, proto string) *config.ExposureService {
 	for i := range m.list {
 		if normIP(m.list[i].PublicIP) == ip && (m.list[i].PublicPort == 0 || m.list[i].PublicPort == port) &&

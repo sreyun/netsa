@@ -8,6 +8,9 @@
 //     上调只针对分析员确认过的攻击来源（有效期内复现），只升低危 / 中危，最多到高危；
 //   - 外部模型的结论不作为样本，只用分析员的结论评估模型的一致率，并把历史人工结论提供给模型作研判参考；
 //   - 会隐藏告警的动作（误报抑制）只生成建议，必须由人确认采纳；
+//   - 从正常流量学习参数的正常取值与站点产品（见 profile.go、site.go）：降级只到低危、仍生成告警，
+//     且要两个相互独立的依据同时成立（参数平时就是普通文字 + 语法分析不构成注入；站点没有该产品 + 请求没有成功），
+//     依据写在告警证据中，学习结果在「自学习」页面展示；
 //   - 每一次自动调整都记入「进化日志」并写入审计链。
 package learn
 
@@ -210,6 +213,7 @@ type Learner struct {
 	auto       map[string]*AutoSource // 自动确认的攻击源（见 attacklearn.go）
 	autoSnap   atomic.Pointer[map[string]AutoSource]
 	atk        attackState
+	prof       profileState // 参数的正常取值与站点产品（见 profile.go、site.go）
 	compHist   []CompPoint
 	dirty      bool
 
@@ -239,6 +243,7 @@ type state struct {
 	Policy    *Policy              `json:"policy,omitempty"`
 	Intranet  []LearnedNet         `json:"intranet,omitempty"`
 	Attack    *attackPersist       `json:"attack,omitempty"`
+	Profile   *profilePersist      `json:"profile,omitempty"`
 }
 
 // Load 读取学习状态（文件不存在时从零开始）。
@@ -302,6 +307,7 @@ func Load(opt Options) (*Learner, error) {
 			if st.Attack != nil {
 				l.loadAttackLocked(*st.Attack)
 			}
+			l.loadProfileLocked(st.Profile)
 			if p := st.Policy; p != nil && p.check() == nil { // 界面设置的策略优先于配置文件
 				l.policy = p
 				l.opt.apply(*p)
@@ -330,6 +336,7 @@ func (l *Learner) Save() error {
 	st.Intranet = l.learnedNetsLocked()
 	ap := l.attackPersistLocked()
 	st.Attack = &ap
+	st.Profile = l.profilePersistLocked()
 	for _, c := range l.cases {
 		st.Cases = append(st.Cases, c)
 	}
@@ -876,6 +883,7 @@ type Report struct {
 	Trend       []WeekStat    `json:"trend"`     // 近 8 周的人工结论，误报占比下降说明检测在变准
 	Intranet    []LearnedNet  `json:"intranet"`  // 从防火墙日志自动学习的内网网段
 	Attack      AttackReport  `json:"attack"`    // 从日志与 AI 研判中自动学习的攻击行为
+	Profile     ProfileReport `json:"profile"`   // 从正常流量学习的参数取值与站点产品
 }
 
 // Report 返回自学习状态概览。
@@ -900,6 +908,7 @@ func (l *Learner) Report() Report {
 	}
 	r.Intranet = l.learnedNetsLocked()
 	r.Attack = l.attackReportLocked()
+	r.Profile = l.profileReportLocked()
 	r.Cases = len(l.cases)
 	now := time.Now()
 	r.Trend = weekTrend(l.cases, now)

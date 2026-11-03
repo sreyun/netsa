@@ -261,6 +261,12 @@ type Hit struct {
 	Disproven bool
 	// Weak 表示特征只出现在自由文本里，没有可执行的内容（如搜索“<script> 标签的用法”）：不按分类底线抬升，最高低危
 	Weak bool
+	// Syntax 是语法分析（libinjection）对 SQL 注入、XSS 命中的复核：1 构成注入，-1 不构成注入，0 未复核
+	Syntax int8
+	// Param 是命中所在的查询参数名（只记录 SQL 注入、XSS、命令执行这类可能出现在普通文字里的命中）
+	Param string
+	// Inapplicable 表示站点没有运行攻击针对的产品、请求也没有成功（被动识别站点产品，见 learn/site.go）：最高低危
+	Inapplicable bool
 }
 
 // AssetRef 是事件目标资产的摘要。

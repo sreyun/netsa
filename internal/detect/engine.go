@@ -247,6 +247,7 @@ func (e *Engine) inspectWeb(ev *model.Event) []model.Hit {
 		uaLocs = e.uaLocs(ua, &segs)
 	}
 	var hits []model.Hit
+	var review []reviewRef // 需要语法分析复核的命中（URI 上可能出现在普通文字里的分类）
 	for i, r := range e.rules {
 		seg := segOf(r.Target)
 		text := [segCount]string{uri, path, ua, ref, all}[seg]
@@ -283,14 +284,18 @@ func (e *Engine) inspectWeb(ev *model.Event) []model.Hit {
 		if result == model.ResultSuccess && !risk.ResponseProvable(r.Category) {
 			h.Result = model.ResultPassed
 		}
-		if seg == segURI && !r.TagOnly && proseCategory[r.Category] && inertProse(uri, start, end) {
-			h.Weak = true
-			if h.Result == model.ResultSuccess {
-				h.Result = model.ResultPassed
+		if seg == segURI && !r.TagOnly && proseCategory[r.Category] {
+			review = append(review, reviewRef{hit: len(hits), start: start, end: end})
+			if inertProse(uri, start, end) {
+				h.Weak = true
+				if h.Result == model.ResultSuccess {
+					h.Result = model.ResultPassed
+				}
 			}
 		}
 		hits = append(hits, h)
 	}
+	hits = reviewSyntax(ev, uri, result, hits, review)
 	return append(hits, specialWebChecks(ev, uri, result)...)
 }
 
@@ -321,7 +326,7 @@ func harmlessDotDot(uri string) bool {
 var proseCategory = map[string]bool{CatXSS: true, CatCmdExec: true, CatSQLi: true}
 
 // inertToken 是只被提到、不会执行的写法：不带属性的标签、没有参数的函数名。phpinfo() 没有参数也能执行，不在其中。
-var inertToken = regexp.MustCompile(`</?\s*(script|iframe|frame|svg|object|embed|form|meta|base|applet|math|details|marquee)\s*>|\b(eval|assert|system|exec|shell_exec|passthru|popen|alert|prompt|confirm)\s*\(\s*\)`)
+var inertToken = regexp.MustCompile(`</?\s*(script|iframe|frame|svg|object|embed|form|meta|base|applet|math|details|marquee)\s*>|\b(eval|assert|system|exec|shell_exec|passthru|popen|alert|prompt|confirm|` + phpFuncsIO + `|` + phpFuncsCB + `)\s*\(\s*\)`)
 
 // inertProse 判断命中位置所在的参数值是否只是普通文字：去掉只被提到的写法后，剩下的至少有两个词，
 // 且没有任何代码或注入需要的符号。如“how to use <script> tag”；而 <script>alert(1)</script>、
@@ -341,11 +346,34 @@ func inertProse(uri string, start, end int) bool {
 		return false
 	}
 	value := uri[from+eq+1 : to]
+	// 只被提到的写法里没有这些符号，含有时去掉之后仍然含有，不必跑正则（攻击载荷大多如此）
+	if strings.ContainsAny(value, "'\"`;{}[]$|&=\\%*#@") || !strings.Contains(value, ">") && !emptyParens(value) {
+		return false
+	}
 	rest := inertToken.ReplaceAllString(value, " ")
 	if rest == value || strings.ContainsAny(rest, "<>'\"`;(){}[]$|&=\\/%*#@") {
 		return false
 	}
 	return len(strings.FieldsFunc(rest, func(r rune) bool { return !unicode.IsLetter(r) && !unicode.IsDigit(r) })) >= 2
+}
+
+// emptyParens 判断文本中是否有空括号 ()（中间可以有空白）：只被提到的函数名都带空括号。
+func emptyParens(s string) bool {
+	for i := strings.IndexByte(s, '('); i >= 0; {
+		j := i + 1
+		for j < len(s) && (s[j] == ' ' || s[j] == '\t') {
+			j++
+		}
+		if j < len(s) && s[j] == ')' {
+			return true
+		}
+		k := strings.IndexByte(s[j:], '(')
+		if k < 0 {
+			break
+		}
+		i = j + k
+	}
+	return false
 }
 
 // excerpt 截取命中位置附近的上下文作为证据。

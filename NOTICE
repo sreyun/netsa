@@ -9,5 +9,10 @@ their own licenses. The complete dependency list is recorded in go.mod
 and go.sum; each module's license terms are available in its source
 distribution.
 
+Some detection rules in internal/detect/rules.go (command, PHP function,
+Java class, Node.js, PostgreSQL and SSRF patterns) are adapted from the
+OWASP Core Rule Set v4 (https://coreruleset.org), Copyright 2025 OWASP CRS
+project, licensed under the Apache License, Version 2.0.
+
 "netsa" and the netsa logo are trademarks of the project maintainers.
 The Apache License does not grant permission to use these marks.

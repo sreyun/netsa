@@ -40,6 +40,7 @@ var catFloor = map[string]model.Severity{
 	"管理后台探测":     model.SevLow, // 后台路径探测是常见背景扫描；是否可访问由暴露面评估单独统计
 	"暴力破解":       model.SevMedium,
 	"账号与权限":      model.SevMedium,
+	"账号异常":       model.SevMedium, // 主机日志：新建账号、加入管理员组、公网直接登录特权账号
 	"主机安全事件":     model.SevMedium,
 	"CC攻击":       model.SevMedium,
 	"洪水攻击":       model.SevMedium,
@@ -64,8 +65,11 @@ var catFloor = map[string]model.Severity{
 	"挖矿":         model.SevHigh,
 	"DNS隧道":      model.SevMedium,
 	"动态域名":       model.SevLow,
+	"动态域名/内网穿透":  model.SevLow,
 	"DGA域名":      model.SevLow,
 	"带外探测":       model.SevCritical,
+	"带外探测回连":     model.SevCritical, // 内网主机解析 DNSLog 等带外平台的域名
+	"攻击后回连":      model.SevMedium,   // 内网主机在遭受攻击后连接攻击者（服务器高危、载荷中的回连地址严重，由联动分析给出）
 }
 
 // responseProvable 是「响应码 / 响应大小可以判定攻击是否成功」的分类。
@@ -104,12 +108,15 @@ var successEscalates = map[string]bool{
 // 漏洞被触发的证据；主机日志被清除、安装计划任务同理。
 var compromiseEvidence = map[string]bool{
 	"带外探测":    true,
+	"带外探测回连":  true,
+	"攻击后回连":   true,
 	"恶意外连":    true, // 内网主机主动连接受情报标记的 C2 / 矿池地址
 	"可疑外连":    true, // 周期性外连（C2 心跳特征）
 	"恶意软件/远控": true, // 设备报出的木马 / 远控通信
 	"挖矿":      true,
 	"主机安全事件":  true,
 	"账号与权限":   true,
+	"账号异常":    true,
 }
 
 // Floor 返回分类的最低等级；未知分类返回 info。
@@ -161,7 +168,7 @@ func Finalize(h *model.Hit) {
 	if (h.Learned < 0 || h.Disproven) && f > model.SevLow {
 		f--
 	}
-	if sev < f && !h.TagOnly && !h.Weak {
+	if sev < f && !h.TagOnly && !h.Weak && !h.Inapplicable {
 		sev = f
 	}
 
@@ -190,8 +197,8 @@ func Finalize(h *model.Hit) {
 		sev = model.SevMedium
 	}
 
-	// 4. 仅打标签的观察不参与告警分级
-	if (h.TagOnly || h.Weak) && sev > model.SevLow {
+	// 4. 仅打标签的观察不参与告警分级；普通文字中的弱特征、针对站点没有运行的产品且未成功的探测最高低危
+	if (h.TagOnly || h.Weak || h.Inapplicable) && sev > model.SevLow {
 		sev = model.SevLow
 	}
 	h.Severity = sev
@@ -241,6 +248,8 @@ func Describe(h *model.Hit, before model.Severity) string {
 		return "仅打标签，不计入告警分级"
 	case h.Weak:
 		return "特征只出现在普通文字中，最高按低危处置"
+	case h.Inapplicable:
+		return "站点没有运行攻击针对的产品，请求也没有成功，最高按低危处置"
 	case h.Disproven:
 		return "响应只是兜底页面或正常响应，攻击没有成功，最高按中危处置"
 	case h.Result == model.ResultSuccess:

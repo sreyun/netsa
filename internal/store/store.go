@@ -559,6 +559,11 @@ func (s *Store) recordLocked(ev *model.Event, hits []model.Hit) RecordResult {
 		h := hitOf(hits, CatBeacon)
 		s.surf.finding("beacon:"+ev.SrcIP+">"+ev.DstIP, "内网主机周期性外连（疑似 C2 心跳）", "失陷迹象", h.Severity, ev.SrcIP, h.Evidence,
 			"核查该主机上连接该地址的进程（netstat / 任务管理器 / EDR），确认是否为正常软件的更新或监控；无法解释时按失陷处置并封禁该地址", ev.DstIP, ev.Time)
+	} else if c2 == nil && hasCategory(hits, CatCallback) {
+		// 遭受 Web 攻击之后连接攻击者、或攻击载荷中的回连地址（防火墙与 Web 日志联动）
+		h := hitOf(hits, CatCallback)
+		s.surf.finding("callback:"+ev.SrcIP+">"+ev.DstIP, "内网主机在遭受攻击后连接攻击者（"+h.Name+"）", "失陷迹象", h.Severity, ev.SrcIP, h.Evidence,
+			"立即排查该主机上连接该地址的进程与最近新增的文件、计划任务、账号；确认被利用的漏洞并修复，在出口防火墙封禁该地址", ev.DstIP, ev.Time)
 	} else if c2 == nil && geo.IsPrivate(ev.SrcIP) && hasCategory(hits, CatMalware) {
 		// 安全设备报出内网主机的恶意软件 / 远控通信，同样是失陷迹象
 		h := hitOf(hits, CatMalware)
