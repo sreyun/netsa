@@ -269,7 +269,7 @@ td.reasons .chip { white-space: normal; }
 .scorebar i { display: block; height: 100%; }
 
 .toolbar { display: flex; gap: 8px; margin-bottom: 12px; flex-wrap: wrap; align-items: center; }
-.toolbar input, .toolbar select, .exports select {
+.toolbar input, .toolbar select, .exports select, .pager select {
   background: var(--bg2); color: var(--text); border: 1px solid var(--border-hi); border-radius: 4px; padding: 6px 10px; font-size: 13px;
 }
 .toolbar input { width: 320px; max-width: 100%; }

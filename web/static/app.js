@@ -243,7 +243,15 @@ setInterval(() => { $('#clock').textContent = fmtTime(new Date().toISOString());
 
 let currentTab = 'overview';
 function switchTab(tab) {
+  // 地图的飞线和涟漪是持续动画，隐藏后仍在绘制（每秒数万次）。离开总览页时清空，回来时由 loadMap 重绘
+  if (tab !== 'overview' && mapCtl.rendered) {
+    const g = charts.cMap?.getOption()?.geo?.[0];
+    if (g) mapCtl.geoView = { center: g.center, zoom: g.zoom };
+    charts.cMap?.clear();
+    mapCtl.rendered = false;
+  }
   currentTab = tab;
+  syncStream();
   $$('#tabs [data-tab]').forEach((b) => b.classList.toggle('active', b.dataset.tab === tab));
   $$('.tab').forEach((s) => s.classList.toggle('active', s.id === 'tab-' + tab));
   renderNav(tab);
@@ -598,6 +606,8 @@ function pointTip(p) {
     + `<br/><span style="color:#7d8db3">${esc(COORD[p.coord_source] || '')} · 点击查看攻击源</span>`;
 }
 
+// 持续动画的攻击源数量。每个涟漪、飞线每秒都要重绘几十次，其余攻击源用静态点显示
+const MAP_ANIMATED = 60;
 async function renderMap(reset) {
   // 地图所在标签页隐藏时不渲染（容器尺寸为 0），切回态势总览时由 loadMap 补上
   if (!isVisible($('#cMap'))) {
@@ -624,12 +634,22 @@ async function renderMap(reset) {
   const home = mapCtl.home || { lat: 0, lon: 0, name: '' };
   const homeXY = [home.lon, home.lat];
   const homeVisible = mapCtl.view === 'world' || inChina(home.lon, home.lat);
-  const pts = visiblePoints().slice(0, 400);
+  const pts = [...visiblePoints()].sort((a, b) => b.attacks - a.attacks).slice(0, 400);
+  mapCtl.flashes = mapCtl.flashes.filter((f) => Date.now() - f.t < 6000).slice(-30);
   const regions = regionData();
   const maxV = Math.max(1, ...regions.map((r) => r.value));
   const maxA = Math.max(1, ...pts.map((p) => p.attacks));
   const size = (a) => 7 + 18 * Math.sqrt(a / maxA);
   const labelN = mapCtl.view === 'world' ? 16 : 30;
+  const pointItem = (p, i) => ({
+    name: placeShort(p), value: [p.lon, p.lat, p.attacks], p,
+    symbol: pointSymbol(p), symbolSize: size(p.attacks),
+    itemStyle: { color: LV_COLOR[p.level] },
+    label: {
+      show: i < labelN, formatter: placeShort(p) + (p.attackers > 1 ? ` ×${p.attackers}` : ''),
+      position: 'right', distance: 6, color: '#e6f0ff', fontSize: 11, textBorderColor: '#06101f', textBorderWidth: 2,
+    },
+  });
   const geo = {
     map: name, roam: true, scaleLimit: { min: 0.8, max: 40 },
     label: { show: mapCtl.view !== 'world', color: 'rgba(170,195,240,.55)', fontSize: 10 },
@@ -638,6 +658,10 @@ async function renderMap(reset) {
     select: { disabled: true },
   };
   if (reset && mapCtl.view === 'world') Object.assign(geo, { center: [30, 22], zoom: 1.2 });
+  if (mapCtl.geoView) { // 从其他页面回来时恢复之前的缩放和位置
+    Object.assign(geo, mapCtl.geoView);
+    mapCtl.geoView = null;
+  }
   const option = {
     tooltip: { ...baseTooltip, trigger: 'item' },
     visualMap: {
@@ -661,20 +685,17 @@ async function renderMap(reset) {
         type: 'lines', coordinateSystem: 'geo', zlevel: 1, silent: true,
         effect: { show: true, period: 4, trailLength: 0.35, symbol: 'arrow', symbolSize: 5 },
         lineStyle: { width: 1, opacity: 0.45, curveness: 0.25 },
-        data: homeVisible ? pts.slice(0, 150).map((p) => ({ coords: [[p.lon, p.lat], homeXY], lineStyle: { color: LV_COLOR[p.level] } })) : [],
+        data: homeVisible ? pts.slice(0, MAP_ANIMATED).map((p) => ({ coords: [[p.lon, p.lat], homeXY], lineStyle: { color: LV_COLOR[p.level] } })) : [],
       },
       {
         type: 'effectScatter', coordinateSystem: 'geo', zlevel: 2, rippleEffect: { scale: 3, brushType: 'stroke' },
         labelLayout: { hideOverlap: true },
-        data: pts.map((p, i) => ({
-          name: placeShort(p), value: [p.lon, p.lat, p.attacks], p,
-          symbol: pointSymbol(p), symbolSize: size(p.attacks),
-          itemStyle: { color: LV_COLOR[p.level] },
-          label: {
-            show: i < labelN, formatter: placeShort(p) + (p.attackers > 1 ? ` ×${p.attackers}` : ''),
-            position: 'right', distance: 6, color: '#e6f0ff', fontSize: 11, textBorderColor: '#06101f', textBorderWidth: 2,
-          },
-        })),
+        data: pts.slice(0, MAP_ANIMATED).map(pointItem),
+        tooltip: { formatter: (x) => pointTip(x.data.p) },
+      },
+      {
+        type: 'scatter', coordinateSystem: 'geo', zlevel: 2,
+        data: pts.slice(MAP_ANIMATED).map((p, i) => pointItem(p, i + MAP_ANIMATED)),
         tooltip: { formatter: (x) => pointTip(x.data.p) },
       },
       {
@@ -748,7 +769,7 @@ function switchMapView(v) {
 
 // 地图点击事件随实例创建绑定，实例重建后自动恢复
 chartSetup.cMap = (c) => c.on('click', (x) => {
-  if (x.seriesType === 'effectScatter' && x.data && x.data.p) { showPop(x.data.p); return; }
+  if (x.data && x.data.p) { showPop(x.data.p); return; }
   if (x.seriesType !== 'map' || !x.data) return; // 没有攻击来源的区域不下钻
   const label = x.data.label || x.name;
   if (mapCtl.view === 'world') {
@@ -812,6 +833,7 @@ function pushFeed(a) {
   $('#feedCount').textContent = `本次会话推送 ${feedSeen} 条`;
   if (a.lat || a.lon) {
     mapCtl.flashes.push({ lat: a.lat, lon: a.lon, severity: a.severity, t: Date.now() });
+    if (mapCtl.flashes.length > 60) mapCtl.flashes.shift(); // 没有渲染时也不能无限累积
     if (currentTab === 'overview') throttledMap();
   }
 }
@@ -820,7 +842,6 @@ function throttledMap() {
   if (mapTimer || !mapCtl.rendered) return;
   mapTimer = setTimeout(() => {
     mapTimer = null;
-    mapCtl.flashes = mapCtl.flashes.filter((f) => Date.now() - f.t < 6000).slice(-30);
     renderMap(false).catch(console.error);
   }, 800);
 }
@@ -832,12 +853,28 @@ function resetFeedUnseen() {
 $('#feedNew').addEventListener('click', () => { $('#feed').scrollTo({ top: 0, behavior: 'smooth' }); resetFeedUnseen(); });
 $('#feed').addEventListener('scroll', () => { if ($('#feed').scrollTop <= 4) resetFeedUnseen(); }, { passive: true });
 
-function connectStream() {
-  const es = new EventSource('/api/stream');
-  es.onopen = () => $('#liveDot').classList.add('on');
-  es.onerror = () => $('#liveDot').classList.remove('on');
-  es.addEventListener('alert', (e) => { try { pushFeed(JSON.parse(e.data)); } catch (_) { /* ignore */ } });
+// 实时告警流只在态势总览页可见时保持。浏览器对同一站点的 HTTP/1.1 连接数上限是 6：每个标签页都占一条长连接的话，
+// 开到第 6 个标签页后所有接口请求都会排队卡住。实时告警只显示在总览页，其他页面不需要这条连接。
+let stream = null;
+let streamEnabled = false;
+function syncStream() {
+  const want = streamEnabled && currentTab === 'overview' && !document.hidden;
+  const dot = $('#liveDot');
+  dot.style.visibility = want ? '' : 'hidden';
+  if (want === !!stream) return;
+  if (!want) {
+    stream.close();
+    stream = null;
+    dot.classList.remove('on');
+    return;
+  }
+  stream = new EventSource('/api/stream');
+  stream.onopen = () => dot.classList.add('on');
+  stream.onerror = () => dot.classList.remove('on');
+  stream.addEventListener('alert', (e) => { try { pushFeed(JSON.parse(e.data)); } catch (_) { /* ignore */ } });
+  loadFeed().catch(console.error); // 补上连接断开期间的告警
 }
+document.addEventListener('visibilitychange', syncStream);
 
 // ---------------- 攻击溯源 ----------------
 let atkOffset = 0;
@@ -885,6 +922,10 @@ async function loadAlerts() {
   $('#alSummary').innerHTML = `当前保留告警 <b>${num(sum.retained_total)}</b> 条（严重 ${num(rt.critical || 0)} · 高危 ${num(rt.high || 0)} · 中危 ${num(rt.medium || 0)} · 低危 ${num(rt.low || 0)}），`
     + `攻击命中共 <b>${num(sum.hits_total)}</b> 次（严重 ${num(hits.critical || 0)} · 高危 ${num(hits.high || 0)} · 中危 ${num(hits.medium || 0)}）。`
     + `<span class="muted">同一 IP 同一规则 ${esc(fmtDur(sum.window))}内最多记录 ${sum.per_rule} 条告警，其余重复命中只累加计数；最多保留最近 ${num(sum.max_alerts)} 条。当前列表最多显示 300 条。</span>`;
+  // 内容没有变化时不重建表格：每 5 秒重建几百行会造成明显卡顿，也会打断阅读
+  const sig = JSON.stringify([list, drillState.alerts, canOperate()]);
+  if (sig === alertSig) return;
+  alertSig = sig;
   alertRows = list;
   const ops = canOperate();
   const rows = list.map((a, i) => `<tr>
@@ -900,6 +941,7 @@ async function loadAlerts() {
   $('#alTable').innerHTML = `<thead><tr><th>时间</th><th>等级</th><th>攻击类型</th><th>来源</th><th>目标</th><th>结果研判</th><th>证据 / 载荷</th><th>处置</th></tr></thead><tbody>${rows || empty(8, none)}</tbody>`;
 }
 let alertRows = [];
+let alertSig = '';
 // 目标资产与关联漏洞（登记了资产台账时显示）
 const IMP = { core: '核心', important: '重要', normal: '一般' };
 function assetLine(a) {
@@ -1231,7 +1273,11 @@ $$('.exports .btn[data-fmt]').forEach((b) => b.addEventListener('click', () => {
 const drawer = $('#drawer');
 const mask = $('#drawerMask');
 let miniChart = null;
-function closeDrawer() { drawer.classList.remove('open'); mask.classList.remove('open'); }
+function closeDrawer() {
+  drawer.classList.remove('open');
+  mask.classList.remove('open');
+  if (miniChart) { miniChart.dispose(); miniChart = null; } // 小地图的涟漪动画不随抽屉关闭而停止
+}
 $('#drawerClose').onclick = closeDrawer;
 mask.onclick = closeDrawer;
 document.addEventListener('keydown', (e) => {
@@ -1964,8 +2010,8 @@ document.addEventListener('fullscreenchange', () => setTimeout(resizeCharts, 200
   $('#clock').title = meta.timezone ? `时区：${meta.timezone}（与服务端配置一致）` : '时区：浏览器本地时区';
   initMapEvents();
   loaders.overview();
-  loadFeed().catch(console.error);
-  connectStream();
+  streamEnabled = true;
+  syncStream();
   openFromHash();
 })();
 
@@ -1989,26 +2035,35 @@ function openFromHash() {
 }
 window.addEventListener('hashchange', openFromHash);
 
+// 定时刷新不叠加：上一轮没有返回时跳过这一轮，接口变慢时请求不会越积越多。60 秒后不再等待，避免一个卡住的请求让刷新永远停止
+const polling = new Set();
+function pollOnce(key, fn) {
+  if (polling.has(key)) return;
+  polling.add(key);
+  let timer;
+  const expired = new Promise((resolve) => { timer = setTimeout(resolve, 60000); });
+  Promise.race([Promise.resolve().then(fn), expired]).catch(console.error).finally(() => {
+    clearTimeout(timer);
+    polling.delete(key);
+  });
+}
 setInterval(() => {
   if (document.hidden) return;
   if (currentTab === 'overview') {
-    loadOverview().catch(console.error);
-    loadTrend().catch(console.error);
-    loadTopAttackers().catch(console.error);
+    pollOnce('overview', () => Promise.all([loadOverview(), loadTrend(), loadTopAttackers()]));
   } else if (currentTab === 'alerts' && alMode === 'live' && $('#alAuto').checked) {
-    loadAlerts().catch(console.error);
+    pollOnce('alerts', loadAlerts);
   } else if (currentTab === 'notify' && $('#ntModal').hidden) {
-    loadNotify().catch(console.error);
+    pollOnce('notify', loadNotify);
   } else if (currentTab === 'sources') {
-    loadSources().catch(console.error);
+    pollOnce('sources', loadSources);
   }
 }, 5000);
 setInterval(() => {
   if (document.hidden) return;
   if (currentTab === 'overview') {
-    loadMap().catch(console.error);
-    loadSituationAssess().catch(console.error);
+    pollOnce('map', () => Promise.all([loadMap(), loadSituationAssess()]));
   } else if (currentTab === 'assess') {
-    loadAssess().catch(console.error);
+    pollOnce('assess', loadAssess);
   }
 }, 15000);

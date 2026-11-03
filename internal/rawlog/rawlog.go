@@ -408,25 +408,27 @@ func (seg *segment) flush() error {
 		return nil
 	}
 	seg.dirty = false
+	// 先写过滤器再写日志：两步之间断电时，过滤器多出几个 IP 只是多扫描一次；
+	// 反过来日志已落盘而过滤器缺少它的 IP，按 IP 检索会跳过这些日志
+	if err := os.WriteFile(bloomPath(seg.path), seg.bloom, 0o640); err != nil {
+		return err
+	}
 	if err := seg.w.Flush(); err != nil {
 		return err
 	}
-	if err := seg.gz.Flush(); err != nil {
-		return err
-	}
-	return os.WriteFile(bloomPath(seg.path), seg.bloom, 0o640)
+	return seg.gz.Flush()
 }
 
 // close 结束当前 gzip 成员并关闭文件，返回文件的 SHA-256 与大小。
 func (seg *segment) close() (string, int64, error) {
-	err := seg.w.Flush()
+	err := os.WriteFile(bloomPath(seg.path), seg.bloom, 0o640) // 先于日志写入，原因见 flush
+	if e := seg.w.Flush(); err == nil {
+		err = e
+	}
 	if e := seg.gz.Close(); err == nil {
 		err = e
 	}
 	if e := seg.f.Close(); err == nil {
-		err = e
-	}
-	if e := os.WriteFile(bloomPath(seg.path), seg.bloom, 0o640); err == nil {
 		err = e
 	}
 	if err != nil {

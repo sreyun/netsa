@@ -1,7 +1,10 @@
 package rawlog
 
 import (
+	"bytes"
+	"compress/gzip"
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -80,6 +83,17 @@ func TestWriteSearchVerify(t *testing.T) {
 	if res, _ = s.Search(ctx, q); len(res.Records) != 30 || !res.Records[0].Attack {
 		t.Fatalf("只看攻击: %d", len(res.Records))
 	}
+	// 只截断超过上限的行，截断后仍是合法的 UTF-8，并返回原始长度
+	q.AttacksOnly, q.Keyword, q.MaxRaw = false, "UNION", 8
+	res, _ = s.Search(ctx, q)
+	if len(res.Records) != 1 || res.Records[0].Raw != "GET /sea" || res.Records[0].RawLen != len("GET /search?q=Union\tSelect 1 HTTP/1.1") {
+		t.Fatalf("截断: %+v", res.Records)
+	}
+	q.MaxRaw = 1000
+	if res, _ = s.Search(ctx, q); len(res.Records) != 1 || res.Records[0].RawLen != 0 {
+		t.Fatalf("没有超过上限的行不应标记: %+v", res.Records)
+	}
+	q.Keyword, q.MaxRaw = "", 0
 	if _, err := s.Search(ctx, Query{From: base, To: base.Add(40 * 24 * time.Hour)}); err != ErrRange {
 		t.Fatal("时间范围过大应报错")
 	}
@@ -133,6 +147,148 @@ func TestWriteSearchVerify(t *testing.T) {
 	st := s.Status()
 	if st.Written != 301 || len(st.Days) != 1 || st.Oldest != "20261020" {
 		t.Fatalf("状态: %+v", st)
+	}
+}
+
+// 翻页：跨分段、同一时刻很多条（日志时间只精确到秒）时不重复、不遗漏，新日志写入时不错位。
+func TestSearchPaging(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	loc := time.FixedZone("CST", 8*3600)
+	s, err := Open(ctx, Options{Dir: t.TempDir(), RetentionDays: 3650, Location: loc})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close(5 * time.Second)
+	base := time.Date(2026, 10, 20, 9, 59, 50, 0, loc)
+	const total = 1000
+	var evs []*model.Event
+	for i := 0; i < total; i++ {
+		// 每秒 50 条，跨过 10 点：分布在两个分段，每个分段 500 条
+		evs = append(evs, ev(base.Add(time.Duration(i/50)*time.Second), "198.51.100.1", "line-"+strconv.Itoa(i)))
+	}
+	s.Write(evs, make([][]model.Hit, total))
+	waitWritten(t, s, total)
+	s.maintain(false)
+
+	q := Query{From: base.Add(-time.Hour), To: base.Add(time.Hour), Limit: 70}
+	seen := map[string]bool{}
+	var last time.Time
+	pages := 0
+	for {
+		res, err := s.Search(ctx, q)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if pages == 0 && (res.Matched != 500 || res.MatchedAll || res.Scanned != 1) { // 第一个分段就够一页，不再扫描更早的分段
+			t.Fatalf("第一页: 匹配 %d，MatchedAll=%v，Scanned=%d", res.Matched, res.MatchedAll, res.Scanned)
+		}
+		pages++
+		for _, r := range res.Records {
+			if seen[r.Raw] {
+				t.Fatalf("第 %d 页重复: %s", pages, r.Raw)
+			}
+			seen[r.Raw] = true
+			if !last.IsZero() && r.Time.After(last) {
+				t.Fatalf("第 %d 页时间不是倒序: %v 在 %v 之后", pages, r.Time, last)
+			}
+			last = r.Time
+		}
+		if res.Next == "" {
+			if len(res.Records) == 0 {
+				t.Fatal("有下一页时最后一页不应为空")
+			}
+			break
+		}
+		if len(res.Records) != 70 {
+			t.Fatalf("第 %d 页 %d 条", pages, len(res.Records))
+		}
+		if q.Cursor, err = ParseCursor(res.Next); err != nil {
+			t.Fatal(err)
+		}
+		if pages == 3 { // 翻页中途有更新的日志写入，也有同一时刻的日志写入
+			s.Write([]*model.Event{ev(base.Add(30*time.Second), "198.51.100.1", "newer")}, make([][]model.Hit, 1))
+			waitWritten(t, s, total+1)
+			s.maintain(false)
+		}
+		if pages > 100 {
+			t.Fatal("翻页没有结束")
+		}
+	}
+	if len(seen) != total || seen["newer"] {
+		t.Fatalf("应返回全部 %d 条，实际 %d 条，newer=%v", total, len(seen), seen["newer"])
+	}
+	if pages != 15 {
+		t.Fatalf("页数: %d", pages)
+	}
+	// 恰好一页：没有下一页
+	q = Query{From: base.Add(-time.Hour), To: base.Add(time.Hour), Limit: total + 1}
+	if res, _ := s.Search(ctx, q); res.Next != "" || res.Truncated || len(res.Records) != total+1 || res.Matched != total+1 || !res.MatchedAll {
+		t.Fatalf("恰好一页: next=%q truncated=%v %d matched=%d", res.Next, res.Truncated, len(res.Records), res.Matched)
+	}
+	// 找够一页后不再扫描更早的分段：匹配数只是下限
+	q.Limit = 10
+	if res, _ := s.Search(ctx, q); res.Next == "" || res.MatchedAll || res.Scanned != 1 || res.Matched >= total {
+		t.Fatalf("下限: %+v", res)
+	}
+	for _, bad := range []string{"", "x", "1", "0_0", "-1_0", "5_-1", "5_x"} {
+		if _, err := ParseCursor(bad); err == nil {
+			t.Errorf("%q 应无效", bad)
+		}
+	}
+}
+
+// 进程被强制结束时最后一个 gzip 成员只写了一半，重新打开后又追加了新成员：损坏位置前后的日志都要能读到。
+func TestScanSegmentSkipsDamagedMember(t *testing.T) {
+	member := func(lines string, finish bool) []byte {
+		var b bytes.Buffer
+		gz := gzip.NewWriter(&b)
+		gz.Write([]byte(lines))
+		if finish {
+			gz.Close()
+		} else {
+			gz.Flush() // 与写入时的定期刷新相同：已刷新的内容可以解出，但成员没有结尾
+		}
+		return b.Bytes()
+	}
+	read := func(data []byte) ([]string, error) {
+		path := filepath.Join(t.TempDir(), "x.log.gz")
+		if err := os.WriteFile(path, data, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		var got []string
+		err := scanSegment(context.Background(), path, func(l []byte) bool { got = append(got, string(l)); return true })
+		return got, err
+	}
+	first, third := member("a1\na2\n", true), member("c1\nc2\n", true)
+	crashed := member("b1\nb2\n", false)
+	crashed = append(crashed, member("b3-unflushed\n", false)[:5]...) // 最后一次写入只落了一部分
+
+	// 1. 中间的成员没写完，后面还有新成员
+	got, err := read(bytes.Join([][]byte{first, crashed, third}, nil))
+	if strings.Join(got, ",") != "a1,a2,b1,b2,c1,c2" || !errors.Is(err, ErrSkippedDamaged) {
+		t.Fatalf("跳过未写完的成员: %v %v", got, err)
+	}
+	// 2. 最后一个成员没有结束（正在写入）：不算损坏
+	got, err = read(bytes.Join([][]byte{first, member("b1\n", false)}, nil))
+	if strings.Join(got, ",") != "a1,a2,b1" || err != nil {
+		t.Fatalf("正在写入的分段: %v %v", got, err)
+	}
+	// 3. 成员中间的数据被破坏
+	bad := bytes.Join([][]byte{first, member(strings.Repeat("bbbbbbbb\n", 2000), true), third}, nil)
+	for i := len(first) + 40; i < len(first)+60; i++ {
+		bad[i] ^= 0xff
+	}
+	got, err = read(bad)
+	if len(got) < 4 || got[0] != "a1" || got[len(got)-1] != "c2" || !errors.Is(err, ErrSkippedDamaged) {
+		t.Fatalf("内容损坏: %d 行，首行 %q，%v", len(got), got[0], err)
+	}
+	// 4. 完整的多个成员与空文件
+	if got, err = read(bytes.Join([][]byte{first, third}, nil)); strings.Join(got, ",") != "a1,a2,c1,c2" || err != nil {
+		t.Fatalf("多个成员: %v %v", got, err)
+	}
+	if got, err = read(nil); len(got) != 0 || err != nil {
+		t.Fatalf("空文件: %v %v", got, err)
 	}
 }
 

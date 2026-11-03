@@ -333,7 +333,9 @@
       </div>
       <div class="form-msg err" id="rlMsg" role="status"></div>
     </form>
-    <div class="panel"><h3>检索结果 <small id="rlInfo"></small></h3><div class="table-wrap"><table class="table" id="rlTable"></table></div></div>
+    <div class="panel"><h3>检索结果 <small id="rlInfo"></small></h3><div class="table-wrap"><table class="table" id="rlTable"></table></div>
+      <div class="pager"><label class="muted inline-chk">每页 <select id="rlSize"><option>50</option><option>100</option><option>200</option><option>500</option></select> 条</label>
+        <span class="spacer"></span><button type="button" class="btn" id="rlPrev" disabled>上一页</button><span class="muted" id="rlPageNo"></span><button type="button" class="btn" id="rlNext" disabled>下一页</button></div></div>
     <div class="panel"><h3>留存状态 <small id="rlStatus"></small></h3><div id="rlStatusBody"></div></div>
   </section>
 

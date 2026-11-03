@@ -17,7 +17,8 @@ func (s *Server) rawlogStatus(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, s.RawLog.Status())
 }
 
-// rawQuery 解析检索条件：from / to（RFC 3339 或 Unix 秒，默认最近 1 小时）、ip、q 关键字、source、attacks=1、limit。
+// rawQuery 解析检索条件：from / to（RFC 3339 或 Unix 秒，默认最近 1 小时）、ip、q 关键字、source、attacks=1、limit、
+// clip（每条最多返回的字节数）。
 func (s *Server) rawQuery(r *http.Request) rawlog.Query {
 	q := r.URL.Query()
 	to, from := qtime(q.Get("to")), qtime(q.Get("from"))
@@ -28,7 +29,7 @@ func (s *Server) rawQuery(r *http.Request) rawlog.Query {
 		from = to.Add(-time.Hour)
 	}
 	return rawlog.Query{From: from, To: to, IP: q.Get("ip"), Keyword: q.Get("q"), Source: q.Get("source"), AttacksOnly: q.Get("attacks") == "1",
-		Limit: clamp(qint(r, "limit", 200), 1, 5000)}
+		Limit: clamp(qint(r, "limit", 200), 1, 5000), MaxRaw: clamp(qint(r, "clip", 0), 0, 1<<20)}
 }
 
 func (s *Server) rawSearch(w http.ResponseWriter, r *http.Request, q rawlog.Query) (rawlog.Result, bool) {
@@ -57,11 +58,21 @@ func (s *Server) rawSearch(w http.ResponseWriter, r *http.Request, q rawlog.Quer
 // rawlogSearch 检索原始日志（运营分析员以上；原始日志可能包含 Cookie、令牌等敏感信息）。
 func (s *Server) rawlogSearch(w http.ResponseWriter, r *http.Request) {
 	q := s.rawQuery(r)
+	if c := r.URL.Query().Get("cursor"); c != "" {
+		cur, err := rawlog.ParseCursor(c)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		q.Cursor = cur
+	}
 	res, ok := s.rawSearch(w, r, q)
 	if !ok {
 		return
 	}
-	s.audit(r, "检索原始日志", rawDesc(q)+"，命中 "+strconv.Itoa(len(res.Records))+" 条", nil)
+	if q.Cursor.Ms == 0 { // 翻页是同一次检索，不重复记录
+		s.audit(r, "检索原始日志", rawDesc(q)+"，命中 "+strconv.Itoa(len(res.Records))+" 条", nil)
+	}
 	writeJSON(w, res)
 }
 
@@ -69,6 +80,7 @@ func (s *Server) rawlogSearch(w http.ResponseWriter, r *http.Request) {
 func (s *Server) rawlogExport(w http.ResponseWriter, r *http.Request) {
 	q := s.rawQuery(r)
 	q.Limit = clamp(qint(r, "limit", 5000), 1, 5000)
+	q.MaxRaw = 0 // 导出用于取证留档，保留完整内容
 	res, ok := s.rawSearch(w, r, q)
 	if !ok {
 		return

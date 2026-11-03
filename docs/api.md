@@ -31,7 +31,7 @@
 | `GET /api/ai/settings`、`PUT /api/ai/settings`、`POST /api/ai/test`、`POST /api/ai/models` | 外部模型配置（协议、地址、名称、密钥、启用；响应不含密钥）、连接测试与读取模型列表（管理员） |
 | `GET/POST /api/suppressions`、`DELETE /api/suppressions/{id}` | 误报抑制规则（写操作需运营分析员以上） |
 | `GET /api/syslog/senders`、`POST /api/syslog/senders`、`PUT/DELETE /api/syslog/senders/{id}`、`PUT /api/syslog/policy` | syslog 发送端画像、登记与白名单开关（写操作需管理员） |
-| `GET /api/rawlog/search?from=&to=&ip=&q=&source=&attacks=1&limit=`、`GET /api/rawlog/export?…`、`GET /api/rawlog/status`、`POST /api/rawlog/verify` | 原始日志检索 / 导出（运营分析员以上）/ 留存状态 / 完整性校验（管理员） |
+| `GET /api/rawlog/search?from=&to=&ip=&q=&source=&attacks=1&limit=&clip=&cursor=`、`GET /api/rawlog/export?…`、`GET /api/rawlog/status`、`POST /api/rawlog/verify` | 原始日志检索 / 导出（运营分析员以上）/ 留存状态 / 完整性校验（管理员）。检索结果中的 `next` 传给 `cursor` 取下一页；`clip` 限制每条返回的字节数 |
 | `GET/POST /api/assets`、`PUT/DELETE /api/assets/{id}`、`POST /api/assets/import?type=assets|vulns&mode=merge|replace`、`GET /api/assets/template?type=` | 资产台账与导入（请求体为 CSV） |
 | `GET /api/vulns?status=&severity=&q=&ip=`、`PUT /api/vulns/{id}`、`DELETE /api/vulns/{id}` | 漏洞列表与状态修改 |
 | `GET /api/reports/periodic?period=week|month&range=recent|last&format=html`、`POST /api/reports/email` | 周报 / 月报（JSON 或可打印 HTML）/ 立即发送邮件（管理员） |

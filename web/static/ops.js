@@ -536,21 +536,62 @@ function rlParams(limit) {
   p.set('limit', limit);
   return p;
 }
+// 分页检索。检索条件在点“检索”时固定下来（结束时间留空时取当时的时间），翻页沿用同一组条件；
+// 服务端按位置翻页，持续写入新日志时页面内容不会错位。
+const rl = { query: '', cursors: [''], page: 0, size: 100, seq: 0 };
+try { rl.size = +localStorage.getItem('netsa.rlSize') || 100; } catch (_) { /* 隐私模式 */ }
+$('#rlSize').value = String(rl.size);
+if (!$('#rlSize').value) { rl.size = 100; $('#rlSize').value = '100'; }
 async function searchRawlog() {
   if (!meta.rawlog) return;
   const ip = $('#rlIP').value.trim();
   if (ip && !/^[0-9a-fA-F.:]+$/.test(ip)) { setMsg('#rlMsg', 'IP 格式不正确'); return; }
   setMsg('#rlMsg', '');
+  const p = rlParams(rl.size);
+  p.set('clip', 4096); // 超长行只显示开头，完整内容从导出获取
+  rl.query = p.toString();
+  rl.cursors = [''];
+  rl.page = 0;
+  await rlFetch();
+}
+async function rlFetch(scroll = false) {
+  const seq = ++rl.seq;
   $('#rlInfo').textContent = '检索中…';
+  $('#rlPrev').disabled = $('#rlNext').disabled = true;
+  const cursor = rl.cursors[rl.page];
   try {
-    const r = await api('/api/rawlog/search?' + rlParams(500));
-    $('#rlInfo').textContent = `${num(r.records.length)} 条 · 扫描 ${r.scanned}/${r.segments} 个分段 · ${fmtBytes(r.bytes)} · 耗时 ${r.took}${r.truncated ? ' · ' + (r.reason || '结果不完整') : ''}`;
+    const r = await api('/api/rawlog/search?' + rl.query + (cursor ? '&cursor=' + encodeURIComponent(cursor) : ''));
+    if (seq !== rl.seq) return; // 期间又发起了新的检索或翻页
+    rl.cursors.length = rl.page + 1;
+    if (r.next) rl.cursors.push(r.next);
+    const first = rl.page * rl.size;
+    const range = r.records.length ? `第 ${num(first + 1)}-${num(first + r.records.length)} 条，` : '';
+    // 找够一页后不再扫描更早的分段，这时总数只是下限
+    const total = `${r.matched_all ? '共' : '至少'} ${num(first + r.matched)} 条`;
+    const note = r.truncated && !(r.next && /^结果较多/.test(r.reason || '')) ? ' · ' + (r.reason || '结果不完整') : '';
+    $('#rlInfo').textContent = `${range}${total} · 扫描 ${r.scanned}/${r.segments} 个分段 · ${fmtBytes(r.bytes)} · 耗时 ${r.took}${note}`;
     $('#rlTable').innerHTML = `<thead><tr><th>时间</th><th>数据源</th><th>来源 → 目的</th><th>原始日志</th></tr></thead><tbody>${r.records.map((x) => `<tr class="${x.attack ? 'row-attack' : ''}">
       <td class="nowrap muted">${esc(fmtTime(x.time))}</td><td class="nowrap">${esc(x.source)}</td>
       <td class="nowrap">${x.src_ip ? ipLink(x.src_ip) : '-'}${x.dst_ip ? ` <span class="muted">→ ${esc(x.dst_ip)}</span>` : ''}${x.attack ? ' <span class="chip warn">攻击</span>' : ''}</td>
-      <td class="raw mono">${esc(x.raw)}</td></tr>`).join('') || empty(4, '没有符合条件的日志')}</tbody>`;
-  } catch (err) { $('#rlInfo').textContent = ''; setMsg('#rlMsg', err.message); }
+      <td class="raw mono">${esc(x.raw)}${x.raw_len ? ` <span class="muted">…（共 ${fmtBytes(x.raw_len)}，导出可查看完整内容）</span>` : ''}</td></tr>`).join('') || empty(4, '没有符合条件的日志')}</tbody>`;
+    $('#rlPageNo').textContent = rl.page || r.next ? `第 ${rl.page + 1} 页` : '';
+    $('#rlPrev').disabled = rl.page === 0;
+    $('#rlNext').disabled = !r.next;
+    if (scroll) $('#rlTable').closest('.panel').scrollIntoView({ block: 'start' });
+  } catch (err) {
+    if (seq !== rl.seq) return;
+    $('#rlInfo').textContent = '';
+    setMsg('#rlMsg', err.message);
+    $('#rlPrev').disabled = rl.page === 0;
+  }
 }
+$('#rlPrev').addEventListener('click', () => { if (rl.page > 0) { rl.page--; rlFetch(true); } });
+$('#rlNext').addEventListener('click', () => { if (rl.cursors[rl.page + 1]) { rl.page++; rlFetch(true); } });
+$('#rlSize').addEventListener('change', () => {
+  rl.size = +$('#rlSize').value;
+  try { localStorage.setItem('netsa.rlSize', String(rl.size)); } catch (_) { /* 隐私模式 */ }
+  if (rl.query) searchRawlog();
+});
 $('#rlForm').addEventListener('submit', (e) => { e.preventDefault(); searchRawlog(); });
 $('#rlExport').addEventListener('click', () => { window.location.href = '/api/rawlog/export?' + rlParams(5000); });
 async function loadRawlog() {
@@ -1213,7 +1254,7 @@ Object.assign(loaders, {
 // 事件处置页每 10 秒刷新（对话框打开时暂停，避免打断操作）；其他页面每 30 秒刷新导航上的待处置数
 setInterval(() => {
   if (document.hidden || anyModalOpen()) return;
-  if (currentTab === 'incidents') loadIncidents().catch(console.error);
+  if (currentTab === 'incidents') pollOnce('incidents', loadIncidents);
 }, 10000);
 setInterval(() => { if (!document.hidden && currentTab !== 'incidents') refreshIncBadge(); }, 30000);
 setTimeout(refreshIncBadge, 1500);

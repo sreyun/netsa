@@ -24,8 +24,31 @@ type Query struct {
 	Keyword     string    // 原始日志包含的文本（不区分大小写）
 	Source      string    // 数据源名称包含的文本
 	AttacksOnly bool
-	Limit       int   // 最多返回的条数（默认 200，最多 5000）
-	MaxBytes    int64 // 最多扫描的解压后字节数（默认 4GB）
+	Limit       int    // 最多返回的条数（默认 200，最多 5000）
+	MaxBytes    int64  // 最多扫描的解压后字节数（默认 4GB）
+	MaxRaw      int    // 每条日志最多返回的字节数，超出部分截断（0 表示不限制，导出时使用）
+	Cursor      Cursor // 翻页位置，零值表示第一页
+}
+
+// Cursor 是翻页位置：上一页最后一条的时间，以及这一毫秒内已经返回的条数（日志时间常常只精确到秒，
+// 同一时刻可能有很多条）。用位置而不是偏移量翻页：新日志持续写入时页面内容不会错位，
+// 翻到后面的页也不需要在内存中保留前面所有的结果。
+type Cursor struct {
+	Ms   int64
+	Skip int
+}
+
+func (c Cursor) String() string { return strconv.FormatInt(c.Ms, 10) + "_" + strconv.Itoa(c.Skip) }
+
+// ParseCursor 解析 Cursor.String 的结果。
+func ParseCursor(s string) (Cursor, error) {
+	a, b, ok := strings.Cut(s, "_")
+	ms, err1 := strconv.ParseInt(a, 10, 64)
+	skip, err2 := strconv.Atoi(b)
+	if !ok || err1 != nil || err2 != nil || ms <= 0 || skip < 0 {
+		return Cursor{}, errors.New("翻页位置无效")
+	}
+	return Cursor{Ms: ms, Skip: skip}, nil
 }
 
 // Record 是一条原始日志。
@@ -37,6 +60,7 @@ type Record struct {
 	DstIP  string    `json:"dst_ip,omitempty"`
 	Attack bool      `json:"attack,omitempty"`
 	Raw    string    `json:"raw"`
+	RawLen int       `json:"raw_len,omitempty"` // 被截断时的原始长度
 }
 
 // Result 是检索结果（按时间倒序）。
@@ -48,6 +72,11 @@ type Result struct {
 	Truncated bool     `json:"truncated"`
 	Reason    string   `json:"reason,omitempty"` // 结果不完整的原因
 	Took      string   `json:"took"`
+	Next      string   `json:"next,omitempty"` // 下一页的位置，为空表示没有更多
+	// Matched 是从当前位置起、已扫描的分段中符合条件的条数。MatchedAll 表示时间范围内的分段都扫描了，
+	// 这时它就是剩余的总数；否则是下限（找够一页后不再扫描更早的分段）
+	Matched    int  `json:"matched"`
+	MatchedAll bool `json:"matched_all"`
 }
 
 // 检索错误。
@@ -117,14 +146,26 @@ func (s *Store) Search(ctx context.Context, q Query) (Result, error) {
 	res.Segments = len(segs)
 	fromMs, toMs := q.From.UnixMilli(), q.To.UnixMilli()
 	lower := make([]byte, 0, 4096)
+	keep := q.Limit + 1 // 多取一条，用来判断还有没有下一页
+	seenAtCursor := 0
+	cursorKey := ""
+	if q.Cursor.Ms > 0 {
+		cursorKey = s.key(time.UnixMilli(q.Cursor.Ms))
+	}
+	res.MatchedAll = true
 	for _, k := range segs {
 		if ctx.Err() != nil {
+			res.MatchedAll = false
 			res.Truncated, res.Reason = true, "检索超时，结果不完整，请缩小时间范围或增加过滤条件"
 			break
 		}
 		if res.Bytes >= q.MaxBytes {
+			res.MatchedAll = false
 			res.Truncated, res.Reason = true, "扫描量达到上限，结果不完整，请缩小时间范围或增加过滤条件"
 			break
+		}
+		if cursorKey != "" && k > cursorKey { // 比翻页位置更新的分段已经看过
+			continue
 		}
 		path := filepath.Join(s.opt.Dir, filepath.FromSlash(k)+".log.gz")
 		if ip != "" {
@@ -133,7 +174,7 @@ func (s *Store) Search(ctx context.Context, q Query) (Result, error) {
 			}
 		}
 		res.Scanned++
-		// 保留该分段中时间最新的 Limit 条
+		// 保留该分段中时间最新的 keep 条
 		var found []Record
 		budget := false // 扫描量在本分段中途达到上限
 		err := scanSegment(ctx, path, func(line []byte) bool {
@@ -153,10 +194,27 @@ func (s *Store) Search(ctx context.Context, q Query) (Result, error) {
 				ip != "" && r.SrcIP != ip && r.DstIP != ip || src != "" && !strings.Contains(strings.ToLower(r.Source), src) {
 				return true
 			}
+			if q.Cursor.Ms > 0 {
+				ms := r.Time.UnixMilli()
+				if ms > q.Cursor.Ms {
+					return true
+				}
+				if ms == q.Cursor.Ms {
+					seenAtCursor++
+					if seenAtCursor <= q.Cursor.Skip {
+						return true
+					}
+				}
+			}
+			res.Matched++
+			if q.MaxRaw > 0 && len(r.Raw) > q.MaxRaw {
+				r.RawLen = len(r.Raw)
+				r.Raw = strings.ToValidUTF8(r.Raw[:q.MaxRaw], "")
+			}
 			found = append(found, r)
-			if len(found) >= 2*q.Limit { // 只保留按时间最新的 Limit 条（写入顺序不一定是时间顺序）
+			if len(found) >= 2*keep { // 只保留按时间最新的 keep 条（写入顺序不一定是时间顺序）
 				sort.SliceStable(found, func(i, j int) bool { return found[i].Time.After(found[j].Time) })
-				found = found[:q.Limit]
+				found = found[:keep]
 			}
 			return true
 		})
@@ -168,14 +226,18 @@ func (s *Store) Search(ctx context.Context, q Query) (Result, error) {
 			cut = "检索超时，结果不完整，请缩小时间范围或增加过滤条件"
 		case budget:
 			cut = "扫描量达到上限，结果不完整，请缩小时间范围或增加过滤条件"
+		case errors.Is(err, ErrSkippedDamaged):
+			res.Reason = err.Error()
 		case err != nil:
 			res.Reason = "部分分段读取失败: " + err.Error()
 		}
 		sort.SliceStable(found, func(i, j int) bool { return found[i].Time.After(found[j].Time) })
 		res.Records = append(res.Records, found...)
-		if len(res.Records) >= q.Limit {
+		if len(res.Records) >= keep {
 			// 分段按时间倒序扫描；继续扫描更早的分段不会得到更新的日志
 			res.Records = res.Records[:q.Limit]
+			res.Next = nextCursor(q.Cursor, res.Records).String()
+			res.MatchedAll = res.MatchedAll && k == segs[len(segs)-1] && cut == ""
 			res.Truncated = true
 			if res.Reason == "" {
 				res.Reason = "结果较多，仅显示最新的 " + strconv.Itoa(q.Limit) + " 条"
@@ -183,6 +245,7 @@ func (s *Store) Search(ctx context.Context, q Query) (Result, error) {
 			break
 		}
 		if cut != "" {
+			res.MatchedAll = false
 			res.Truncated = true
 			if res.Reason == "" {
 				res.Reason = cut
@@ -192,6 +255,21 @@ func (s *Store) Search(ctx context.Context, q Query) (Result, error) {
 	}
 	res.Took = time.Since(began).Round(time.Millisecond).String()
 	return res, nil
+}
+
+// nextCursor 计算下一页的位置：最后一条的时间，以及这一时刻到本页末尾累计返回的条数。
+func nextCursor(prev Cursor, page []Record) Cursor {
+	ms := page[len(page)-1].Time.UnixMilli()
+	c := Cursor{Ms: ms}
+	for _, r := range page {
+		if r.Time.UnixMilli() == ms {
+			c.Skip++
+		}
+	}
+	if prev.Ms == ms {
+		c.Skip += prev.Skip
+	}
+	return c
 }
 
 // containsFold 判断 line 是否包含小写的 kw（ASCII 不区分大小写；中文等按原样匹配）。
@@ -210,28 +288,86 @@ func containsFold(line, kw []byte, buf *[]byte) bool {
 	return bytes.Contains(b, kw)
 }
 
-// scanSegment 逐行读取分段（多个 gzip 成员连续读取；正在写入的分段末尾不完整时读到已刷新的位置为止）。
+// ErrSkippedDamaged 表示分段中有写了一半的数据（进程被强制结束或断电），已跳过损坏部分，其余日志正常返回。
+var ErrSkippedDamaged = errors.New("部分分段有未写完的数据（进程被强制结束或断电时产生），已跳过损坏部分")
+
+// maxScanLine 是检索时单行的最大长度：入库时单行最多 1MB，再加上时间、来源等字段。
+const maxScanLine = 2 << 20
+
+// scanSegment 逐行读取分段。分段由多个 gzip 成员组成，每次打开分段追加一个。
+//
+// 进程被强制结束或断电时，最后一个成员只写了一半，之后重新打开分段又会在它后面追加新成员。
+// 读到损坏的成员时保留已解出的行，再找到下一个成员继续读；否则损坏位置之后的日志都检索不到。
+// 正在写入的分段末尾也是一个没有结束的成员，读到已刷新的位置为止，不算损坏。
 func scanSegment(ctx context.Context, path string, fn func([]byte) bool) error {
 	f, err := os.Open(path)
 	if err != nil {
 		return err
 	}
 	defer f.Close()
-	gz, err := gzip.NewReader(bufio.NewReaderSize(f, 256<<10))
+	st, err := f.Stat()
 	if err != nil {
-		if errors.Is(err, io.EOF) {
-			return nil
-		}
 		return err
 	}
-	defer gz.Close()
-	br := bufio.NewReaderSize(gz, 256<<10)
+	size := st.Size()
+	var damaged bool
+	var zr *bufio.Reader
+	var lines *bufio.Reader
+	var gz *gzip.Reader
 	n := 0
+	for off := int64(0); off < size; {
+		cr := &countingReader{r: io.NewSectionReader(f, off, size-off)}
+		if zr == nil {
+			zr = bufio.NewReaderSize(cr, 256<<10)
+		} else {
+			zr.Reset(cr)
+		}
+		if gz == nil {
+			gz, err = gzip.NewReader(zr)
+		} else {
+			err = gz.Reset(zr)
+		}
+		if err == nil {
+			gz.Multistream(false)
+			if lines == nil {
+				lines = bufio.NewReaderSize(gz, maxScanLine)
+			} else {
+				lines.Reset(gz)
+			}
+			var stop bool
+			stop, err = scanLines(ctx, lines, fn, &n)
+			if stop {
+				return err
+			}
+		}
+		if err == nil { // 成员完整，下一个成员紧接其后
+			off += cr.n - int64(zr.Buffered())
+			continue
+		}
+		next := nextMember(f, off+1, size)
+		if next < 0 {
+			// 最后一个成员没有结束：正在写入，或进程退出时没写完。读到这里为止
+			if !errors.Is(err, io.ErrUnexpectedEOF) && !errors.Is(err, io.EOF) {
+				damaged = true
+			}
+			break
+		}
+		damaged = true
+		off = next
+	}
+	if damaged {
+		return ErrSkippedDamaged
+	}
+	return nil
+}
+
+// scanLines 逐行回调，fn 返回 false 或 ctx 结束时 stop 为 true。
+func scanLines(ctx context.Context, br *bufio.Reader, fn func([]byte) bool, n *int) (stop bool, err error) {
 	for {
 		line, err := br.ReadSlice('\n')
 		if len(line) > 0 && line[len(line)-1] == '\n' {
 			if !fn(line[:len(line)-1]) {
-				return nil
+				return true, nil
 			}
 		} else if errors.Is(err, bufio.ErrBufferFull) {
 			for errors.Is(err, bufio.ErrBufferFull) { // 超长行：跳过
@@ -239,15 +375,49 @@ func scanSegment(ctx context.Context, path string, fn func([]byte) bool) error {
 			}
 		}
 		if err != nil {
-			if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
-				return nil
+			if errors.Is(err, io.EOF) {
+				return false, nil
 			}
-			return err
+			return false, err
 		}
-		if n++; n%4096 == 0 && ctx.Err() != nil {
-			return ctx.Err()
+		if *n++; *n%4096 == 0 && ctx.Err() != nil {
+			return true, ctx.Err()
 		}
 	}
+}
+
+type countingReader struct {
+	r io.Reader
+	n int64
+}
+
+func (c *countingReader) Read(p []byte) (int, error) {
+	n, err := c.r.Read(p)
+	c.n += int64(n)
+	return n, err
+}
+
+// gzipMagic 是本程序写出的 gzip 成员头：魔数、deflate、无附加字段。
+var gzipMagic = []byte{0x1f, 0x8b, 0x08, 0x00}
+
+// nextMember 从 from 开始查找下一个 gzip 成员头，找不到返回 -1。压缩数据中偶然出现同样的字节时，
+// 解压会很快失败，调用方继续向后查找。
+func nextMember(f *os.File, from, size int64) int64 {
+	buf := make([]byte, 1<<20)
+	for off := from; off < size; {
+		n, err := f.ReadAt(buf, off)
+		if n <= 0 {
+			return -1
+		}
+		if i := bytes.Index(buf[:n], gzipMagic); i >= 0 {
+			return off + int64(i)
+		}
+		if err != nil {
+			return -1
+		}
+		off += int64(n - len(gzipMagic) + 1) // 魔数可能跨在两次读取之间
+	}
+	return -1
 }
 
 // Export 把检索结果按行写出（取证导出）：“时间 \t 数据源 \t 来源IP \t 原始日志”。
