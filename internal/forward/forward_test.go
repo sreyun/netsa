@@ -107,8 +107,17 @@ func TestTCPDeliveryAndReconnect(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("没有收到消息")
 	}
-	if s := f.Stats()[0]; s.Sent != 1 || !s.Connected {
-		t.Fatalf("状态: %+v", s)
+	// 写入返回后才计数：对端可能先收到这一行，所以等计数更新，而不是收到后立刻检查（CI 上偶发 Sent:0）
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		s := f.Stats()[0]
+		if s.Sent == 1 && s.Connected {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("状态: %+v", s)
+		}
+		time.Sleep(5 * time.Millisecond)
 	}
 }
 
