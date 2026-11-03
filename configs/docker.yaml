@@ -149,6 +149,18 @@ rawlog:
   retention_days: 180
   max_size_gb: 50
 
+# 对外发布服务清单：互联网上每天都有大量盲打，探测的端口多数并没有在防火墙上做映射，到达不了任何服务。
+# 开启后，目标为公网地址、且端口不在清单内的端口探测与端口暴力破解只打标签（不告警、不计入威胁评分）；
+# 打到已映射端口、经 DNAT 转发到内网的访问，以及 Web 应用上的攻击照常告警。
+# 清单不必手工逐条登记：平台会把防火墙日志中有会话证据（确实到达了服务）的对外服务自动识别为已映射，
+# 可在“攻击面”页面查看。关闭：enabled 改为 false，然后 docker compose restart netsa。
+exposure:
+  enabled: true
+  # 经云负载均衡、上级防火墙转发，防火墙日志里看不到映射关系的端口，视为已映射（照常告警）
+  allowed_ports: [80, 443]
+  # 精确映射（可选）：公网 IP:端口 → 内网 IP:端口，写法见 configs/config.yaml 中 exposure 段的示例
+  services: []
+
 # 防篡改审计链（/app/state/audit）
 audit:
   retention_days: 180

@@ -44,7 +44,8 @@ services:
     group_add:
       - "4"
     volumes:
-      # 配置文件挂载为只读，修改后 docker compose restart netsa 生效。
+      # 配置文件挂载为只读，修改后 docker compose restart netsa 生效。检测相关的开关（如对外发布服务清单
+      # exposure、内网网段 geo.intranet、原始日志留存 rawlog）都在这个文件里。
       # 必须与本文件放在一起：缺少该文件时 Docker 会创建同名空目录，容器无法启动
       - ./configs/docker.yaml:/app/configs/docker.yaml:ro
       # 必须挂载目录而不是单个文件：logrotate 轮转会创建新文件，单文件挂载会一直指向旧文件
