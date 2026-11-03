@@ -4,6 +4,11 @@
 
 只记录影响使用的变化。完整的改动见 [Git 提交记录](https://github.com/sreyun/netsa/commits/master)。
 
+## 1.7.5
+
+- **docker 部署默认开启对外发布服务清单**（`configs/docker.yaml` 的 `exposure.enabled: true`）：打到没有在防火墙上映射的公网端口的探测与端口暴力破解只打标签，不告警、不计入威胁评分；已映射端口、经 DNAT 转发到内网的访问与 Web 应用上的攻击照常告警。对外服务由会话证据自动识别，80、443 作为兜底端口视为已映射。不需要时把 `enabled` 改为 `false`。
+- `.env.example`、`docker-compose.yml` 说明检测相关的开关在 `configs/docker.yaml` 中。
+
 ## 1.7.4
 
 基于真实的防火墙与 nginx 日志排查发现并修复：
