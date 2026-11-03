@@ -139,6 +139,20 @@ func (s *Server) learnPin(w http.ResponseWriter, r *http.Request) {
 	if sess := sessionOf(r); sess != nil {
 		user = sess.User
 	}
+	// 自学习发现的观察规则：停用 / 启用
+	if action := r.PathValue("action"); action == "disable" || action == "enable" {
+		if !s.Learn.SetLearnedRule(rule, user, action == "enable") {
+			writeError(w, http.StatusNotFound, "没有这条自学习规则")
+			return
+		}
+		act := "停用自学习发现的观察规则"
+		if action == "enable" {
+			act = "启用自学习发现的观察规则"
+		}
+		s.audit(r, act, rule, nil)
+		writeJSON(w, map[string]any{"ok": true})
+		return
+	}
 	pin := r.PathValue("action") == "pin"
 	s.Learn.Pin(rule, user, pin)
 	act := "锁定规则（不参与自动校准）"

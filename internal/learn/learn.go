@@ -150,6 +150,9 @@ type snapshot struct {
 	ctx     map[[2]string]ContextStat // 规则 + 归一化目标
 	sources map[string]confirmed      // 最近一次结论为「确认攻击」的来源
 	days    int                       // 确认攻击源的有效天数
+	// cleared 是最近一次人工结论为「误报」的来源及其时间：此后的自动确认不再生效（以人的结论为准）
+	cleared  map[string]time.Time
+	escalate bool
 }
 
 // confirmed 是来源最近一次被确认为攻击的事件。
@@ -204,6 +207,9 @@ type Learner struct {
 	comp       map[string]string      // 合规测评项 → 上次结果（见 compliance.go）
 	nets       map[string]*LearnedNet // 从防火墙日志自动学习的内网网段（见 netlearn.go）
 	netPending map[string]*netObs
+	auto       map[string]*AutoSource // 自动确认的攻击源（见 attacklearn.go）
+	autoSnap   atomic.Pointer[map[string]AutoSource]
+	atk        attackState
 	compHist   []CompPoint
 	dirty      bool
 
@@ -232,6 +238,7 @@ type state struct {
 	AI        map[uint64]*AIRecord `json:"ai,omitempty"`
 	Policy    *Policy              `json:"policy,omitempty"`
 	Intranet  []LearnedNet         `json:"intranet,omitempty"`
+	Attack    *attackPersist       `json:"attack,omitempty"`
 }
 
 // Load 读取学习状态（文件不存在时从零开始）。
@@ -250,7 +257,8 @@ func Load(opt Options) (*Learner, error) {
 	}
 	opt.CtxMinFP = max(3, opt.MinVerdicts-2)
 	l := &Learner{opt: opt, cases: map[uint64]*Case{}, pinned: map[string]bool{}, handled: map[string]string{},
-		users: map[string]*userBase{}, comp: map[string]string{}, ai: map[uint64]*AIRecord{}, nets: map[string]*LearnedNet{}, netPending: map[string]*netObs{}}
+		users: map[string]*userBase{}, comp: map[string]string{}, ai: map[uint64]*AIRecord{}, nets: map[string]*LearnedNet{}, netPending: map[string]*netObs{}, auto: map[string]*AutoSource{},
+		atk: attackState{campaigns: map[string]*Campaign{}, cand: map[string]*candidate{}, rules: map[string]*LearnedRule{}}}
 	l.applied.since = time.Now()
 	if opt.Path != "" {
 		data, err := os.ReadFile(opt.Path)
@@ -291,6 +299,9 @@ func Load(opt Options) (*Learner, error) {
 					l.nets[n.Prefix] = &n
 				}
 			}
+			if st.Attack != nil {
+				l.loadAttackLocked(*st.Attack)
+			}
 			if p := st.Policy; p != nil && p.check() == nil { // 界面设置的策略优先于配置文件
 				l.policy = p
 				l.opt.apply(*p)
@@ -317,6 +328,8 @@ func (l *Learner) Save() error {
 	}
 	st := state{Handled: l.handled, Changes: l.changes, Users: l.users, Anomalies: l.anomalies, Comp: l.comp, CompHist: l.compHist, AI: l.ai, Policy: l.policy}
 	st.Intranet = l.learnedNetsLocked()
+	ap := l.attackPersistLocked()
+	st.Attack = &ap
 	for _, c := range l.cases {
 		st.Cases = append(st.Cases, c)
 	}
@@ -586,7 +599,8 @@ func (l *Learner) recomputeLocked(now time.Time, user string) []Change {
 	l.stats = stats
 	ctxCal, ctxChanges := l.calibrateContextsLocked(ctx, old, now, user)
 	changes = append(changes, ctxChanges...)
-	l.calib.Store(&snapshot{rules: calib, ctx: ctxCal, sources: l.confirmedSourcesLocked(), days: l.opt.EscalateDays})
+	l.calib.Store(&snapshot{rules: calib, ctx: ctxCal, sources: l.confirmedSourcesLocked(), cleared: l.clearedSourcesLocked(),
+		days: l.opt.EscalateDays, escalate: l.opt.Escalate})
 	for _, c := range changes {
 		l.logLocked(c)
 	}
@@ -709,21 +723,19 @@ func (l *Learner) Calibrate(ev *model.Event, hits []model.Hit) []model.Hit {
 		return hits
 	}
 	m := l.calib.Load()
-	if m == nil || len(m.rules)+len(m.ctx)+len(m.sources) == 0 {
+	autoP := l.autoSnap.Load()
+	hasAuto := autoP != nil && len(*autoP) > 0
+	if m == nil || len(m.rules)+len(m.ctx)+len(m.sources) == 0 && !hasAuto {
 		return hits
 	}
-	// 已确认的攻击来源在有效期内复现（按事件时间判断，离线回放历史日志时同样准确）
-	var src confirmed
-	if ev != nil && len(m.sources) > 0 {
-		if c, ok := m.sources[ev.SrcIP]; ok {
-			at := ev.Time
-			if at.IsZero() {
-				at = time.Now()
-			}
-			if age := at.Sub(c.time); age >= -time.Hour && age <= time.Duration(m.days)*24*time.Hour {
-				src = c
-			}
+	// 已确认的攻击来源（分析员确认或自动确认）在有效期内复现（按事件时间判断，离线回放历史日志时同样准确）
+	srcReason, srcOK := "", false
+	if ev != nil && (len(m.sources) > 0 || hasAuto) {
+		at := ev.Time
+		if at.IsZero() {
+			at = time.Now()
 		}
+		srcReason, srcOK = l.confirmedSource(ev.SrcIP, at)
 	}
 	var out []model.Hit
 	target, haveTarget := "", false
@@ -747,8 +759,8 @@ func (l *Learner) Calibrate(ev *model.Event, hits []model.Hit) []model.Hit {
 			}
 		}
 		// 确认攻击源复现：只升级低危 / 中危的攻击命中，最多到高危；严重级只能由成功利用等证据产生
-		if delta == 0 && src.incident != 0 && hits[i].Severity >= model.SevLow && hits[i].Severity < model.SevHigh {
-			note, delta = "；自学习：该来源曾被分析员确认为攻击（事件 #"+strconv.FormatUint(src.incident, 10)+"），等级上调一级", 1
+		if delta == 0 && srcOK && hits[i].Severity >= model.SevLow && hits[i].Severity < model.SevHigh {
+			note, delta = "；自学习："+srcReason+"，等级上调一级", 1
 			l.applied.escalated.Add(1)
 		}
 		if delta == 0 {
@@ -863,6 +875,7 @@ type Report struct {
 	Expired     int           `json:"expired"`   // 超过学习窗口、不再参与校准的样本数
 	Trend       []WeekStat    `json:"trend"`     // 近 8 周的人工结论，误报占比下降说明检测在变准
 	Intranet    []LearnedNet  `json:"intranet"`  // 从防火墙日志自动学习的内网网段
+	Attack      AttackReport  `json:"attack"`    // 从日志与 AI 研判中自动学习的攻击行为
 }
 
 // Report 返回自学习状态概览。
@@ -886,6 +899,7 @@ func (l *Learner) Report() Report {
 		}
 	}
 	r.Intranet = l.learnedNetsLocked()
+	r.Attack = l.attackReportLocked()
 	r.Cases = len(l.cases)
 	now := time.Now()
 	r.Trend = weekTrend(l.cases, now)

@@ -214,6 +214,10 @@ func (p *Pipeline) aggregate(items []item) {
 		hits[i] = p.gateExposure(it.ev, hits[i], reach, why)
 		hits[i] = p.tuneFirewall(it.ev, hits[i], reach)
 		hits[i] = p.Suppress.Filter(it.ev, hits[i])
+		if !it.whitelisted {
+			// 攻击活动关联、未知攻击发现：只追加命中（学到的观察规则），在校准之前，使学到的规则同样参与升级与等级裁决
+			hits[i] = p.Learn.ObserveAttack(it.ev, hits[i])
+		}
 		hits[i] = p.Learn.Calibrate(it.ev, hits[i]) // 资产漏洞关联之前：有漏洞证据的升级不受校准影响
 		if p.Assets != nil && len(hits[i]) > 0 {
 			hits[i] = p.enrichAssets(it.ev, hits[i])
@@ -233,6 +237,10 @@ func (p *Pipeline) aggregate(items []item) {
 			continue
 		}
 		for _, a := range res.Alerts {
+			// 有证据的成功利用：自动确认来源，之后该来源的低危 / 中危命中升一级（只会让检测更敏感）
+			if a.Proven && a.Result == model.ResultSuccess {
+				p.Learn.ConfirmSource(a.SrcIP, "evidence", "攻击成功且有证据："+a.Name, a.Time)
+			}
 			if p.OnAlert != nil {
 				p.OnAlert(a)
 			}
@@ -470,6 +478,11 @@ func (p *Pipeline) tuneFirewall(ev *model.Event, hits []model.Hit, reach exposur
 		switch {
 		case h.RuleID == "bhv-fwbrute" && reach == exposure.ReachYes:
 			edit(i).Severity = model.SevHigh
+		case h.RuleID == "bhv-beacon" && p.Exposure != nil && p.Exposure.Configured(ev.DstIP, ev.DstPort, ev.Proto):
+			// 定时连接本单位自己对外发布的服务（如内部调用模型接口、监控探活）不是 C2 心跳
+			e := edit(i)
+			e.TagOnly = true
+			e.Evidence = truncEvidence(e.Evidence + "；目的地址是本单位对外发布的服务（已登记或由会话证据识别），属于内部服务之间的定时调用，只打标签")
 		case h.Category == detect.CatRiskService || h.Category == detect.CatIoT:
 			if h.Severity <= model.SevLow || reach == exposure.ReachYes || p.Behavior == nil || detect.InternalSource(ev) {
 				continue

@@ -18,6 +18,7 @@ type AIRecord struct {
 	Model      string    `json:"model"`
 	Rules      []string  `json:"rules,omitempty"` // 事件涉及的规则与目标：可信模型的误报判断据此生成待确认的建议
 	Targets    []string  `json:"targets,omitempty"`
+	Source     string    `json:"source,omitempty"` // 事件的来源 IP：模型高置信判为攻击时自动确认该来源
 	Time       time.Time `json:"time"`
 }
 
@@ -70,6 +71,10 @@ func (l *Learner) RecordAI(incident uint64, r AIRecord) {
 	changes := l.recomputeLocked(time.Now(), "") // 模型的新判断可能形成待确认的建议
 	l.mu.Unlock()
 	l.emit(changes)
+	// 模型高置信判为攻击：自动确认来源（只会让该来源之后的命中升级，学错的代价是多几条告警）
+	if r.Source != "" && r.Verdict == "attack" && r.Confidence >= aiConfirmConfidence {
+		l.ConfirmSource(r.Source, "ai", fmt.Sprintf("模型 %s 以 %d%% 置信度判为攻击（事件 #%d）", r.Model, r.Confidence, incident), r.Time)
+	}
 }
 
 // Refresh 按当前时间重新计算校准结果（由后台任务定期调用）：样本超过学习窗口后，相应的校准自动撤销。
@@ -79,6 +84,7 @@ func (l *Learner) Refresh(now time.Time) {
 	}
 	l.mu.Lock()
 	changes := l.recomputeLocked(now, "")
+	l.pruneAttackLocked(now, l.opt.EscalateDays)
 	l.mu.Unlock()
 	l.emit(changes)
 }

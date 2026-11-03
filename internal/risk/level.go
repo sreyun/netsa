@@ -44,6 +44,7 @@ var catFloor = map[string]model.Severity{
 	"CC攻击":       model.SevMedium,
 	"洪水攻击":       model.SevMedium,
 	"破坏性攻击":      model.SevHigh, // 业务路径在可疑来源活动后对所有访客失效
+	"未知攻击（自学习）":  model.SevLow,  // 只出现在已确认攻击源的请求形态，观察提示
 	"设备威胁告警":     model.SevLow,  // 设备已给出自身等级，未归类时只做兜底，不抬高
 	"威胁情报":       model.SevLow,
 	"IP伪造":       model.SevLow,

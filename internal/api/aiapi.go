@@ -165,7 +165,7 @@ func (s *Server) triage(ctx context.Context, id uint64, user, ip string) (ai.Ver
 			for _, kv := range d.Targets {
 				targets = append(targets, kv.Name)
 			}
-			s.Learn.RecordAI(id, learn.AIRecord{Verdict: v.Verdict, Confidence: v.Confidence, Model: v.Model, Rules: rules, Targets: targets, Time: v.Time})
+			s.Learn.RecordAI(id, learn.AIRecord{Verdict: v.Verdict, Confidence: v.Confidence, Model: v.Model, Rules: rules, Targets: targets, Time: v.Time, Source: d.Key})
 		}
 		if _, uerr := s.Store.UpdateIncidents([]uint64{id}, "AI（"+v.Model+"）", store.IncidentUpdate{Note: v.Note()}); uerr != nil {
 			log.Printf("[ai] 写入事件 #%d 处置记录失败: %v", id, uerr)

@@ -37,6 +37,27 @@ func (l *Learner) confirmedSourcesLocked() map[string]confirmed {
 	return out
 }
 
+// clearedSourcesLocked 返回最近一次人工结论为「误报」的来源及结论时间（调用方持锁）：
+// 这之后的自动确认（证据、模型、攻击活动）不再升级该来源的命中，以人的结论为准。
+func (l *Learner) clearedSourcesLocked() map[string]time.Time {
+	latest := map[string]*Case{}
+	for _, c := range l.cases {
+		if c.Source == "" {
+			continue
+		}
+		if old := latest[c.Source]; old == nil || c.Time.After(old.Time) {
+			latest[c.Source] = c
+		}
+	}
+	out := map[string]time.Time{}
+	for src, c := range latest {
+		if c.Verdict == VerdictFP {
+			out[src] = c.Time
+		}
+	}
+	return out
+}
+
 // Policy 返回当前生效的自学习策略，以及是否来自界面设置。
 func (l *Learner) Policy() (Policy, bool) {
 	if l == nil {

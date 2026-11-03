@@ -1018,7 +1018,8 @@ $('#auVerify').addEventListener('click', () => ntBusy($('#auVerify'), async () =
 }));
 
 // ---------------- 自学习 ----------------
-const LN_CHANGE = { calibrate: '自动下调', restore: '恢复', calibrate_ctx: '目标级下调', restore_ctx: '目标级恢复', pin: '锁定', unpin: '解锁', apply: '采纳建议', dismiss: '忽略建议', policy: '策略调整' };
+const LN_CHANGE = { calibrate: '自动下调', restore: '恢复', calibrate_ctx: '目标级下调', restore_ctx: '目标级恢复', pin: '锁定', unpin: '解锁', apply: '采纳建议', dismiss: '忽略建议', policy: '策略调整',
+  intranet: '识别内网网段', confirm_auto: '自动确认攻击源', discover: '发现未知攻击', discover_disable: '停用观察规则', discover_enable: '启用观察规则' };
 let lnPolicy = null;
 const LN_ANOM = { new_net: '新地址登录', odd_hour: '非常用时段', login_fail: '登录失败暴增', bulk_export: '批量导出', sensitive: '高危变更' };
 // 近 8 周人工结论中的误报占比（从早到晚）：持续下降说明检测在变准
@@ -1041,12 +1042,12 @@ async function loadLearn() {
   if (aiStatus) meta.ai = aiStatus;
   const lastComp = (r.compliance || []).slice(-1)[0];
   const nets = r.intranet || [];
+  const atk = r.attack || { auto_sources: [], auto_total: 0, campaigns: [], learned_rules: [], candidates: 0 };
   $('#lnKpis').innerHTML = [
     ['研判样本', num(r.cases), `确认攻击 ${num(r.tp)} · 误报 ${num(r.fp)}`],
-    // 不需要人工结论、直接从原始日志学到的内容
-    ['日志自动学习', num(nets.length), nets.length
-      ? `内网网段 ${nets.slice(0, 2).map((n) => esc(n.prefix)).join('、')}${nets.length > 2 ? ` 等 ${num(nets.length)} 个` : ''}`
-      : '从防火墙安全域识别内网网段'],
+    // 不需要人工结论、直接从原始日志与 AI 研判学到的内容
+    ['日志自动学习', num(nets.length + atk.auto_total + atk.campaigns.length + atk.learned_rules.length),
+      `内网网段 ${num(nets.length)} · 攻击源 ${num(atk.auto_total)} · 攻击活动 ${num(atk.campaigns.length)} · 观察规则 ${num(atk.learned_rules.length)}`],
     ['自动生效', num(r.applied.rule + r.applied.target + r.applied.escalated),
       enabled ? `下调 ${num(r.applied.rule + r.applied.target)} · 升级 ${num(r.applied.escalated)} 次（${esc(fmtShort(r.applied.since))} 启动以来）` : '未启用自学习'],
     ['待确认建议', num(r.suggestions.length), '采纳后创建误报抑制'],
@@ -1060,6 +1061,29 @@ async function loadLearn() {
         <td>${num(s.fp)} 次</td><td class="nowrap">${incLinks(s.incidents)}</td>
         <td class="nowrap">${canOperate() ? `<button type="button" class="btn" data-ln="apply" data-id="${esc(s.id)}">采纳</button> <button type="button" class="btn" data-ln="dismiss" data-id="${esc(s.id)}">忽略</button>` : ''}</td></tr>`).join('')}</tbody></table>`
     : '<div class="muted">暂无建议。分析员把事件处置为“误报”后，同一规则在同一目标上反复误报、或同一来源多次被整体判为误报时，会在这里提示。</div>';
+  // 从日志与 AI 自动学到的攻击行为
+  const AUTO_KIND = { evidence: '成功证据', ai: '模型研判', campaign: '同一攻击活动' };
+  const atkEmpty = (s) => `<div class="muted">${s}</div>`;
+  $('#lnAttack').innerHTML = `<h4>自动确认的攻击源 <small class="muted">共 ${num(atk.auto_total)} 个，显示最近 ${num(atk.auto_sources.length)} 个</small></h4>`
+    + (atk.auto_sources.length
+      ? `<div class="scroll"><table class="table"><thead><tr><th>来源</th><th>依据</th><th>说明</th><th>时间</th></tr></thead><tbody>${atk.auto_sources.map((a) => `<tr>
+          <td class="nowrap">${ipLink(a.ip)}</td><td class="nowrap">${esc(AUTO_KIND[a.kind] || a.kind)}</td>
+          <td>${esc(a.reason)}</td><td class="nowrap muted">${esc(fmtShort(a.time))}</td></tr>`).join('')}</tbody></table></div>`
+      : atkEmpty('暂无。出现有证据的成功利用、或模型以 85% 以上的置信度判为攻击时自动确认。'))
+    + '<h4>攻击活动 <small class="muted">载荷中的带外回连标识相同，说明是同一个操作者</small></h4>'
+    + (atk.campaigns.length
+      ? `<div class="scroll"><table class="table"><thead><tr><th>回连标识</th><th>来源</th><th>次数</th><th>载荷样例</th><th>时间</th></tr></thead><tbody>${atk.campaigns.map((c) => `<tr>
+          <td class="mono nowrap">${esc(c.key)}</td><td><div class="cell-chips">${c.ips.slice(0, 8).map((ip) => ipLink(ip)).join(' ')}${c.ips.length > 8 ? ` <span class="muted">等 ${num(c.ips.length)} 个</span>` : ''}</div></td>
+          <td class="num">${num(c.events)}</td><td class="mono raw">${esc(c.sample)}</td><td class="nowrap muted">${esc(fmtShort(c.first))}<br>${esc(fmtShort(c.last))}</td></tr>`).join('')}</tbody></table></div>`
+      : atkEmpty('暂无。多个来源的攻击载荷使用同一个带外回连标识（如 interactsh、dnslog）时显示。'))
+    + `<h4>观察规则 <small class="muted">正在观察 ${num(atk.candidates)} 种候选请求形态</small></h4>`
+    + (atk.learned_rules.length
+      ? `<div class="scroll"><table class="table"><thead><tr><th>请求形态</th><th>来源</th><th>匹配</th><th>生成时间</th><th></th></tr></thead><tbody>${atk.learned_rules.map((x) => `<tr class="${x.disabled ? 'muted' : ''}">
+          <td class="mono"><b>${esc(x.shape)}</b><div class="muted">例：${esc(x.example)}</div></td>
+          <td><div class="cell-chips">${x.sources.slice(0, 5).map((ip) => ipLink(ip)).join(' ')}</div></td>
+          <td class="num">${num(x.hits)}</td><td class="nowrap muted">${esc(fmtShort(x.time))}</td>
+          <td class="nowrap">${isAdmin() ? `<button type="button" class="btn" data-ln="${x.disabled ? 'enable' : 'disable'}" data-rule="${esc(x.id)}">${x.disabled ? '启用' : '停用'}</button>` : (x.disabled ? '已停用' : '')}</td></tr>`).join('')}</tbody></table></div>`
+      : atkEmpty(`暂无。同一种请求形态被 3 个以上已确认攻击源使用、没有命中任何规则、正常访客从未使用时，生成低危观察规则。`));
   $('#lnAnoms').innerHTML = r.anomalies.length
     ? `<table class="table"><tbody>${r.anomalies.map((a) => `<tr><td class="nowrap muted">${esc(fmtShort(a.time))}</td><td class="nowrap">${badge(a.severity)} ${esc(LN_ANOM[a.kind] || a.kind)}</td>
         <td><b>${esc(a.title)}</b><div class="muted">${esc(a.detail)}</div></td></tr>`).join('')}</tbody></table>`

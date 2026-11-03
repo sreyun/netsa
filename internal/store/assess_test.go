@@ -81,8 +81,9 @@ func TestC2Egress(t *testing.T) {
 			t.Fatalf("出站访问的公网地址不应计入暴露面: %+v", sv)
 		}
 	}
+	// 只连过 Tor 出口（中危）的主机不列为疑似失陷：迹象不足，仍在告警与攻击面中提示
 	comp := s.CompromisedAssets()
-	if len(comp) != 4 || comp[0].Kind != "host" || comp[0].Confidence != "high" || len(comp[0].IPs) == 0 {
+	if len(comp) != 3 || comp[0].Kind != "host" || comp[0].Confidence != "high" || len(comp[0].IPs) == 0 {
 		t.Fatalf("失陷主机: %+v", comp)
 	}
 	if s.Overview().Totals.Outbound != 1 {
@@ -239,7 +240,8 @@ func TestSuccessBaseline(t *testing.T) {
 	}
 }
 
-// 周期性外连（无情报命中）：记录告警并作为中置信失陷迹象；出站流量本身不计入攻击源统计。
+// 周期性外连（无情报命中）：记录告警并在攻击面中提示，但不列为疑似失陷主机——定时调用接口、监控探活、
+// 软件更新同样规律；出站流量本身不计入攻击源统计。
 func TestBeaconCompromise(t *testing.T) {
 	s := newTestStore()
 	ev := &model.Event{Kind: model.KindFirewall, SrcIP: "10.0.0.31", DstIP: "198.51.100.66", DstPort: 443, Action: model.ActionAllow, Outbound: true, Time: time.Now()}
@@ -247,9 +249,15 @@ func TestBeaconCompromise(t *testing.T) {
 	if len(r.Alerts) != 1 {
 		t.Fatalf("出站流量命中周期性外连应告警: %+v", r)
 	}
-	c := s.CompromisedAssets()
-	if len(c) != 1 || c[0].Asset != "10.0.0.31" || c[0].Confidence != "medium" || c[0].IPs[0] != "198.51.100.66" {
-		t.Fatalf("周期性外连应为中置信失陷: %+v", c)
+	if c := s.CompromisedAssets(); len(c) != 0 {
+		t.Fatalf("只凭规律外连不应列为疑似失陷主机: %+v", c)
+	}
+	found := false
+	for _, f := range s.Surface().Findings {
+		found = found || f.Category == "失陷迹象" && f.Asset == "10.0.0.31"
+	}
+	if !found {
+		t.Fatal("规律外连仍应在攻击面中提示")
 	}
 	if s.Record(&model.Event{Kind: model.KindFirewall, SrcIP: "10.0.0.31", DstIP: "1.1.1.1", DstPort: 443, Outbound: true, Time: time.Now()}, nil).NewIP {
 		t.Fatal("普通出站流量不应建立画像")

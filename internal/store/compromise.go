@@ -73,6 +73,11 @@ func (s *Store) compromisedLocked() []*Compromised {
 		case "攻击成功研判":
 			kind = "web"
 		case "失陷迹象":
+			// 只凭固定间隔的外连（中危）不足以判定失陷：定时调用接口、监控探活、软件更新同样规律。
+			// 命中威胁情报、安全设备报出恶意软件等高危迹象才列为疑似失陷主机，规律外连仍在攻击面中提示
+			if f.effectiveSev() < model.SevHigh {
+				continue
+			}
 			kind = "host"
 		default:
 			continue

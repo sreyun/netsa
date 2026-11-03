@@ -300,6 +300,8 @@
       <div class="panel"><h3>待确认的建议 <small>反复被研判为误报的模式；采纳后创建误报抑制，需人工确认</small></h3><div id="lnSugs" class="scroll"></div></div>
       <div class="panel"><h3>平台安全异常 <small>学习账号的常用登录网段与时段，发现异常登录、批量导出与高危变更</small></h3><div id="lnAnoms" class="scroll"></div></div>
     </div>
+    <div class="panel"><h3>从日志与 AI 自动学到的攻击行为 <small>不需要人工结论，只会让检测更敏感、不降低任何告警的等级：有证据的成功利用或模型高置信判为攻击的来源自动确认，有效期内复现时低危 / 中危命中升一级；同一带外回连标识关联为同一攻击活动；只出现在已确认攻击源的请求形态生成观察规则</small></h3>
+      <div id="lnAttack"></div></div>
     <div class="panel"><h3>规则准确率与自动校准 <small>只从分析员的处置结论学习：已处置 = 确认攻击，误报 = 误报；准确率持续偏低的规则自动下调一级，可锁定恢复</small><button type="button" class="more need-admin" id="lnPolicyEdit">策略 ›</button></h3>
       <div class="ln-policy" id="lnPolicy"></div>
       <div class="scroll"><table class="table" id="lnRules"></table></div></div>
