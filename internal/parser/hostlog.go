@@ -103,6 +103,7 @@ var (
 	reWinUser   = regexp.MustCompile(`(?i)(?:TargetUserName|Account Name|帐户名称|账户名称|帐户名|账户名)["\s:=]+([^\s"\\,;]+)`)
 	reWinLogon  = regexp.MustCompile(`(?i)(?:LogonType|Logon Type|登录类型)["\s:=]+(\d+)`)
 	reWinHost   = regexp.MustCompile(`(?i)(?:Computer|Hostname|计算机)["\s:=]+([A-Za-z0-9._-]+)`)
+	reWinWks    = regexp.MustCompile(`(?i)(?:WorkstationName|Workstation Name|工作站名)["\s:=]+([A-Za-z0-9._-]+)`)
 	reWinGroup  = regexp.MustCompile(`(?i)(?:TargetUserName|Group Name|组名)["\s:=]+([^\t"\\,;]+?)(?:\s{2,}|["\t,;]|$)`)
 	reWinMember = regexp.MustCompile(`(?i)(?:MemberName|Member Name|Security ID)["\s:=]+(?:CN=)?([^,"\s\\]+)`)
 )
@@ -188,6 +189,7 @@ func (WindowsSecurity) Parse(line string) (*model.Event, bool) {
 			return ""
 		}
 		kv["ipaddress"], kv["targetusername"], kv["logontype"], kv["computer"] = find(reWinIP), find(reWinUser), find(reWinLogon), find(reWinHost)
+		kv["workstationname"] = find(reWinWks)
 		if id == 4728 || id == 4732 || id == 4756 {
 			kv["group"], kv["membername"] = find(reWinGroup), find(reWinMember)
 		}
@@ -220,6 +222,12 @@ func (WindowsSecurity) Parse(line string) (*model.Event, bool) {
 	ev := authEvent("windows_security", svc, ip, user, ok)
 	ev.EventID = id
 	ev.Host = pick(kv, "computer", "computer_name", "computername", "hostname")
+	if w := pick(kv, "workstationname", "workstation_name", "workstation"); w != "" && w != "-" {
+		ev.SrcHost = w // 来源主机名：串起横向登录链（A 登录 H1，H1 再登录 H2）
+	}
+	if ip := pick(kv, "host.ip", "hostip", "agent.ip"); isIP(ip) && ev.DstIP == "" {
+		ev.DstIP = ip // Winlogbeat 记录的本机地址：被登录的主机
+	}
 	if id == 4728 || id == 4732 || id == 4756 {
 		ev.URI = pick(kv, "group", "targetusername")
 		ev.User = pick(kv, "membername", "member_name", "subjectusername")

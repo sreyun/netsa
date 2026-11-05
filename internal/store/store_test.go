@@ -355,3 +355,22 @@ func TestRuleHits(t *testing.T) {
 		t.Fatalf("返回的应当是副本，实际 %d", got)
 	}
 }
+
+// 事后补记的命中（Replay）：只记录告警与攻击统计，不再计入事件量与画像的访问统计。
+func TestReplayNotCounted(t *testing.T) {
+	s := newTestStore()
+	now := time.Now()
+	ev := &model.Event{Kind: model.KindFirewall, SrcIP: "10.0.0.41", DstIP: "10.0.0.24", DstPort: 445, Proto: "tcp", Action: model.ActionAllow, Time: now}
+	s.Record(ev, nil)
+	replay := *ev
+	replay.Replay = true
+	r := s.Record(&replay, []model.Hit{{RuleID: "bhv-lateral-new", Name: "被攻击后发起内网连接（SMB）", Category: "横向移动", Severity: model.SevHigh,
+		Phase: model.PhaseExploit, Result: model.ResultAllowed}})
+	if len(r.Alerts) != 1 {
+		t.Fatalf("补记的命中应产生告警: %+v", r)
+	}
+	p := s.Profile("10.0.0.41")
+	if s.totals.Events != 1 || s.totals.Firewall != 1 || p.Events != 1 || p.FwEvents != 1 || p.Attacks != 1 {
+		t.Fatalf("补记不应重复计入事件量: totals=%+v events=%d fw=%d attacks=%d", s.totals, p.Events, p.FwEvents, p.Attacks)
+	}
+}

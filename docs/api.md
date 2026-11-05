@@ -15,6 +15,7 @@
 | `GET /api/incidents?status=active|closed|open…&severity=&assignee=me&overdue=1&q=` | 安全事件列表与各状态数量（含 `alerts` 告警条数与 `hits` 命中次数） |
 | `GET /api/exposure` | 对外发布服务清单（DNAT 映射）、兜底端口与已过滤的探测次数 |
 | `GET /api/incidents/{id}`、`POST /api/incidents/{id}`、`POST /api/incidents/bulk` | 事件详情 / 处置（`status`、`assignee`、`note`；批量时附 `ids`，运营分析员以上）、`GET /api/incidents/assignees` 可指派的负责人 |
+| `GET /api/incidents/{id}/evidence` | 一键取证包（zip）：事件详情、时间线、来源画像、资产攻击链路、归档告警、原始日志与 SHA-256 哈希清单（运营分析员以上，写入审计） |
 | `GET /api/block`、`POST /api/block` | 封禁记录、提交封禁申请（运营分析员以上） |
 | `POST /api/block/{id}/approve`、`reject`、`release` | 审批、驳回、解除封禁（管理员） |
 | `GET /api/block/edl` | 生效中的封禁地址（纯文本，每行一个），供防火墙拉取 |

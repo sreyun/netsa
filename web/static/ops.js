@@ -191,7 +191,8 @@ async function openIncident(id) {
   $('#incBody').innerHTML = `
     <div class="inc-head"><b>${esc(d.title)}</b></div>
     <div class="kv">
-      <div class="k">来源</div><div>${ipLink(d.key)} <span class="muted">${esc(d.location || '')}</span> <button type="button" class="btn sm" id="incBlock" hidden>申请封禁</button></div>
+      <div class="k">来源</div><div>${ipLink(d.key)} <span class="muted">${esc(d.location || '')}</span> <button type="button" class="btn sm" id="incBlock" hidden>申请封禁</button>
+        ${canOperate() ? `<a class="btn sm" href="/api/incidents/${d.id}/evidence" download title="打包事件详情、时间线、来源画像、资产攻击链路、原始日志与 SHA-256 哈希清单">导出取证包</a>` : ''}</div>
       <div class="k">时间</div><div>${esc(fmtTime(d.first_seen))} ~ ${esc(fmtTime(d.last_seen))}</div>
       <div class="k">告警</div><div>${num(d.alerts)} 条${d.muted ? ` <span class="muted">（累计命中 ${num(d.hits)} 次，其中 ${num(d.muted)} 次同类命中按规则节流未生成告警）</span>` : d.hits && d.hits !== d.alerts ? ` <span class="muted">（累计命中 ${num(d.hits)} 次）</span>` : ''}${d.success ? ` · <span class="res-success">疑似成功 ${d.success} 次</span>` : ''}</div>
       <div class="k">攻击类型</div><div>${(d.categories || []).map((c) => `<span class="chip">${esc(c)}</span>`).join('') || '-'}</div>

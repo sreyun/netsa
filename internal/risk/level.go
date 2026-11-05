@@ -73,6 +73,9 @@ var catFloor = map[string]model.Severity{
 	"带外探测":       model.SevCritical,
 	"带外探测回连":     model.SevCritical, // 内网主机解析 DNSLog 等带外平台的域名
 	"攻击后回连":      model.SevMedium,   // 内网主机在遭受攻击后连接攻击者（服务器高危、载荷中的回连地址严重，由联动分析给出）
+	"数据外传":       model.SevMedium,   // 内网主机外发流量突增：是否为业务（备份、同步）需要核实
+	"大量下载":       model.SevMedium,
+	"横向移动":       model.SevMedium,
 }
 
 // responseProvable 是「响应码 / 响应大小可以判定攻击是否成功」的分类。

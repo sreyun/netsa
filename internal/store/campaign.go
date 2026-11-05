@@ -104,17 +104,20 @@ func (s *Store) buildCampaigns() *CampaignReport {
 	rep.Scanned = len(list)
 
 	// UA 的使用人数（评估工具指纹的稀有度）与分桶
-	uaUsers := map[string]int{}
+	uaUsers, tlsUsers := map[string]int{}, map[string]int{}
 	buckets := map[string][]int{}
 	s.chunked(list, func(o *IPProfile) {
 		for ua := range o.UAs {
 			uaUsers[ua]++
 		}
+		for fp := range o.TLS {
+			tlsUsers[fp]++
+		}
 	})
 	for i := 0; i < len(list); i += scanChunk {
 		s.mu.RLock()
 		for k := i; k < min(i+scanChunk, len(list)); k++ {
-			for _, key := range campaignKeys(list[k], uaUsers, len(list)) {
+			for _, key := range campaignKeys(list[k], uaUsers, tlsUsers, len(list)) {
 				if len(buckets[key]) < campaignBucket {
 					buckets[key] = append(buckets[key], k)
 				}
@@ -155,6 +158,9 @@ func (s *Store) buildCampaigns() *CampaignReport {
 			}
 			for u, ua := range cr.uas {
 				cr.uaUsers[u] = uaUsers[ua]
+			}
+			for u, fp := range cr.tls {
+				cr.tlsUsers[u] = tlsUsers[fp]
 			}
 			cr.attackers = len(list)
 			hosts := targetHosts(list[i])
@@ -274,7 +280,7 @@ func (s *Store) buildCampaigns() *CampaignReport {
 }
 
 // campaignKeys 返回攻击源参与比对的分桶：只有可能构成强关联的线索才分桶。调用方持读锁。
-func campaignKeys(o *IPProfile, uaUsers map[string]int, total int) []string {
+func campaignKeys(o *IPProfile, uaUsers, tlsUsers map[string]int, total int) []string {
 	var keys []string
 	if a, err := netip.ParseAddr(o.IP); err == nil {
 		a = a.Unmap()
@@ -306,6 +312,15 @@ func campaignKeys(o *IPProfile, uaUsers map[string]int, total int) []string {
 		}
 		if n := uaUsers[ua]; n >= 2 && (n <= 20 || n*10 <= total) {
 			keys = append(keys, "ua:"+ua)
+		}
+	}
+	// JA3 / JA4 指纹：同一工具换出口也不变
+	for fp := range o.TLS {
+		if strings.HasPrefix(fp, "tls:") {
+			continue
+		}
+		if n := tlsUsers[fp]; n >= 2 && n <= 20 && n*10 <= total {
+			keys = append(keys, "tls:"+fp)
 		}
 	}
 	return keys

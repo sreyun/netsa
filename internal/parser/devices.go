@@ -37,6 +37,10 @@ func (PaloAlto) Parse(line string) (*model.Event, bool) {
 		ev.NatDstIP = f[10]
 	}
 	ev.Policy, ev.SrcZone, ev.DstZone = f[11], f[16], f[17]
+	// 32 / 33 为发送 / 接收字节数（数据外传按内网主机统计外发字节）
+	if f[3] == "TRAFFIC" && len(f) > 33 {
+		ev.SentBytes, ev.RecvBytes = atoi64(f[32]), atoi64(f[33])
+	}
 	if f[3] == "TRAFFIC" && f[4] == "end" && len(f) > 45 {
 		if n, err := strconv.ParseInt(f[45], 10, 64); err == nil {
 			ev.Reply = model.ReplyYes

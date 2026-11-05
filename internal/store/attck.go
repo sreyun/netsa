@@ -47,7 +47,8 @@ type Technique struct {
 var tactics = []Tactic{
 	{"TA0043", "侦察", "Reconnaissance"}, {"TA0001", "初始访问", "Initial Access"}, {"TA0002", "执行", "Execution"},
 	{"TA0003", "持久化", "Persistence"}, {"TA0005", "防御规避", "Defense Evasion"}, {"TA0006", "凭证访问", "Credential Access"},
-	{"TA0007", "发现", "Discovery"}, {"TA0009", "收集", "Collection"}, {"TA0011", "命令与控制", "Command and Control"}, {"TA0040", "影响", "Impact"},
+	{"TA0007", "发现", "Discovery"}, {"TA0008", "横向移动", "Lateral Movement"}, {"TA0009", "收集", "Collection"}, {"TA0011", "命令与控制", "Command and Control"},
+	{"TA0010", "数据渗出", "Exfiltration"}, {"TA0040", "影响", "Impact"},
 }
 
 var techniques = map[string]Technique{
@@ -83,6 +84,11 @@ var techniques = map[string]Technique{
 	"T1485":     {"T1485", "数据销毁（破坏性攻击）", "TA0040"},
 	"T1105":     {"T1105", "入口工具传输（下载恶意软件）", "TA0011"},
 	"T1566":     {"T1566", "网络钓鱼", "TA0001"},
+	"T1021":     {"T1021", "远程服务（SMB / RDP / WinRM / SSH）", "TA0008"},
+	"T1210":     {"T1210", "利用远程服务", "TA0008"},
+	"T1213":     {"T1213", "从信息存储库收集数据", "TA0009"},
+	"T1041":     {"T1041", "通过 C2 通道渗出", "TA0010"},
+	"T1048":     {"T1048", "通过其他协议渗出", "TA0010"},
 }
 
 // categoryTechniques 把检测的攻击类型映射到 ATT&CK 技术。
@@ -129,6 +135,9 @@ var categoryTechniques = map[string][]string{
 	"挖矿":         {"T1496"},
 	"主机安全事件":     {"T1070.001", "T1543", "T1053"},
 	"账号异常":       {"T1136", "T1098", "T1078"},
+	"数据外传":       {"T1041", "T1048"},
+	"大量下载":       {"T1213", "T1041"},
+	"横向移动":       {"T1021", "T1210"},
 }
 
 // techniqueCategories 是 categoryTechniques 的反向索引。

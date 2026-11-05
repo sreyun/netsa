@@ -95,6 +95,22 @@ func TestDemoAssetChain(t *testing.T) {
 			t.Fatalf("%s 阶段应选突破成功的攻击者 %s: %+v", v.Stage, breach.Src, v)
 		}
 	}
+	// P2：服务器外传数据（数据外传）、失陷后第一次连接其他主机的 SMB（横向移动）
+	var exfil, lateral bool
+	for _, v := range c.Steps {
+		switch {
+		case v.Category == "数据外传" && v.Src == "10.0.0.10" && v.Stage == "collect":
+			exfil = true
+		case v.Category == "横向移动" && v.Src == "10.0.0.10" && v.Stage == "lateral":
+			lateral = true
+		}
+	}
+	if !exfil || !lateral {
+		for _, v := range c.Steps {
+			t.Logf("%s %s %s → %s %s", v.Stage, v.Category, v.Src, v.Target, v.Evidence)
+		}
+		t.Fatalf("链路中应有数据外传（%v）与横向移动（%v）", exfil, lateral)
+	}
 	// 被横向扫描的数据库主机单独成链，来源为失陷的服务器
 	db := st.AssetChain("10.0.0.21")
 	if db == nil {

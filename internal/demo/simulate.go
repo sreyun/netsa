@@ -142,7 +142,7 @@ func New(seed int64) *Sim {
 const payloadHost = "203.0.113.77"
 
 // 入侵剧本各步相对开始时间的分钟数。
-var storySteps = []int{0, 4, 6, 8, 9, 13, 18, 20, 23, 28, 30}
+var storySteps = []int{0, 4, 6, 8, 9, 13, 18, 20, 23, 28, 30, 33}
 
 // intrusion 生成完整入侵剧本中第 step 分钟的日志，用于演示资产攻击链路：
 //
@@ -151,7 +151,7 @@ var storySteps = []int{0, 4, 6, 8, 9, 13, 18, 20, 23, 28, 30}
 //	6 分：命令注入成功，载荷让服务器下载执行 203.0.113.77 上的脚本（突破）
 //	8 分起：服务器 10.0.0.10 连接载荷中的地址（命中威胁情报）并按固定间隔心跳，9 分反弹 Shell 连接攻击者（控制）
 //	20 分：服务器扫描内网的 445 端口与数据库主机的端口（横向）
-//	30 分：攻击者遍历用户资料接口（窃取）
+//	30 分：攻击者遍历用户资料接口（窃取）；33 分：服务器向载荷中的地址外传约 5 GB（数据外传）
 //
 // 回连地址在演示情报中：防火墙日志与 Web 日志分开读取、先后不定，外连情报地址的告警不依赖读取顺序。
 func (s *Sim) intrusion(w *writer, t time.Time, step int) {
@@ -188,6 +188,10 @@ func (s *Sim) intrusion(w *writer, t time.Time, step int) {
 	case 30:
 		for i := 0; i < 320; i++ {
 			web("GET", fmt.Sprintf("/api/v1/user/%d/profile", 200000+i), 200, 800+s.r.Intn(200))
+		}
+	case 33: // 服务器把打包的数据传到载荷中的地址（数据外传）
+		for i := 0; i < 6; i++ {
+			fmt.Fprintln(w.forti, s.fortiOutBytes(t.Add(time.Duration(5+i*8)*time.Second), s.server, payloadHost, 443, false, 900<<20))
 		}
 	}
 }
@@ -259,12 +263,17 @@ func (s *Sim) fortiLine(t time.Time, src, dst string, dport int, deny bool) stri
 
 // fortiOutLine 生成内网主机访问公网的出站流量日志。
 func (s *Sim) fortiOutLine(t time.Time, src, dst string, dport int, deny bool) string {
-	act := "deny"
+	return s.fortiOutBytes(t, src, dst, dport, deny, int64(800+s.r.Intn(20000)))
+}
+
+// fortiOutBytes 生成带会话字节数的出站流量日志（会话结束时输出）：sent 为内网主机发送的字节数。
+func (s *Sim) fortiOutBytes(t time.Time, src, dst string, dport int, deny bool, sent int64) string {
+	act, rcvd := "deny", 0
 	if !deny {
-		act = "accept"
+		act, rcvd = "accept", 2000+s.r.Intn(60000)
 	}
-	return fmt.Sprintf(`date=%s time=%s devname="FGT-HQ" devid="FG100F0000000001" logid="0000000013" type="traffic" subtype="forward" level="notice" srcip=%s srcport=%d srcintf="internal" dstip=%s dstport=%d dstintf="wan1" proto=6 action="%s" policyid=%d service="tcp/%d"`,
-		t.Format("2006-01-02"), t.Format("15:04:05"), src, 1024+s.r.Intn(60000), dst, dport, act, s.r.Intn(20), dport)
+	return fmt.Sprintf(`date=%s time=%s devname="FGT-HQ" devid="FG100F0000000001" logid="0000000013" type="traffic" subtype="forward" level="notice" srcip=%s srcport=%d srcintf="internal" dstip=%s dstport=%d dstintf="wan1" proto=6 action="%s" policyid=%d service="tcp/%d" sentbyte=%d rcvdbyte=%d`,
+		t.Format("2006-01-02"), t.Format("15:04:05"), src, 1024+s.r.Intn(60000), dst, dport, act, s.r.Intn(20), dport, sent, rcvd)
 }
 
 // beacon 模拟内网失陷主机：10.0.0.31 周期性回连 C2（被放行），10.0.0.32 尝试连接矿池端口（被拦截），

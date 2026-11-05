@@ -511,6 +511,11 @@ func (s *Store) ipDetail(ip string) *IPDetail {
 	cp.Ports, cp.Status, cp.UAs, cp.Tags = copyMap(p.Ports), copyMap(p.Status), copyMap(p.UAs), copyMap(p.Tags)
 	cp.RuleAlerts = copyMap(p.RuleAlerts)
 	cp.Proxies = copyMap(p.Proxies)
+	cp.TLS = copyMap(p.TLS)
+	if p.Rhythm != nil {
+		r := *p.Rhythm
+		cp.Rhythm = &r
+	}
 	cp.CatSev, cp.CatPhase = copyMap(p.CatSev), copyMap(p.CatPhase)
 	cp.Recent = append([]*model.Alert(nil), p.Recent...)
 	cp.Intel = append([]string(nil), p.Intel...)

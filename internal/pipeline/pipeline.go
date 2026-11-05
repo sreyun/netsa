@@ -205,6 +205,7 @@ func (p *Pipeline) inspect(ev *model.Event) item {
 func (p *Pipeline) aggregate(items []item) {
 	evs := make([]*model.Event, len(items))
 	hits := make([][]model.Hit, len(items))
+	var late []detect.Late // 服务器被判定失陷时补记的横向连接
 	for i, it := range items {
 		evs[i], hits[i] = it.ev, it.hits
 		p.learnIntranet(it.ev)
@@ -252,6 +253,8 @@ func (p *Pipeline) aggregate(items []item) {
 			var confirm *attackMark
 			if hits[i], confirm = p.observeCallback(it.ev, hits[i]); confirm != nil {
 				p.Learn.ConfirmSource(confirm.src, "callback", "攻击之后内网主机 "+it.ev.SrcIP+" 连接了 "+it.ev.DstIP+"（"+confirm.name+"）", it.ev.Time)
+				// 回连了攻击者的服务器：之后它发起的新内网连接按横向移动判断（高危）
+				late = append(late, p.Behavior.MarkAttacked(it.ev.SrcIP, it.ev.Time, "回连攻击者 "+it.ev.DstIP, true)...)
 			}
 		}
 		if p.Assets != nil && len(hits[i]) > 0 {
@@ -266,12 +269,34 @@ func (p *Pipeline) aggregate(items []item) {
 	p.Raw.Write(evs, hits)
 	results := p.Store.RecordBatch(evs, hits)
 	p.processed.Add(int64(len(items)))
+	late = append(late, p.publish(evs, hits, results)...)
+	// 补记的命中按同样的抑制、校准与定级入库（原事件已写入原始日志与事件量）；补记的告警不会再产生补记
+	for len(late) > 0 {
+		evs, hits = make([]*model.Event, 0, len(late)), make([][]model.Hit, 0, len(late)) // 原批次可能仍被异步写入引用
+		for _, l := range late {
+			h := p.Learn.Calibrate(l.Ev, p.Suppress.Filter(l.Ev, l.Hits))
+			for j := range h {
+				risk.Finalize(&h[j])
+			}
+			evs, hits = append(evs, l.Ev), append(hits, h)
+		}
+		late = p.publish(evs, hits, p.Store.RecordBatch(evs, hits))
+	}
+}
+
+// publish 处理入库结果：推送告警、失陷判定、自动确认来源、补充定位与等级升级推送；返回失陷判定补记的命中。
+func (p *Pipeline) publish(evs []*model.Event, hits [][]model.Hit, results []store.RecordResult) []detect.Late {
+	var late []detect.Late
 	for i, res := range results {
 		ev := evs[i]
 		if ev.Outbound && len(res.Alerts) == 0 { // 出站流量只有外连威胁情报地址时才产生告警
 			continue
 		}
 		for _, a := range res.Alerts {
+			// 外连远控（情报标记的地址）的内网主机同样视为已失陷
+			if a.Category == store.CatC2 && a.Severity >= model.SevHigh && geo.IsPrivate(a.SrcIP) {
+				late = append(late, p.Behavior.MarkAttacked(a.SrcIP, a.Time, a.Name, true)...)
+			}
 			// 有证据的成功利用：自动确认来源，之后该来源的低危 / 中危命中升一级（只会让检测更敏感）
 			if a.Proven && a.Result == model.ResultSuccess {
 				p.Learn.ConfirmSource(a.SrcIP, "evidence", "攻击成功且有证据："+a.Name, a.Time)
@@ -303,6 +328,7 @@ func (p *Pipeline) aggregate(items []item) {
 			}
 		}
 	}
+	return late
 }
 
 // internalTarget 在内网资产台账中使用 DNAT 映射后的私网地址匹配：

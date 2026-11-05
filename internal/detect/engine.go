@@ -334,7 +334,7 @@ func (e *Engine) inspectWeb(ev *model.Event) []model.Hit {
 	if s := matchVuln(ev.Method, path, ev.URI); s != nil { // 国产 OA、中间件的已知漏洞接口
 		hits = append(hits, vulnHit(s, ev, path, result, hits))
 	}
-	return append(hits, specialWebChecks(ev, uri, result)...)
+	return upstreamReview(ev, append(hits, specialWebChecks(ev, uri, result)...))
 }
 
 // harmlessDotDot 判断路径中的 ../ 是否只是普通的相对路径：字面写在路径里（没有编码）、解析后没有越出
@@ -897,4 +897,29 @@ func deviceThreatHit(ev *model.Event) model.Hit {
 	// 设备看到了完整的流量内容，放行时它给出的等级就是响应码之外的独立判断
 	return model.Hit{RuleID: "dev-" + ev.Format, Name: "设备告警: " + Printable(name, 80), Category: cat,
 		Severity: threatSeverity(ev.ThreatSeverity), Phase: phase, Evidence: evidence + " → " + ev.Target(), Result: result, Proven: proven}
+}
+
+// upstreamReview 用后端响应码复核“疑似成功”（日志记录了 $upstream_status 时）：
+//   - 请求没有转发到后端（静态文件、return、缓存、try_files 兜底）：载荷没有被应用处理，改判为未成功。
+//     敏感文件探测例外：nginx 直接返回的 .env、备份包正是泄露的方式；
+//   - 后端返回 5xx、nginx 改写成 200（proxy_intercept_errors 的错误页）：判为后端异常。
+func upstreamReview(ev *model.Event, hits []model.Hit) []model.Hit {
+	if ev.Upstream == 0 {
+		return hits
+	}
+	for i := range hits {
+		h := &hits[i]
+		if h.Result != model.ResultSuccess || h.Category == CatSensitive {
+			continue
+		}
+		switch {
+		case ev.Upstream < 0:
+			h.Result = model.ResultPassed
+			h.Evidence = Printable(h.Evidence+"（请求没有转发到后端应用，由 nginx 直接响应，载荷没有被处理）", 400)
+		case ev.Upstream >= 500:
+			h.Result = model.ResultError
+			h.Evidence = Printable(h.Evidence+"（后端返回 "+strconv.Itoa(ev.Upstream)+"，nginx 改写为 "+strconv.Itoa(ev.Status)+"）", 400)
+		}
+	}
+	return hits
 }

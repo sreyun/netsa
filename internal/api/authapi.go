@@ -71,6 +71,10 @@ func requiredRole(r *http.Request) string {
 	}
 	// 原始日志可能包含 Cookie、令牌、个人信息等敏感内容：检索与导出需要运营分析员权限
 	// 可指派账号列表（平台用户名与角色）只提供给能处置事件的角色；自学习包含平台账号的登录异常与研判记录
+	// 取证包包含原始日志
+	if strings.HasPrefix(p, "/api/incidents/") && strings.HasSuffix(p, "/evidence") {
+		return auth.RoleAnalyst
+	}
 	if strings.HasPrefix(p, "/api/rawlog/search") || strings.HasPrefix(p, "/api/rawlog/export") || p == "/api/incidents/assignees" || strings.HasPrefix(p, "/api/learn") {
 		return auth.RoleAnalyst
 	}

@@ -119,6 +119,8 @@ type correlator struct {
 	label, rdnsDom string
 	uas            []string
 	uaUsers        []int
+	tls            []string // 客户端 TLS 指纹
+	tlsUsers       []int
 	orgTags        []string
 	targets        []string
 	attackers      int
@@ -133,6 +135,9 @@ type cand struct {
 	rdns       bool
 	org        string
 	uaMask     uint16
+	tlsMask    uint8
+	hoursSim   float64 // 行为节奏相似时的活跃时段、请求间隔相似度（不相似为 0）
+	gapsSim    float64
 	ruleShared int
 	ruleSim    float64
 	tgtShared  int
@@ -173,6 +178,12 @@ func newCorrelator(p *IPProfile) *correlator {
 		}
 	}
 	cr.uaUsers = make([]int, len(cr.uas))
+	for fp := range p.TLS {
+		if fp != "" && len(cr.tls) < 4 {
+			cr.tls = append(cr.tls, fp)
+		}
+	}
+	cr.tlsUsers = make([]int, len(cr.tls))
 	for t := range p.Tags {
 		if strings.HasPrefix(t, "网络空间测绘") || strings.HasPrefix(t, "搜索引擎") {
 			cr.orgTags = append(cr.orgTags, t)
@@ -211,6 +222,15 @@ func (s *Store) correlate(p *IPProfile) *Correlation {
 			for i, ua := range cr.uas {
 				if o.UAs[ua] > 0 {
 					cr.uaUsers[i]++
+				}
+			}
+		})
+	}
+	if len(cr.tls) > 0 {
+		s.chunked(list, func(o *IPProfile) {
+			for i, fp := range cr.tls {
+				if o.TLS[fp] > 0 {
+					cr.tlsUsers[i]++
 				}
 			}
 		})
@@ -320,6 +340,16 @@ func (cr *correlator) inspect(o *IPProfile, res *Correlation) cand {
 			}
 		}
 	}
+	if len(o.TLS) > 0 {
+		for i, fp := range cr.tls {
+			if o.TLS[fp] > 0 {
+				c.tlsMask |= 1 << i
+			}
+		}
+	}
+	if h, g, ok := cr.p.Rhythm.similar(o.Rhythm); ok {
+		c.hoursSim, c.gapsSim = h, g
+	}
 	p := cr.p
 	c.ruleShared, c.ruleSim = p.sk.ruleSim(&o.sk)
 	if c.ruleShared > 0 {
@@ -401,6 +431,24 @@ func (cr *correlator) score(c *cand, text bool) (int, []string) {
 			add(best, "相同工具指纹 %s", shortUA(cr.uas[bestUA]))
 		}
 	}
+	// TLS 指纹：JA3 / JA4 由客户端的 TLS 实现决定，同一工具换出口也不变；只用协议与加密套件的指纹区分度低，只在极少见时计入
+	bestTLS := 0
+	for i, fp := range cr.tls {
+		if c.tlsMask&(1<<i) == 0 {
+			continue
+		}
+		n, w := cr.tlsUsers[i], 0
+		switch {
+		case !strings.HasPrefix(fp, "tls:") && n <= 20 && n*10 <= cr.attackers:
+			w = 25
+		case strings.HasPrefix(fp, "tls:") && n <= 5 && n*20 < cr.attackers:
+			w = 8
+		}
+		bestTLS = max(bestTLS, w)
+	}
+	if bestTLS > 0 {
+		add(bestTLS, "相同的罕见 TLS 指纹")
+	}
 	if c.ruleShared >= 2 && c.ruleSim >= 0.5 {
 		add(int(30*c.ruleSim+0.5), "攻击手法相似度 %d%%（共同规则 %d 条）", int(c.ruleSim*100+0.5), c.ruleShared)
 	}
@@ -409,6 +457,11 @@ func (cr *correlator) score(c *cand, text bool) (int, []string) {
 	}
 	if c.portShared >= 5 && c.portSim >= 0.6 {
 		add(20, "扫描端口组合相似（共同端口 %d 个）", c.portShared)
+	}
+	// 行为节奏（活跃时段与请求间隔）只作辅助线索：大量扫描器的节奏本来就相似，单凭节奏不构成关联
+	if c.hoursSim > 0 {
+		add(15, "行为节奏相似（活跃时段 %d%%、请求间隔 %d%%）", int(c.hoursSim*100+0.5), int(c.gapsSim*100+0.5))
+		weak += 15
 	}
 	// 已有其他线索时，首次出现时间接近进一步佐证同源
 	if dt := c.firstSeen.Sub(cr.p.FirstSeen).Abs(); score-weak >= 20 && dt <= 10*time.Minute {
