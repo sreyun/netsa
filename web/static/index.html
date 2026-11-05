@@ -420,8 +420,8 @@
         <div class="exports">
           <label>封禁等级 <select id="blLevel"><option value="critical">严重</option><option value="high" selected>高危及以上</option><option value="medium">中危及以上</option><option value="low">低危及以上</option></select></label>
           <div class="btns">
-            <button type="button" class="btn" data-fmt="txt">IP 列表</button><button type="button" class="btn" data-fmt="nginx">nginx deny</button><button type="button" class="btn" data-fmt="iptables">iptables</button>
-            <button type="button" class="btn" data-fmt="ipset">ipset</button><button type="button" class="btn" data-fmt="firewalld">firewalld</button><button type="button" class="btn" data-fmt="windows">Windows 防火墙</button><button type="button" class="btn" data-fmt="csv">CSV</button>
+            <button type="button" class="btn" data-fmt="txt">IP 列表</button><button type="button" class="btn" data-fmt="nginx" title="nginx、Tengine、OpenResty、Nginx UI 通用">nginx deny</button><button type="button" class="btn" data-fmt="iptables">iptables</button>
+            <button type="button" class="btn" data-fmt="ipset">ipset</button><button type="button" class="btn" data-fmt="firewalld">firewalld</button><button type="button" class="btn" data-fmt="windows">Windows 防火墙</button><button type="button" class="btn" data-fmt="apisix" title="APISIX ip-restriction 全局规则">APISIX</button><button type="button" class="btn" data-fmt="kong" title="Kong ip-restriction 全局插件">Kong</button><button type="button" class="btn" data-fmt="csv">CSV</button>
           </div>
           <a class="btn primary" href="/api/report" download>下载完整分析报告 (JSON)</a>
         </div>

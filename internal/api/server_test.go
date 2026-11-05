@@ -111,6 +111,15 @@ func TestMetaMapAndExport(t *testing.T) {
 	if rec := get(h, "/api/export/blocklist?format=iptables&level=high"); !strings.Contains(rec.Body.String(), "iptables -C INPUT -s 198.51.100.20 -j DROP") {
 		t.Fatalf("iptables 导出应幂等: %s", rec.Body.String())
 	}
+	// APISIX、Kong 的 ip-restriction 插件配置
+	if rec := get(h, "/api/export/blocklist?format=apisix&level=high"); !strings.Contains(rec.Body.String(), `{"plugins":{"ip-restriction":{"blacklist":["198.51.100.20"]`) ||
+		!strings.Contains(rec.Header().Get("Content-Disposition"), ".json") {
+		t.Fatalf("APISIX 导出: %s", rec.Body.String())
+	}
+	if rec := get(h, "/api/export/blocklist?format=kong&level=high"); !strings.Contains(rec.Body.String(), `"name":"ip-restriction"`) ||
+		!strings.Contains(rec.Body.String(), `"deny":["198.51.100.20"]`) {
+		t.Fatalf("Kong 导出: %s", rec.Body.String())
+	}
 	if rec := get(h, "/api/ip/203.0.113.250"); rec.Code != 404 {
 		t.Fatalf("不存在的 IP 应返回 404: %d", rec.Code)
 	}

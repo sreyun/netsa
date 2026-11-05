@@ -4,6 +4,28 @@
 
 只记录影响使用的变化。完整的改动见 [Git 提交记录](https://github.com/sreyun/netsa/commits/master)。
 
+## 1.7.9
+
+### Tengine、OpenResty 与 nginx 系网关的日志
+
+- **Tengine、OpenResty、Kong** 的访问日志与 nginx 相同，照常识别；自定义 `log_format` 支持 Tengine 的 `$request_time_msec`、`$request_time_usec` 与 `$unix_time`，以及 `$remote_port`。
+- **Apache APISIX** 默认访问日志（`$http_host` 在请求行之前）与 **Nginx Proxy Manager** 的 proxy / standard 格式自动识别，这两种格式还会把站点识别为经由该网关提供服务。
+- **APISIX、Kong 日志插件的 JSON**：嵌套的 `request` / `response`、毫秒时间戳与毫秒耗时直接识别。此前 Kong 的 `latencies.request` 会被当成请求行。
+- **错误日志中的 WAF 判定**：nginx / Tengine / OpenResty 错误日志里 ModSecurity、naxsi 的拦截与告警、limit_req / limit_conn 的限流拒绝作为 WAF 判定接入，其余错误计为跳过，不算解析失败。
+- **ModSecurity JSON 审计日志**（v2、v3）与 **OpenResty Lua WAF**（unixhot/waf）的拦截日志直接识别。WAF 判定显示为“设备告警”，只采信 WAF 自己的结论，不对同一请求重复匹配规则；只告警不拦截时按响应码判断结果。
+
+### 检测规则
+
+- **nginx alias 目录穿越**：`/static../etc/passwd` 这样以 `..` 结尾的路径段此前被当作普通目录名放过，现在按目录穿越告警。
+- **状态与监控接口**：Tengine 的 `/check_status`、`/req_status`，`/ngx_status`、`/basic_status`、`/upstream_status`，nginx-module-vts 的 `/status/format/json`，APISIX 的 `/apisix/prometheus/metrics` 纳入调试/信息泄露接口探测与暴露面。
+- **APISIX**：默认管理密钥利用（CVE-2020-13945）、Admin API 探测，签名库新增 `routes`、`migrate/export`（CVE-2021-45232）、`batch-requests`（CVE-2022-24112）。
+- **Nginx UI**：签名库新增未授权下载备份（CVE-2026-27944）、MCP 接口（CVE-2026-33032）、安装接口（CVE-2026-42221）。签名共 261 条，规则共 81 条。
+- **Lua代码注入**（`os.execute`、`io.popen`、`require('os')` 等）与**超多参数绕过WAF**（CVE-2018-9230，OpenResty 默认只读前 100 个查询参数）。
+
+### 封禁列表
+
+- 新增 **APISIX**（`ip-restriction` 全局规则）与 **Kong**（`ip-restriction` 全局插件）导出格式；nginx deny 格式同样适用于 Tengine、OpenResty 与 Nginx UI。
+
 ## 1.7.8
 
 ### 国产 OA、中间件漏洞接口签名

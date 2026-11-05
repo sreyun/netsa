@@ -294,3 +294,18 @@ benign	normal	app	GET	200	5000	none	/seeyon/webmail.do?method=list
 benign	normal	app	GET	200	5000	none	/defaultroot/login.jsp
 benign	normal	app	GET	200	5000	none	/yyoa/index.jsp
 benign	normal	app	GET	200	5000	none	/general/login_code.php
+# nginx 系产品（Tengine、OpenResty、APISIX、Kong、Nginx UI）
+benign	nginx	app	GET	200	9000	none	/??jquery.js,bootstrap.js
+benign	nginx	app	GET	200	9000	none	/static/??a.css,b.css,c.css?v=20261105
+benign	nginx	app	GET	200	9000	none	/docs/lua?q=os.execute+example
+benign	nginx	app	GET	200	900	none	/apisix/status
+attack	nginx	app	GET	200	700	>=medium	/static../etc/nginx/nginx.conf
+attack	nginx	app	GET	404	150	>=medium	/assets../.git/config
+attack	nginx	app	GET	200	700	>=medium	/req_status
+attack	nginx	app	GET	200	700	>=medium	/status/format/json
+attack	nginx	app	PUT	200	700	>=high	/apisix/admin/routes/index?api_key=edd1c9f034335f136f87ad84b625c8f1
+attack	nginx	app	GET	200	700	=medium	/apisix/admin/migrate/export
+attack	nginx	app	POST	200	700	=medium	/apisix/batch-requests
+attack	nginx	app	GET	200	700	>=high	/x?cmd=os.execute('id')
+attack	nginx	app	GET	200	700	=medium	/api/backup
+attack	nginx	app	POST	400	120	=medium	/mcp_message

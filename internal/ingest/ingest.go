@@ -219,6 +219,10 @@ func (s *source) parseLineStatus(p *parser.Auto, line string) (ev *model.Event, 
 		return nil, lineSkipped
 	}
 	ev, ok := p.Parse(line)
+	if !ok && p.Known(line) { // 已识别格式中不产生事件的行（如 nginx 错误日志里的普通错误）
+		s.skipped.Add(1)
+		return nil, lineSkipped
+	}
 	if !ok {
 		s.failed.Add(1)
 		line = truncateLine(line)

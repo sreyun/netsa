@@ -86,6 +86,8 @@
 
 同时按脚本、样式的文件名识别前端框架与常用库：Vue（Vite 编译的 `*.vue_vue_type_*.js`、vue-cli 的 `chunk-vendors.*.js`）、React（create-react-app 的 `/static/js/*.chunk.js`）、Angular、AngularJS、UmiJS、jQuery、Bootstrap、layui、Element、iView；文件名或 CDN 目录里带版本号的（`jquery-1.8.3.min.js`、`/jquery/3.5.1/jquery.min.js`）一并记下，便于排查过旧的前端库。Node.js 后端只有出现 `/socket.io/`、Next.js 的 `/_next/`、Nuxt 的 `/_nuxt/`、SvelteKit 的 `/_app/immutable/`、对外暴露的 webpack 开发服务器（`/sockjs-node/`、`/__webpack_hmr`）时才能认出：日志里没有 `X-Powered-By` 这类响应头，只提供接口的 Node 服务看不出来。`sockjs.min.js` 是浏览器端的库，常配 Java 后端，不作为 Node.js 的依据。前端框架只用于展示，不参与漏洞适用性判断。针对特定产品的漏洞利用（ThinkPHP、WebLogic、Exchange、Confluence、F5、GPON 路由器……）、按脚本后缀访问的 WebShell 与敏感文件探测，在站点上从未出现过该产品或开发语言、请求本身也没有成功（404、被拦截、出错）时，攻击不可能得手，最高按低危处置。
 
+nginx 系网关与管理面板：路径中的 `/apisix/` 说明是 APISIX，Nginx UI 的 `nginx_log`、`mcp_message` 接口，Nginx Proxy Manager 的 `proxy-hosts` 等接口，Kong Manager 的 `kconfig.js`；APISIX、Nginx Proxy Manager 的默认访问日志格式本身也说明站点经由该网关提供服务（三者都隐含 OpenResty）。
+
 **业务接口学习**：存在已知漏洞的接口也可能是正常业务在用，例如致远 OA 的 `htmlofficeservlet` 就是正文编辑插件的接口，见[国产 OA、中间件漏洞接口签名](detection.md#国产-oa中间件漏洞接口签名)。同时满足以下条件的访问计入：
 - 站点有足够多的正常访问；
 - 请求只命中了漏洞接口签名，没有任何攻击载荷；

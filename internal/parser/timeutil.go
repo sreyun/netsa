@@ -29,6 +29,8 @@ var timeLayouts = []string{
 	"01/02-15:04:05", // Snort fast 告警（无年份）
 	"01/02/06-15:04:05",
 	"2006/01/02 15:04:05.000",
+	time.ANSIC,                          // ModSecurity v3 审计日志 time_stamp
+	"02/Jan/2006:15:04:05.999999 -0700", // ModSecurity v2 审计日志
 }
 
 // ParseTime 尝试多种常见日志时间格式，失败返回零值。

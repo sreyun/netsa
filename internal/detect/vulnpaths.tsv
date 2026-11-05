@@ -1,6 +1,7 @@
 # 由 tools/vulnpaths 从 nuclei-templates（MIT 许可，Copyright (c) 2025 ProjectDiscovery, Inc.）生成，提交 8748542cf762；不要手工修改。
 # vendor<TAB>产品键<TAB>中文名<TAB>开发语言或类型
 vendor	74cms	骑士人才系统	php
+vendor	apisix	Apache APISIX	
 vendor	chanjet	畅捷通T+	aspnet
 vendor	dahua	大华	device
 vendor	dedecms	织梦CMS	php
@@ -23,6 +24,7 @@ vendor	landray	蓝凌OA	java
 vendor	leadsec	网御星云	device
 vendor	metinfo	米拓CMS	php
 vendor	nacos	Nacos	java
+vendor	nginxui	Nginx UI	
 vendor	nsfocus	绿盟	device
 vendor	panabit	Panabit	device
 vendor	phpcms	PHPCMS	php
@@ -48,6 +50,7 @@ vendor	yonyou	用友	java
 vendor	zentao	禅道	php
 vendor	zte	中兴	device
 # marker<TAB>路径第一段<TAB>产品键
+marker	apisix	apisix
 marker	artemis	hikvision
 marker	cdgserver3	esafenet
 marker	defaultroot	wanhu
@@ -103,6 +106,7 @@ sig	cve-2020-10973	wavlink	high	GET	/backupsettings.dat		CVE-2020-10973	信息�
 sig	cve-2020-10987	tenda	high	POST	/goform/setusbunload		CVE-2020-10987	远程代码执行
 sig	cve-2020-12124	wavlink	high	GET	/cgi-bin/live_api.cgi	id&ip&page	CVE-2020-12124	远程代码执行
 sig	cve-2020-12127	wavlink	high	GET	/cgi-bin/exportallsettings.sh		CVE-2020-12127	信息泄露
+sig	cve-2020-13945	apisix	medium	POST	/apisix/admin/routes		CVE-2020-13945	漏洞
 sig	cve-2020-22208	74cms	high	GET	/plus/ajax_street.php	act=alphabet&x	CVE-2020-22208	SQL注入
 sig	cve-2020-22209	74cms	high	GET	/plus/ajax_common.php	act=hotword&query	CVE-2020-22209	SQL注入
 sig	cve-2020-22210	74cms	high	GET	/plus/ajax_officebuilding.php	act=key&key	CVE-2020-22210	SQL注入
@@ -118,6 +122,8 @@ sig	cve-2021-37305	jeecg	high	GET	/jeecg-boot/sys/user/querysysuser	username	CVE
 sig	cve-2021-41460	ecshop	high	POST	/delete_cart_goods.php		CVE-2021-41460	SQL注入
 sig	cve-2021-42887	totolink	high	GET	/formloginauth.htm	action=login&authcode&gourl&username	CVE-2021-42887	权限绕过
 sig	cve-2021-44260	wavlink	high	GET	/live_mfg.html		CVE-2021-44260	信息泄露
+sig	cve-2021-45232	apisix	high	GET	/apisix/admin/migrate/export		CVE-2021-45232	未授权访问
+sig	cve-2022-24112	apisix	high	POST	/apisix/batch-requests		CVE-2022-24112	远程代码执行
 sig	cve-2022-2486	wavlink	high	GET	/cgi-bin/mesh.cgi	key&page	CVE-2022-2486	远程代码执行
 sig	cve-2022-2488	wavlink	high	GET	/cgi-bin/touchlist_sync.cgi	ip	CVE-2022-2488	远程代码执行
 sig	cve-2022-25082	totolink	high	GET	/cgi-bin/downloadflile.cgi	payload	CVE-2022-25082	远程代码执行
@@ -159,7 +165,11 @@ sig	cve-2025-2711	yonyou	medium	GET	/help/systop.jsp	langcode	CVE-2025-2711	XSS
 sig	cve-2025-2712	yonyou	medium	GET	/help/top.jsp	langcode	CVE-2025-2712	XSS
 sig	cve-2025-34038	weaver	high	GET	/js/hrm/getdata.jsp	cmd&sql	CVE-2025-34038	SQL注入
 sig	cve-2025-34040	seeyon	high	POST	/seeyon/wpsassistservlet	fileid&flag&realfiletype	CVE-2025-34040	任意文件上传
+sig	cve-2026-27944	nginxui	high	GET	/api/backup		CVE-2026-27944	未授权访问
 sig	cve-2026-29014	metinfo	high	POST	/app/system/entrance.php	a=doapi&c=weixin&m=module&n	CVE-2026-29014	远程代码执行
+sig	cve-2026-33032	nginxui	high	POST	/mcp_message		CVE-2026-33032	未授权访问
+sig	cve-2026-42221	nginxui	high	GET	/api/install		CVE-2026-42221	未授权访问
+sig	cve-2026-42221-2	nginxui	high	POST	/api/install		CVE-2026-42221	未授权访问
 sig	dahua-bitmap-fileupload	dahua	high	POST	/emap/webservice/gis/soap/bitmap			远程代码执行
 sig	dahua-icc-getclassvalue-rce	dahua	high	POST	/evo-apigw/admin/api/developer/getclassvalue.jsp			远程代码执行
 sig	dahua-wpms-lfi	dahua	high	GET	/portal/itc/attachment_downloadbyurlatt.action	filepath		任意文件读取

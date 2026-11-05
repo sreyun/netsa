@@ -1236,7 +1236,7 @@ async function loadSources() {
             : '外部流量命中该策略被放行，但没有转发到任何内部服务：通常是出站策略的源安全域 / 源地址配置过宽，建议限定为内网安全域'}</div></div>`).join('')
       : '未开启 <span class="muted">（exposure.reach_check: false）</span>'}</div>
     <div class="k">告警归档</div><div>${meta.archive ? 'PostgreSQL（历史告警可在“告警事件 → 历史告警”中查询与导出）' : '未启用 <span class="muted">（配置 archive.dsn 后可长期留存与检索历史告警）</span>'}</div>
-    <div class="k">支持的日志格式</div><div>nginx/Apache combined、main(XFF)、vhost、JSON、自定义 log_format；iptables/UFW/firewalld、pfSense/OPNsense、Windows 防火墙、Cisco ASA、FortiGate/华为/H3C/深信服等 key=value、JSON 防火墙日志；DNS（BIND / dnsmasq / CoreDNS / Windows DNS / Zeek / Suricata）；认证（Linux auth.log、Windows 安全事件、FortiGate / Cisco / OpenVPN VPN 登录、SQL Server 登录）</div>
+    <div class="k">支持的日志格式</div><div>nginx/Apache combined、main(XFF)、vhost、JSON、自定义 log_format（含 Tengine 变量）；APISIX、Nginx Proxy Manager 默认格式与 APISIX / Kong 日志插件 JSON；nginx / Tengine / OpenResty 错误日志中的 ModSecurity、naxsi 拦截与限流，ModSecurity JSON 审计日志、OpenResty Lua WAF；iptables/UFW/firewalld、pfSense/OPNsense、Windows 防火墙、Cisco ASA、FortiGate/华为/H3C/深信服等 key=value、JSON 防火墙日志；DNS（BIND / dnsmasq / CoreDNS / Windows DNS / Zeek / Suricata）；认证（Linux auth.log、Windows 安全事件、FortiGate / Cisco / OpenVPN VPN 登录、SQL Server 登录）</div>
     <div class="k">日志时区</div><div>${esc(meta.timezone || '系统时区')}</div>
     <div class="k">版本</div><div>netsa ${esc(meta.version)} · ${esc(rt.go || '')} · 启动于 ${esc(fmtTime(meta.started))}</div></div>`;
   if (meta.archive) await loadArchiveStatus();

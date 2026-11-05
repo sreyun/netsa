@@ -433,7 +433,7 @@ func (st *profileState) trainLocked(ev *model.Event, host, shape, lp string, ps 
 		changed = changed || !was && s.mature()
 	}
 	if ev.Status >= 200 && ev.Status < 300 || ev.Status == 304 {
-		changed = st.observeSiteLocked(host, lp, nh, at) || changed
+		changed = st.observeSiteLocked(host, lp, ev.Format, nh, at) || changed
 	}
 	return changed
 }

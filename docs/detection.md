@@ -127,7 +127,7 @@ CRS 依赖完整的请求头与请求体，只看日志时误报偏高，且每�
 
 ## 国产 OA、中间件漏洞接口签名
 
-内置 254 条签名，覆盖致远、泛微、用友、通达、蓝凌、万户、金和、宏景、红帆 OA，帆软、Smartbi、亿赛通、畅捷通 T+、若依、JeecgBoot、Nacos、XXL-JOB、ThinkPHP、织梦、骑士等 CMS，以及深信服、天融信、奇安信、锐捷、H3C、海康威视、大华等设备，共 41 个国产产品。签名由 `tools/vulnpaths` 从 [nuclei-templates](https://github.com/projectdiscovery/nuclei-templates)（MIT 许可，见 [NOTICE](../NOTICE)）中提取，另有少量人工补充。
+内置 261 条签名，覆盖致远、泛微、用友、通达、蓝凌、万户、金和、宏景、红帆 OA，帆软、Smartbi、亿赛通、畅捷通 T+、若依、JeecgBoot、Nacos、XXL-JOB、ThinkPHP、织梦、骑士等 CMS，APISIX、Nginx UI，以及深信服、天融信、奇安信、锐捷、H3C、海康威视、大华等设备，共 43 个国产产品。签名由 `tools/vulnpaths` 从 [nuclei-templates](https://github.com/projectdiscovery/nuclei-templates)（MIT 许可，见 [NOTICE](../NOTICE)）中提取，另有少量人工补充。
 
 签名只有路径与查询参数名（以及 `method=`、`action=` 这类选择功能的参数值），不含载荷：日志看不到请求体，攻击者换载荷也能认出。
 
@@ -148,6 +148,21 @@ CRS 依赖完整的请求头与请求体，只看日志时误报偏高，且每�
 ```bash
 go run ./tools/vulnpaths -src /path/to/nuclei-templates -samples internal/detect/testdata/vulnpaths_samples.tsv > internal/detect/vulnpaths.tsv
 ```
+
+## nginx 系产品（Tengine、OpenResty、APISIX、Nginx UI）
+
+| 规则 | 识别的请求 | 等级 |
+|---|---|---|
+| 目录穿越（alias 缺少斜杠） | `/static../etc/passwd`：`location /static` 不以 `/` 结尾而 `alias` 以 `/` 结尾时会跳出 alias 目录。此前 `xxx../` 这样的段被当作普通目录名 | 高危 |
+| 调试/信息泄露接口探测 | nginx `stub_status`（`/nginx_status`、`/ngx_status`、`/basic_status`）、Tengine 的上游健康检查 `/check_status` 与 `/req_status`、`/upstream_status`、nginx-module-vts 的 `/status/format/json`、APISIX 的 `/apisix/prometheus/metrics` | 中危；能访问时计入暴露面 |
+| 管理后台探测 | APISIX Admin API（`/apisix/admin/…`） | 低危 |
+| APISIX 默认管理密钥利用（CVE-2020-13945） | 请求中出现默认 `admin_key`（`edd1c9f0…`） | 高危 |
+| APISIX、Nginx UI 漏洞接口 | 签名库新增 APISIX 的 `routes`（CVE-2020-13945）、`migrate/export`（CVE-2021-45232）、`batch-requests`（CVE-2022-24112），Nginx UI 的 `/api/backup`（CVE-2026-27944）、`/mcp_message`（CVE-2026-33032）、`/api/install`（CVE-2026-42221），共 261 条 | 同[国产 OA、中间件漏洞接口签名](#国产-oa中间件漏洞接口签名) |
+| Lua代码注入 | `os.execute(`、`io.popen(`、`loadstring(`、`ngx.pipe.spawn(`、`require('os')` 等 OpenResty / APISIX 利用中的 Lua 代码 | 高危 |
+| 超多参数绕过WAF（CVE-2018-9230） | 查询串超过 100 个参数：OpenResty 的 `ngx.req.get_uri_args` 默认只读前 100 个，基于它的 Lua WAF 看不到之后的载荷 | 中危 |
+| Web服务器解析漏洞、空字节截断（原有） | `/upload/1.jpg/.php`（PHP-FPM `cgi.fix_pathinfo`）、`/1.gif%20%00.php`（CVE-2013-4547） | 高危 |
+
+Tengine 的资源合并请求（`/??a.js,b.js`）、APISIX 的状态接口等正常写法不会告警（评测样本中覆盖）。WAF（ModSecurity、naxsi、Lua WAF）与 nginx 限流的判定见[日志接入](log-sources.md#错误日志与-waf-判定)。
 
 ## 防火墙与 Web 日志联动：被攻击后回连
 

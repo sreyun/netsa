@@ -49,6 +49,12 @@ sources:
     silence: ""           # 断流告警阈值（如 10m、2h；off 关闭），为空使用 alert.source_silence
     # 使用自定义 log_format 时，把 nginx.conf 中的格式原样粘贴到这里：
     # log_format: '$remote_addr - $remote_user [$time_local] "$request" $status $body_bytes_sent "$http_referer" "$http_user_agent" "$http_x_forwarded_for" $request_time $host'
+  # nginx / Tengine / OpenResty 错误日志：ModSecurity、naxsi 的拦截与 limit_req 限流作为 WAF 判定接入，其余错误计为跳过。
+  # 错误日志可能长时间没有新内容，关闭断流告警：
+  # - name: nginx-error
+  #   type: nginx
+  #   paths: ["/var/log/nginx/*error*.log"]
+  #   silence: "off"
   - name: firewall
     type: firewall
     paths: ["/var/log/ufw.log", "/var/log/kern.log", "/var/log/firewalld"]

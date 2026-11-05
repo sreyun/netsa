@@ -203,15 +203,25 @@ func (NginxJSON) Parse(line string) (*model.Event, bool) {
 	kv := flattenLower(m)
 	// 兼容 nginx escape=json、Caddy（request.remote_ip / headers.User-Agent）、Traefik（ClientHost / RequestPath）
 	// 与 Elastic ECS（source.ip / url.original / user_agent.original，按完整路径优先取，避免同名的最后一级键混淆）等
-	status := pick(kv, "status", "http.response.status_code", "response", "response_code", "status_code", "downstreamstatus")
-	req := pick(kv, "request")
-	uri := pick(kv, "request_uri", "url.original", "uri", "url.path", "path", "url", "requestpath")
+	// 也兼容 APISIX / Kong 日志插件（request.uri、response.status、client_ip、毫秒时间戳）、
+	// ModSecurity JSON 审计日志（v3 的 transaction.response.http_code，v2 的 request.request_line），
+	// 以及 OpenResty Lua WAF（unixhot/waf：attack_method、req_url，只记录拦截，没有状态码）
+	status := pick(kv, "status", "http.response.status_code", "response", "response_code", "status_code", "downstreamstatus", "http_code")
+	req := pick(kv, "request", "request_line")
+	if _, err := strconv.ParseFloat(req, 64); err == nil {
+		req = "" // 嵌套字段的末级同名键（如 Kong 的 latencies.request 耗时），不是请求行
+	}
+	uri := pick(kv, "request_uri", "url.original", "uri", "url.path", "path", "url", "requestpath", "req_url")
 	method := pick(kv, "request_method", "http.request.method", "method", "requestmethod")
+	wafAttack := kv["attack_method"]
+	if wafAttack != "" && status == "" {
+		status = "403"
+	}
 	if status == "" || (req == "" && uri == "" && method == "") {
 		return nil, false
 	}
 	ip := pick(kv, "remote_addr", "source.ip", "client.ip", "source.address", "client.address", "client_ip", "clientip", "remote_ip", "clienthost",
-		"clientaddr", "ip", "client", "real_ip", "realip")
+		"clientaddr", "ip", "client", "real_ip", "realip", "remote_address")
 	if h, _, err := net.SplitHostPort(ip); err == nil {
 		ip = h // Traefik ClientAddr 形如 1.2.3.4:5678
 	}
@@ -219,7 +229,8 @@ func (NginxJSON) Parse(line string) (*model.Event, bool) {
 		return nil, false
 	}
 	ev := &model.Event{
-		Time:    ParseTime(pick(kv, "time_iso8601", "time_local", "@timestamp", "timestamp", "time", "msec", "ts", "startutc", "startlocal")),
+		Time: ParseTime(pick(kv, "time_iso8601", "time_local", "@timestamp", "timestamp", "time", "msec", "ts", "startutc", "startlocal",
+			"start_time", "started_at", "time_stamp", "local_time", "unix_time")),
 		Kind:    model.KindWeb,
 		Format:  "nginx_json",
 		SrcIP:   ip,
@@ -232,7 +243,7 @@ func (NginxJSON) Parse(line string) (*model.Event, bool) {
 	}
 	ev.Status, _ = strconv.Atoi(status)
 	ev.Bytes, _ = strconv.ParseInt(pick(kv, "body_bytes_sent", "http.response.body.bytes", "bytes_sent", "size", "bytes", "downstreamcontentsize"), 10, 64)
-	ev.ReqTime, _ = strconv.ParseFloat(pick(kv, "request_time", "duration"), 64)
+	ev.ReqTime = reqTimeOf(kv, pick(kv, "request_time", "duration"))
 	ev.DstPort, _ = strconv.Atoi(pick(kv, "server_port"))
 	if req != "" {
 		setRequest(ev, req)
@@ -255,7 +266,33 @@ func (NginxJSON) Parse(line string) (*model.Event, bool) {
 	if rp := pick(kv, "realip_remote_addr"); isIP(rp) && rp != ip {
 		ev.PeerIP = rp
 	}
+	if _, ok := m["transaction"]; ok {
+		modsecAudit(ev, m)
+	} else if wafAttack != "" {
+		ev.Format = "lua_waf"
+		ev.Threat = "Lua WAF 拦截（" + wafAttack + "）"
+		ev.ThreatCategory = strings.ReplaceAll(strings.ToLower(wafAttack), "_", " ") + " " + kv["rule_tag"]
+		ev.ThreatSeverity = "medium"
+		ev.Action = model.ActionDeny
+	}
 	return ev, true
+}
+
+// reqTimeOf 读取请求耗时（秒）。没有 $request_time 时换算 Tengine 的 $request_time_msec / $request_time_usec，
+// 以及 APISIX（latency）与 Kong（latencies.request）日志插件的毫秒耗时。
+func reqTimeOf(kv map[string]string, sec string) float64 {
+	if f, err := strconv.ParseFloat(sec, 64); err == nil {
+		return f
+	}
+	for _, u := range []struct {
+		key string
+		div float64
+	}{{"request_time_msec", 1e3}, {"request_time_usec", 1e6}, {"latency", 1e3}, {"latencies.request", 1e3}} {
+		if f, err := strconv.ParseFloat(kv[u.key], 64); err == nil {
+			return f / u.div
+		}
+	}
+	return 0
 }
 
 func pick(kv map[string]string, keys ...string) string {
@@ -387,7 +424,7 @@ func (f *LogFormat) Parse(line string) (*model.Event, bool) {
 		return nil, false
 	}
 	ev := &model.Event{
-		Time:    ParseTime(pick(kv, "time_local", "time_iso8601", "msec")),
+		Time:    ParseTime(pick(kv, "time_local", "time_iso8601", "msec", "unix_time")), // $unix_time 为 Tengine 变量
 		Kind:    model.KindWeb,
 		Format:  "nginx_custom",
 		SrcIP:   ip,
@@ -400,8 +437,9 @@ func (f *LogFormat) Parse(line string) (*model.Event, bool) {
 	}
 	ev.Status, _ = strconv.Atoi(kv["status"])
 	ev.Bytes, _ = strconv.ParseInt(pick(kv, "body_bytes_sent", "bytes_sent"), 10, 64)
-	ev.ReqTime, _ = strconv.ParseFloat(kv["request_time"], 64)
+	ev.ReqTime = reqTimeOf(kv, kv["request_time"])
 	ev.DstPort, _ = strconv.Atoi(kv["server_port"])
+	ev.SrcPort, _ = strconv.Atoi(kv["remote_port"])
 	if r := kv["request"]; r != "" {
 		setRequest(ev, r)
 	} else {

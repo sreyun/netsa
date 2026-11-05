@@ -349,3 +349,23 @@ func TestSyslogTimeCorrection(t *testing.T) {
 		t.Fatalf("数据源状态应显示校正: %+v", st)
 	}
 }
+
+// nginx 错误日志：WAF 拦截、限流产生事件；与安全无关的错误计为跳过，不算解析失败（不会触发“日志格式可能已变更”的提醒）。
+func TestNginxErrorLogCounts(t *testing.T) {
+	p, err := parser.NewAuto("nginx", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := &source{name: "nginx-error"}
+	for _, line := range []string{
+		`2026/11/05 10:00:00 [error] 12#0: *6 open() "/usr/share/nginx/html/favicon.ico" failed (2: No such file or directory), client: 203.0.113.55, server: localhost, request: "GET /favicon.ico HTTP/1.1", host: "www.example.com"`,
+		`2026/11/05 10:00:00 [notice] 1#1: signal process started`,
+		`2026/11/05 10:00:00 [error] 12#0: *4 limiting requests, excess: 20.500 by zone "one", client: 203.0.113.53, server: www.example.com, request: "POST /login HTTP/1.1", host: "www.example.com"`,
+		`not a log line at all`,
+	} {
+		s.parseLineStatus(p, line)
+	}
+	if s.parsed.Load() != 1 || s.skipped.Load() != 2 || s.failed.Load() != 1 {
+		t.Fatalf("parsed=%d skipped=%d failed=%d", s.parsed.Load(), s.skipped.Load(), s.failed.Load())
+	}
+}

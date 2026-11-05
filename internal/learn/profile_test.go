@@ -186,6 +186,11 @@ func TestTechOf(t *testing.T) {
 		"/assets/bootstrap/3.3.7/js/bootstrap.min.js": "bootstrap",
 		"/reactive.js":                                "",
 		"/lib/element-ui/lib/theme-chalk/index.css":   "element,vue",
+		// nginx 系网关与管理面板
+		"/apisix/admin/routes/1": "apisix,openresty",
+		"/api/nginx/proxy-hosts": "npm,openresty",
+		"/api/nginx_log":         "nginxui",
+		"/kconfig.js":            "kong,openresty",
 	} {
 		if got := strings.Join(techOf(p), ","); got != want {
 			t.Errorf("%s: %q，期望 %q", p, got, want)
@@ -373,5 +378,27 @@ func TestFeedPrecision(t *testing.T) {
 	l.Pin("feed:不准的情报", "admin", true)
 	if h := hit("不准的情报"); h.Severity != model.SevHigh {
 		t.Fatalf("锁定后恢复: %+v", h)
+	}
+}
+
+// APISIX、Nginx Proxy Manager 的默认访问日志格式本身就说明站点经由该网关提供服务。
+func TestFormatTech(t *testing.T) {
+	st := &profileState{}
+	now := time.Date(2026, 11, 5, 10, 0, 0, 0, time.UTC)
+	for i := range 20 {
+		st.observeSiteLocked("gw.example", "/api/items", "apisix", uint32(i+1)<<8, now)
+		st.observeSiteLocked("npm.example", "/", "nginx_proxy_manager", uint32(i+1)<<8, now)
+		st.observeSiteLocked("plain.example", "/", "nginx_combined", uint32(i+1)<<8, now)
+	}
+	for host, want := range map[string][]string{"gw.example": {"apisix", "openresty"}, "npm.example": {"npm", "openresty"}, "plain.example": nil} {
+		s := st.sites[host]
+		if s == nil || len(s.Tech) != len(want) {
+			t.Fatalf("%s: %+v", host, s)
+		}
+		for _, k := range want {
+			if s.Tech[k] == nil || len(s.Tech[k].Nets) < techMinNets {
+				t.Errorf("%s 应识别出 %s: %+v", host, k, s.Tech)
+			}
+		}
 	}
 }

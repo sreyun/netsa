@@ -3,6 +3,7 @@ package detect
 import (
 	"fmt"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"unicode"
@@ -220,6 +221,10 @@ func clausesPass(clauses [][]int32, bits bitset) bool {
 }
 
 func (e *Engine) inspectWeb(ev *model.Event) []model.Hit {
+	if ev.Threat != "" {
+		// WAF（ModSecurity、naxsi、Lua WAF）与 nginx 限流的判定：同一请求在访问日志中另有记录并按规则检测，这里只采信设备的判定
+		return []model.Hit{deviceThreatHit(ev)}
+	}
 	uri := Normalize(ev.URI)
 	path := uri
 	if i := strings.IndexByte(path, '?'); i >= 0 {
@@ -319,11 +324,18 @@ func harmlessDotDot(uri string) bool {
 				return false
 			}
 		default:
+			if strings.HasSuffix(seg, "..") {
+				// /static../：nginx 的 location 不以 / 结尾而 alias 以 / 结尾时，这样的路径会跳出 alias 目录（off-by-slash）
+				return false
+			}
 			depth++
 		}
 	}
 	return true
 }
+
+// maxLuaArgs 是 OpenResty ngx.req.get_uri_args 默认最多读取的参数个数：之后的参数 Lua WAF 看不到（CVE-2018-9230）。
+const maxLuaArgs = 100
 
 // proseCategory 是特征可能出现在普通文字中的分类（文章标题、搜索词），其余分类的特征本身就不是自然语言。
 var proseCategory = map[string]bool{CatXSS: true, CatCmdExec: true, CatSQLi: true}
@@ -431,6 +443,11 @@ func specialWebChecks(ev *model.Event, uri, result string) []model.Hit {
 	}
 	if len(raw) > 4096 {
 		add("proto-longurl", "超长URL(溢出/Fuzz)", CatProtocol, model.SevLow, model.PhaseRecon, Printable(raw, 120))
+	}
+	if q := strings.IndexByte(raw, '?'); q >= 0 && len(raw)-q > 2*maxLuaArgs && strings.Count(raw[q:], "&") >= maxLuaArgs {
+		// 用超过 100 个参数把载荷挤到 Lua WAF（基于 ngx.req.get_uri_args 的 OpenResty WAF）读取范围之外
+		add("proto-manyargs", "超多参数绕过WAF(CVE-2018-9230)", CatProtocol, model.SevMedium, model.PhaseExploit,
+			strconv.Itoa(strings.Count(raw[q:], "&")+1)+" 个参数："+Printable(raw[max(q, len(raw)-120):], 120))
 	}
 	if ev.UA == "" && ev.Method != "" {
 		hits = append(hits, model.Hit{RuleID: "ua-empty", Name: "空User-Agent", Category: CatAutomation, Severity: model.SevInfo, Phase: model.PhaseRecon, TagOnly: true})
@@ -589,6 +606,7 @@ var threatMap = []struct {
 	{[]string{"deserializ*", "fastjson", "jackson", "ysoserial"}, CatDeser, model.PhaseExploit},
 	{[]string{"brute*", "bruteforce", "password guess", "dictionary attack", "credential stuffing"}, CatBruteForce, model.PhaseCredential},
 	{[]string{"scan*", "probe", "sweep", "recon*", "nmap", "masscan", "zmap"}, CatPortScan, model.PhaseRecon},
+	{[]string{"rate limit", "cc attack", "cc_attack", "deny_cc"}, CatCC, model.PhaseImpact},
 	{[]string{"dos", "ddos", "flood*", "amplification"}, CatFlood, model.PhaseImpact},
 	{[]string{"cve-", "exploit*", "overflow", "vulnerab*"}, CatCVE, model.PhaseExploit},
 }
@@ -665,11 +683,24 @@ func deviceThreatHit(ev *model.Event) model.Hit {
 	case model.ActionAllow:
 		result = model.ResultPassed
 	}
+	proven := result == model.ResultPassed
+	if ev.Kind == model.KindWeb {
+		if cat == CatPortScan {
+			cat, phase = CatScanner, model.PhaseRecon // WAF 识别出的扫描器请求
+		}
+		// WAF 只告警未拦截（DetectionOnly、学习模式）时按响应码判断结果；WAF 看不到攻击是否生效，不作为第二份证据
+		if ev.Action != model.ActionDeny && ev.Status > 0 {
+			if result = WebResult(ev, 0); result == model.ResultSuccess {
+				result = model.ResultPassed
+			}
+		}
+		proven = false
+	}
 	evidence := Printable(name, 160)
 	if ev.ThreatCategory != "" {
 		evidence += "（" + Printable(ev.ThreatCategory, 60) + "）"
 	}
 	// 设备看到了完整的流量内容，放行时它给出的等级就是响应码之外的独立判断
 	return model.Hit{RuleID: "dev-" + ev.Format, Name: "设备告警: " + Printable(name, 80), Category: cat,
-		Severity: threatSeverity(ev.ThreatSeverity), Phase: phase, Evidence: evidence + " → " + ev.Target(), Result: result, Proven: result == model.ResultPassed}
+		Severity: threatSeverity(ev.ThreatSeverity), Phase: phase, Evidence: evidence + " → " + ev.Target(), Result: result, Proven: proven}
 }

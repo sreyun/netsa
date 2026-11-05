@@ -11,7 +11,9 @@ import (
 )
 
 // WebParsers 返回内置的 Web 访问日志解析器（顺序即识别优先级）。
-func WebParsers() []Parser { return []Parser{Nginx{}, NginxJSON{}, DefaultW3C()} }
+func WebParsers() []Parser {
+	return []Parser{Nginx{}, NginxJSON{}, APISIX{}, NginxProxyManager{}, NginxError{}, DefaultW3C()}
+}
 
 // FirewallParsers 返回内置的防火墙/安全设备日志解析器，顺序即识别优先级。
 func FirewallParsers() []Parser {
@@ -195,6 +197,47 @@ func (a *Auto) parseLine(line string) (*model.Event, bool) {
 		return ev, true
 	}
 	return nil, false
+}
+
+// Skipper 由能识别“格式正确、但不产生事件”的日志行的解析器实现，如 nginx 错误日志中与安全无关的行。
+type Skipper interface {
+	Skip(line string) bool
+}
+
+// Known 判断一行解析失败的日志是否属于已识别的格式、只是不需要产生事件（如 nginx 错误日志中的“文件不存在”），
+// 这类行计为跳过而不是解析失败，不会触发“日志格式可能已变更”的提醒。只在解析失败时调用。
+func (a *Auto) Known(line string) bool {
+	line = strings.TrimRight(line, "\r\n")
+	a.mu.Lock()
+	cands := a.cands
+	a.mu.Unlock()
+	var skippers []Skipper
+	for _, p := range cands {
+		if s, ok := p.(Skipper); ok {
+			skippers = append(skippers, s)
+		}
+	}
+	if len(skippers) == 0 {
+		return false
+	}
+	lines := []string{line}
+	if msg, _, sys := StripSyslog(line); sys {
+		lines = append(lines, msg)
+	}
+	if inner, kind := unwrapLine(line); kind != wrapNone {
+		lines = append(lines, inner)
+		if msg, _, sys := StripSyslog(inner); sys {
+			lines = append(lines, msg)
+		}
+	}
+	for _, s := range skippers {
+		for _, l := range lines {
+			if s.Skip(l) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func parseWith(p Parser, line, msg string, hdr SyslogHeader, sys bool) (*model.Event, bool) {

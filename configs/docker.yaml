@@ -42,6 +42,12 @@ sources:
     type: auto
     paths: ["/logs/nginx/*access*.log"]
     from_beginning: false
+  # nginx / Tengine / OpenResty 错误日志：ModSecurity、naxsi 的拦截与 limit_req 限流作为 WAF 判定接入，其余错误计为跳过。
+  # 错误日志可能长时间没有新内容，关闭断流告警：
+  # - name: nginx-error
+  #   type: nginx
+  #   paths: ["/logs/nginx/*error*.log"]
+  #   silence: "off"
   - name: ufw
     type: firewall
     paths: ["/logs/host/ufw.log"]

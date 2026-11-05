@@ -75,8 +75,12 @@ func (s *siteStat) clone() siteStat {
 	return c
 }
 
-// observeSiteLocked 记录一次正常的成功访问（调用方持 st.mu），返回是否识别出新的产品。
-func (st *profileState) observeSiteLocked(host, lp string, nh uint32, at time.Time) bool {
+// formatTech 是日志格式本身说明的网关产品：APISIX、Nginx Proxy Manager 的默认访问日志与 nginx 不同，
+// 能识别出这种格式，就说明站点经由该网关对外提供服务。
+var formatTech = map[string]string{"apisix": "apisix", "nginx_proxy_manager": "npm"}
+
+// observeSiteLocked 记录一次正常的成功访问（调用方持 st.mu），返回是否识别出新的产品。format 为日志格式。
+func (st *profileState) observeSiteLocked(host, lp, format string, nh uint32, at time.Time) bool {
 	if st.sites == nil {
 		st.sites = map[string]*siteStat{}
 	}
@@ -102,7 +106,16 @@ func (st *profileState) observeSiteLocked(host, lp string, nh uint32, at time.Ti
 		s.Last = at
 	}
 	found := false
-	for _, k := range techOf(lp) {
+	keys := techOf(lp)
+	if k := formatTech[format]; k != "" && !slices.Contains(keys, k) {
+		keys = append(keys, k)
+		for _, x := range techImplies[k] {
+			if !slices.Contains(keys, x) {
+				keys = append(keys, x)
+			}
+		}
+	}
+	for _, k := range keys {
 		if s.Tech == nil {
 			s.Tech = map[string]*techSeen{}
 		}
@@ -138,6 +151,7 @@ var techNames = map[string]string{
 	"node": "Node.js", "socketio": "Socket.IO", "sveltekit": "SvelteKit", "vue": "Vue", "react": "React", "angular": "Angular",
 	"angularjs": "AngularJS", "jquery": "jQuery", "bootstrap": "Bootstrap", "layui": "layui", "element": "Element",
 	"iview": "iView", "umi": "UmiJS",
+	"apisix": "Apache APISIX", "nginxui": "Nginx UI", "npm": "Nginx Proxy Manager", "kong": "Kong", "openresty": "OpenResty",
 }
 
 // 路径中出现即说明使用了该产品的目录名。
@@ -154,6 +168,9 @@ var segTech = map[string]string{
 	// Node.js 后端只有这类路径能看出来：Socket.IO 的连接地址、Next.js / Nuxt / SvelteKit 的资源目录、
 	// 对外暴露的 webpack 开发服务器（sockjs-node、__webpack_hmr）。纯接口的 Node 服务从日志里看不出来
 	"socket.io": "socketio", "sockjs-node": "node", "__webpack_hmr": "node", "iview": "iview", "layui": "layui", "element-ui": "element",
+	// nginx 系网关与管理面板：APISIX 的 Admin API / 指标、Nginx UI 的日志与 MCP 接口、Nginx Proxy Manager 的代理站点接口、Kong Manager 的配置脚本
+	"apisix": "apisix", "nginx_log": "nginxui", "mcp_message": "nginxui", "proxy-hosts": "npm", "redirection-hosts": "npm", "dead-hosts": "npm",
+	"kconfig.js": "kong",
 }
 
 // 文件后缀对应的开发语言。
@@ -174,6 +191,7 @@ var techImplies = map[string][]string{
 	"kingdee": {"java"}, "jeecg": {"java"}, "exchange": {"aspnet"},
 	"nextjs": {"react", "node"}, "nuxt": {"vue", "node"}, "sveltekit": {"node"}, "socketio": {"node"},
 	"element": {"vue"}, "iview": {"vue"}, "umi": {"react"},
+	"apisix": {"openresty"}, "kong": {"openresty"}, "npm": {"openresty"},
 }
 
 // techOf 返回请求路径（小写）中出现的产品、开发语言与前端框架。

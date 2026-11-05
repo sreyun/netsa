@@ -54,6 +54,43 @@ real_ip:
 
 只有请求确实来自可信代理时才采信这些请求头，攻击者直连源站时伪造的 X-Forwarded-For 不会改变攻击源，且会被标记为“伪造 X-Forwarded-For”。
 
+## Tengine、OpenResty 与 nginx 系网关
+
+| 产品 | 访问日志 | 说明 |
+|---|---|---|
+| **Tengine**、**OpenResty** | 与 nginx 相同 | 自定义 `log_format` 中 Tengine 的 `$request_time_msec`、`$request_time_usec`（换算为秒）与 `$unix_time` 均可识别 |
+| **Kong** | 默认格式（combined 之后的 `kong_request_id: "…"`）直接识别 | file-log / http-log 插件的 JSON（`request.uri`、`response.status`、`client_ip`、`started_at`、`latencies.request`）直接识别 |
+| **Apache APISIX** | 默认格式（`$http_host` 在请求行之前）自动识别，格式显示为 `apisix` | file-logger / http-logger / kafka-logger 插件的 JSON（`request`、`response`、`client_ip`、`start_time`、`latency`）直接识别 |
+| **Nginx Proxy Manager** | 代理站点的 proxy 格式与默认站点的 standard 格式（`[Client 1.2.3.4] [Length …]`）自动识别 | 日志在容器的 `/data/logs/proxy-host-*_access.log`，挂载该目录后加入 `paths` |
+| **Nginx UI** | 管理的是 nginx 本身，接入 nginx 的访问日志即可 | Nginx UI 自身的已知漏洞接口（未授权下载备份、MCP 接口、安装接口）由检测规则识别 |
+
+APISIX、Nginx Proxy Manager 格式的日志还会把站点识别为经由该网关提供服务（“自学习”页面的站点产品）。
+
+### 错误日志与 WAF 判定
+
+nginx、Tengine、OpenResty 的错误日志格式相同。把它加入数据源后，其中安全相关的记录会作为 WAF 的判定接入：
+
+- **ModSecurity**（nginx 连接器）的拦截（`Access denied with code 403`）与告警（`Warning`），按 CRS 的 `attack-sqli`、`attack-rce` 等标签归类；只记录异常评分汇总、没有拦截的行不产生事件。
+- **naxsi** 的 `NAXSI_FMT` 记录，按 `$SQL`、`$XSS`、`$TRAVERSAL` 等评分类型归类，`block=1` 或 `config=block` 为已拦截。
+- **limit_req / limit_conn** 拒绝的请求（`limiting requests` / `limiting connections`）记为 CC 攻击；`dry run` 只记录不拒绝。
+- 其余错误（文件不存在、上游超时等）计为“跳过”，不算解析失败，不会触发“日志格式可能已变更”的提醒。
+
+```yaml
+sources:
+  - name: nginx-error
+    type: nginx
+    paths: ["/var/log/nginx/*error*.log"]
+    silence: "off"   # 错误日志可能长时间没有新内容，关闭断流告警
+```
+
+**ModSecurity JSON 审计日志**（`SecAuditLogFormat JSON`，v2 与 v3 均可）每个请求一行，包含全部命中的规则，比错误日志更完整：取其中说明攻击类型的规则作为 WAF 判定；只因响应码被记录、没有规则命中的请求按普通访问处理。OWASP 的 `modsecurity-crs` 镜像默认输出到标准输出，经 Docker 日志接入即可（包装自动拆开）。
+
+**OpenResty Lua WAF**（如 unixhot/waf）的 JSON 拦截日志（`attack_method`、`req_url`、`rule_tag`）直接识别，按已拦截处理。
+
+WAF 判定在告警中显示为“设备告警: <WAF 给出的名称>”，结果为已拦截或未拦截（只告警模式下按响应码判断）。同一请求在访问日志中另有一条记录，照常按规则检测；WAF 判定只采信 WAF 自己的结论，不再对同一请求重复匹配规则。
+
+封禁列表可直接下发到这些产品：**数据源 → 导出** 中的 nginx deny 格式适用于 nginx、Tengine、OpenResty 与 Nginx UI（`include` 到 `http` 或 `server` 块）；APISIX 格式是 `ip-restriction` 全局规则（`PUT /apisix/admin/global_rules/netsa-blocklist`），Kong 格式是 `ip-restriction` 全局插件（`POST /plugins`）。
+
 ## 其他 Web 服务器
 
 - **Apache**：默认 combined 格式直接识别。

@@ -487,11 +487,28 @@ func (s *Server) blocklist(w http.ResponseWriter, r *http.Request) {
 	list := s.Store.Blocklist(model.ParseSeverity(lvl))
 	format := r.URL.Query().Get("format")
 	s.audit(r, "导出封禁列表", "格式 "+format+" 等级>="+lvl+" 共 "+strconv.Itoa(len(list))+" 个 IP", nil)
-	ext := map[string]string{"nginx": "conf", "csv": "csv", "windows": "bat", "iptables": "sh", "ipset": "sh", "firewalld": "sh"}[format]
+	ext := map[string]string{"nginx": "conf", "csv": "csv", "windows": "bat", "iptables": "sh", "ipset": "sh", "firewalld": "sh",
+		"apisix": "json", "kong": "json"}[format]
 	if ext == "" {
 		format, ext = "txt", "txt"
 	}
 	w.Header().Set("Content-Disposition", "attachment; filename=netsa-blocklist-"+lvl+"."+ext)
+
+	if ext == "json" {
+		// APISIX / Kong 的 ip-restriction 插件配置（Tengine、OpenResty、Nginx UI 使用 nginx deny 格式）：
+		// APISIX：PUT /apisix/admin/global_rules/netsa-blocklist；Kong：POST /plugins（全局插件）
+		ips := make([]string, 0, len(list))
+		for _, a := range list {
+			ips = append(ips, a.IP)
+		}
+		msg := "netsa blocklist: access denied"
+		var body any = map[string]any{"plugins": map[string]any{"ip-restriction": map[string]any{"blacklist": ips, "message": msg}}}
+		if format == "kong" {
+			body = map[string]any{"name": "ip-restriction", "config": map[string]any{"deny": ips, "status": 403, "message": msg}}
+		}
+		writeJSON(w, body)
+		return
+	}
 
 	if format == "csv" {
 		w.Header().Set("Content-Type", "text/csv; charset=utf-8")

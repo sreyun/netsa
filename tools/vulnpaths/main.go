@@ -65,6 +65,9 @@ func init() {
 	add("phpcms", "PHPCMS", "php", "phpcms")
 	add("ecshop", "ECShop", "php", "ecshop")
 	add("zentao", "禅道", "php", "zentao")
+	// nginx 系的国产开源网关与管理面板：Nginx UI 管理 nginx 配置，APISIX 基于 OpenResty
+	add("nginxui", "Nginx UI", "", "nginx-ui", "nginxui")
+	add("apisix", "Apache APISIX", "", "apisix")
 	add("ueditor", "UEditor编辑器", "", "ueditor")
 	add("kindeditor", "KindEditor编辑器", "", "kindeditor")
 	add("esafenet", "亿赛通", "java", "esafenet")

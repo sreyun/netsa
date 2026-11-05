@@ -237,7 +237,7 @@ var sensitiveRules = []sensitiveRule{
 		"删除 Web 目录下的备份文件，备份应存放在不可通过 HTTP 访问的位置"},
 	{regexp.MustCompile(`/web-inf/|/meta-inf/|/web\.config$|/wp-config\.php\.\w+$|/application(-\w+)?\.(properties|ya?ml)$|/config\.(php|inc|json|ya?ml|xml)\.(bak|old|swp)$|/\.user\.ini$`), "配置文件泄露", model.SevHigh,
 		"禁止访问配置文件，检查是否泄露数据库连接串等敏感信息"},
-	{regexp.MustCompile(`/(phpinfo|php_info|info|test)\.php$|/server-(status|info)$|/nginx_status$|/actuator/(env|heapdump|threaddump|configprops|mappings|beans|trace|httptrace|logfile|jolokia|gateway/routes)|/heapdump$|/_profiler|/debug/pprof|/elmah\.axd$|/trace\.axd$|/druid/(index|sql|websession)\.html$`), "调试/监控接口暴露", model.SevHigh,
+	{regexp.MustCompile(`/(phpinfo|php_info|info|test)\.php$|/server-(status|info)$|/(nginx|ngx|basic)_status$|/(check|req|upstream)_status$|/status/format/(json|html|prometheus)$|/apisix/prometheus/metrics$|/actuator/(env|heapdump|threaddump|configprops|mappings|beans|trace|httptrace|logfile|jolokia|gateway/routes)|/heapdump$|/_profiler|/debug/pprof|/elmah\.axd$|/trace\.axd$|/druid/(index|sql|websession)\.html$`), "调试/监控接口暴露", model.SevHigh,
 		"关闭生产环境调试接口，或在反向代理上限制为内网/白名单访问"},
 	// 通用后台入口：路径本身即可判定为管理面（需要 2xx/3xx 才会进入本分类，见 observeWeb）。
 	// 与下面按产品名匹配的规则互补——「/admin/login」「/manage」「/dashboard」这类通用路径
