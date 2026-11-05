@@ -21,6 +21,7 @@ var routePolicy = map[string]string{
 
 	// 只读：态势与统计
 	"GET /api/meta": auth.RoleViewer, "GET /api/overview": auth.RoleViewer, "GET /api/timeline": auth.RoleViewer, "GET /api/attackers": auth.RoleViewer, "GET /api/campaigns": auth.RoleViewer,
+	"GET /api/chains": auth.RoleViewer, "GET /api/chains/detail": auth.RoleViewer,
 	"GET /api/ip/{ip}": auth.RoleViewer, "GET /api/ip/{ip}/rdap": auth.RoleViewer, "GET /api/alerts": auth.RoleViewer, "GET /api/alerts/summary": auth.RoleViewer,
 	"GET /api/map": auth.RoleViewer, "GET /api/surface": auth.RoleViewer, "GET /api/assessment": auth.RoleViewer, "GET /api/sources": auth.RoleViewer,
 	"GET /api/rules": auth.RoleViewer, "GET /api/rules/stats": auth.RoleViewer, "GET /api/rules/managed": auth.RoleViewer, "GET /api/exposure": auth.RoleViewer,
@@ -28,14 +29,15 @@ var routePolicy = map[string]string{
 	"GET /api/archive/alerts": auth.RoleViewer, "GET /api/archive/stats": auth.RoleViewer, "GET /api/archive/export": auth.RoleViewer, "GET /api/incidents": auth.RoleViewer,
 	"GET /api/incidents/{id}": auth.RoleViewer, "GET /metrics": auth.RoleViewer, "GET /api/assets": auth.RoleViewer, "GET /api/assets/template": auth.RoleViewer,
 	"GET /api/assets/{id}": auth.RoleViewer, "GET /api/vulns": auth.RoleViewer, "GET /api/reports/periodic": auth.RoleViewer, "GET /api/rawlog/status": auth.RoleViewer,
-	"GET /api/syslog/senders": auth.RoleViewer, "GET /api/suppressions": auth.RoleViewer, "GET /api/alert/robots": auth.RoleViewer, // 机器人地址中的令牌已隐藏
+	"GET /api/syslog/senders": auth.RoleViewer, "GET /api/suppressions": auth.RoleViewer, "GET /api/authscans": auth.RoleViewer, "GET /api/alert/robots": auth.RoleViewer, // 机器人地址中的令牌已隐藏
 	"GET /api/block/edl": auth.RoleViewer, // 防火墙用只读令牌拉取
 
 	// 运营分析员：处置事件、误报抑制、原始日志（可能有 Cookie、令牌、个人信息）、平台账号的学习记录
 	"GET /api/incidents/assignees": auth.RoleAnalyst, "POST /api/incidents/bulk": auth.RoleAnalyst, "POST /api/incidents/ai-batch": auth.RoleAnalyst,
 	"POST /api/incidents/{id}": auth.RoleAnalyst, "POST /api/incidents/{id}/ai": auth.RoleAnalyst, "GET /api/learn": auth.RoleAnalyst,
 	"POST /api/learn/suggestions/{id}/{action}": auth.RoleAnalyst, "GET /api/rawlog/search": auth.RoleAnalyst, "GET /api/rawlog/export": auth.RoleAnalyst,
-	"POST /api/suppressions": auth.RoleAnalyst, "DELETE /api/suppressions/{id}": auth.RoleAnalyst, "PUT /api/vulns/{id}": auth.RoleAnalyst,
+	"POST /api/suppressions": auth.RoleAnalyst, "DELETE /api/suppressions/{id}": auth.RoleAnalyst,
+	"POST /api/authscans": auth.RoleAnalyst, "POST /api/authscans/{id}/end": auth.RoleAnalyst, "DELETE /api/authscans/{id}": auth.RoleAnalyst, "PUT /api/vulns/{id}": auth.RoleAnalyst,
 	"GET /api/block": auth.RoleAnalyst, "POST /api/block": auth.RoleAnalyst,
 
 	// 管理员：账号、审计、配置、会改变检测结果的操作、审批封禁、备份

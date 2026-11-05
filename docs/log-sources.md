@@ -103,6 +103,7 @@ WAF 判定在告警中显示为“设备告警: <WAF 给出的名称>”，结�
 - **firewalld**：`firewall-cmd --set-log-denied=all`，日志位于 `kern.log`（Debian/Ubuntu）或 `messages`（RHEL）
 - **iptables**：在 DROP 前加 `iptables -A INPUT -j LOG --log-prefix "[IPTABLES DROP] "`（前缀含 DROP/REJECT/ACCEPT 等关键字用于判断动作）
 - **网络设备**（FortiGate、华为、H3C、Cisco ASA、Palo Alto、pfSense 等）：syslog 发送到 `netsa服务器:5514`（UDP/TCP），并开启策略允许/拒绝日志；FortiGate/Palo Alto 的 IPS/威胁日志会直接按攻击名称归类
+- **防火墙攻击防范与入侵防御**：华为 USG 的攻击防范（`ANTIATTACK`）与 IPS 日志、H3C SecPath 的 `ATK` 与 IPS 日志、深信服 AF 的 DOS / IPS / WAF 日志（中文键名，`日志类型:DOS攻击日志, 源IP:…`）按设备判定的攻击类型归类（洪泛、畸形报文 → 洪水攻击，端口扫描、地址扫描、IP 欺骗、TCP 标志位异常等）。H3C 的多源洪泛日志只记录被攻击的目的地址，按目的地址告警（不建立来源画像），并与按会话日志判断的多源 DDoS 相互印证。建议在设备上开启攻击防范的日志输出；字段以厂商公开的日志说明为依据，接入后请在 **数据源** 页核对识别情况
 - **Windows**：`netsh advfirewall set allprofiles logging droppedconnections enable`，日志 `%windir%\system32\LogFiles\Firewall\pfirewall.log`
 - **Suricata**：跟踪 `eve.json`，`alert` 事件按签名映射为攻击；建议在 `suricata.yaml` 中为 netsa 单独输出一个只含 `alert` 类型的 eve 文件，减少无关事件
 - **Snort**：跟踪 fast 格式的 `alert` 文件，或通过 syslog 发送

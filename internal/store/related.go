@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"math/bits"
 	"net/netip"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -481,4 +482,61 @@ func shortUA(ua string) string {
 		return string(r[:40]) + "…"
 	}
 	return ua
+}
+
+// addOASTMates 把与该地址使用同一 OAST 关联标识的来源列为强关联：同一次扫描任务的其他出口地址。
+// 这些来源的网段、手法可能完全不同，按特征评分发现不了。
+func (s *Store) addOASTMates(ip string, c *Correlation) {
+	if s.OASTLinks == nil || c == nil {
+		return
+	}
+	mates := map[string]string{} // 来源 → 共用的标识
+	for k, ips := range s.OASTLinks() {
+		if !slices.Contains(ips, ip) {
+			continue
+		}
+		for _, x := range ips {
+			if x != ip && (mates[x] == "" || k < mates[x]) {
+				mates[x] = k
+			}
+		}
+	}
+	if len(mates) == 0 {
+		return
+	}
+	reason := func(k string) string { return "同一 OAST 关联标识 " + k + "（同一次扫描任务）" }
+	for _, r := range c.Related {
+		if k, ok := mates[r.IP]; ok {
+			if r.Score < relatedStrong {
+				c.Strong++
+			}
+			r.Score = 100
+			r.Reasons = append([]string{reason(k)}, r.Reasons...)
+			delete(mates, r.IP)
+		}
+	}
+	extra := make([]string, 0, len(mates))
+	for x := range mates {
+		extra = append(extra, x)
+	}
+	sort.Strings(extra)
+	s.mu.RLock()
+	for _, x := range extra {
+		o := s.ips[x]
+		if o == nil {
+			continue
+		}
+		r := &RelatedIP{IP: x, Score: 100, Threat: o.Score, Level: o.Level, Attacks: o.Attacks, LastSeen: o.LastSeen, Reasons: []string{reason(mates[x])}}
+		if o.Geo != nil {
+			r.Location = o.Geo.Location()
+		}
+		c.Related = append(c.Related, r)
+		c.Total++
+		c.Strong++
+	}
+	s.mu.RUnlock()
+	sort.SliceStable(c.Related, func(i, j int) bool { return c.Related[i].Score > c.Related[j].Score })
+	if len(c.Related) > relatedLimit {
+		c.Related = c.Related[:relatedLimit]
+	}
 }

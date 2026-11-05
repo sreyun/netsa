@@ -97,6 +97,7 @@ func (p *Pipeline) observeCallback(ev *model.Event, hits []model.Hit) ([]model.H
 				addrs = append(addrs, a)
 			}
 		}
+		ev.PayloadAddrs = addrs // 资产攻击链路据此关联之后连接这些地址的服务器
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()

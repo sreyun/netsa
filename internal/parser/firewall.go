@@ -308,6 +308,10 @@ func (KVFirewall) Parse(line string) (*model.Event, bool) {
 	if strings.Count(line, "=") < 3 {
 		return nil, false
 	}
+	// 华为、H3C 的攻击防范、入侵防御日志取值里有空格，由 AttackDefense 解析；这里按普通会话日志解析会丢掉攻击类型
+	if strings.Contains(line, "%%") && reATKHeader.MatchString(line) {
+		return nil, false
+	}
 	kv := make(map[string]string, 32)
 	kvPairs(line, func(key, val string) {
 		k := strings.ToLower(kvKey.Replace(key))

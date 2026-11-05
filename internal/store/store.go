@@ -244,7 +244,15 @@ type Store struct {
 	dayStart    int64
 	dayEnd      int64
 	loc         *time.Location
+	chains      map[chainKey]*chainTrack // 资产攻击链路（chain.go）
+	noSrcSeen   map[string]time.Time     // 没有来源的设备威胁的告警节流（nosource.go）
 
+	// AssetOf 返回地址或站点域名对应的台账资产（资产攻击链路识别外连、横向的内网主机），为 nil 时只按地址与域名区分资产。
+	// 调用时持有状态库的写锁，不能回调状态库
+	AssetOf func(ip, host string) *model.AssetRef
+	// OASTLinks 返回被多个来源使用过的带外回连标识 → 来源（learn.Learner.OASTLinks），攻击活动归并与同源关联据此
+	// 把同一次扫描任务的多个出口地址连在一起。在状态库的锁之外调用
+	OASTLinks func() map[string][]string
 	// IntelKind 返回情报的类别（c2 / malware / phishing / mining / attacker，空为通用黑名单），决定情报命中的等级
 	IntelKind func(name string) string
 	// Calibrate 是自学习校准（learn.Learner.Calibrate）：状态库自己生成的情报命中（入站情报、外连情报地址）
@@ -265,7 +273,7 @@ func New(maxIPs, maxAlerts, alertsPerRule int, retention time.Duration) *Store {
 		categories: map[string]int64{}, rules: map[string]int64{}, ruleNames: map[string]string{},
 		phases: map[string]int64{}, results: map[string]int64{}, surf: newSurface(), ruleBits: map[string]int{},
 		incidents: map[uint64]*Incident{}, incByKey: map[string]uint64{},
-		agg: newAggregate(), days: map[string]*DayStat{},
+		agg: newAggregate(), days: map[string]*DayStat{}, chains: map[chainKey]*chainTrack{},
 	}
 }
 
@@ -383,6 +391,13 @@ func (s *Store) recordLocked(ev *model.Event, hits []model.Hit) RecordResult {
 		}
 	}
 
+	if ev.SrcIP == "" {
+		// 设备只记录了被攻击的目的地址（多源洪泛）：不建立来源画像
+		if hasAttack(hits) {
+			return s.recordNoSourceLocked(ev, hits, b, day)
+		}
+		return res
+	}
 	p := s.ips[ev.SrcIP]
 	if p == nil {
 		// 画像数的硬上限：定期维护之间若遇到大量不同来源（伪造源地址的扫描、大规模爬虫），
@@ -470,6 +485,8 @@ func (s *Store) recordLocked(ev *model.Event, hits []model.Hit) RecordResult {
 	}
 	wasAttacker := p.Attacks > 0
 	attacked := false
+	var roles chainRoles // 资产攻击链路中的角色，第一次攻击命中时计算
+	var alertID, incID uint64
 	for _, h := range hits {
 		if h.TagOnly {
 			p.setTag(h.Name, h.Evidence)
@@ -540,6 +557,7 @@ func (s *Store) recordLocked(ev *model.Event, hits []model.Hit) RecordResult {
 			incBounded(&p.RuleAlerts, h.RuleID, alertRuleCap)
 			a := s.newAlert(ev, &h, p)
 			res.Alerts = append(res.Alerts, a)
+			alertID, incID = a.ID, a.IncidentID
 		} else {
 			// 同一规则在节流窗口内的重复命中：仍然计入「命中」，但不生成告警。
 			// 事件里单独累计，避免出现「命中 10 次、告警 6 条」却无处解释的口径差异。
@@ -547,7 +565,13 @@ func (s *Store) recordLocked(ev *model.Event, hits []model.Hit) RecordResult {
 				rule: h.RuleID, category: h.Category, phase: h.Phase, result: h.Result, proven: h.Proven,
 				target: truncate(ev.Target(), 300), asset: ev.Asset, at: ev.Time, feeds: h.Feeds,
 			})
+			alertID, incID = 0, s.incByKey[ev.SrcIP]
 		}
+		// 资产攻击链路按命中口径记录（含被节流的重复命中）
+		if !roles.done {
+			roles = s.chainRolesOf(ev)
+		}
+		s.chainHitLocked(ev, &h, &roles, t, alertID, incID)
 	}
 	if attacked {
 		bump(&day.Attackers, ev.SrcIP, 1, maxDayAttackers)
@@ -655,12 +679,7 @@ func (s *Store) newAlert(ev *model.Event, h *model.Hit, p *IPProfile) *model.Ale
 	if inc := s.incidents[a.IncidentID]; inc != nil && len(h.Feeds) > 0 {
 		inc.addFeeds(h.Feeds)
 	}
-	if len(s.alerts) < s.maxAlerts {
-		s.alerts = append(s.alerts, a)
-	} else {
-		s.alerts[s.alertHead] = a
-		s.alertHead = (s.alertHead + 1) % s.maxAlerts
-	}
+	s.appendAlertLocked(a)
 	p.Recent = append(p.Recent, a)
 	if len(p.Recent) > 50 {
 		p.Recent = p.Recent[len(p.Recent)-50:]
@@ -733,6 +752,7 @@ func (s *Store) Maintain() {
 		}
 		// 「近 1 小时」只用到 60 分钟，保留 2 小时的分钟桶即可
 		s.agg.prune(s.maxTime.Add(-2 * time.Hour))
+		s.pruneChainsLocked(s.maxTime)
 	}
 	if len(s.ips) > s.maxIPs {
 		s.evictLocked()

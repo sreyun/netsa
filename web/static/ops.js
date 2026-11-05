@@ -375,6 +375,49 @@ $('#supTable').addEventListener('click', async (e) => {
   loadSuppressions().catch(console.error);
 });
 
+// ---------------- 授权扫描登记 ----------------
+// 登记的时间窗内扫描源只记录、不告警，到期自动恢复检测
+const ASN_STATUS = { active: ['生效中', 'nt-on'], pending: ['未开始', 'nt-warn'], ended: ['已结束', 'muted'] };
+async function loadAuthScans() {
+  const r = await api('/api/authscans');
+  const list = r.entries || [];
+  $('#asnCount').textContent = `${list.length} 条 · 生效中 ${num(r.active || 0)} 条 · 累计放行 ${num(r.total || 0)} 次命中`;
+  if (!$('#asnEnd').value) { // 默认登记接下来 8 小时
+    $('#asnEnd').value = toInput(new Date(Date.now() + 8 * 3600e3));
+  }
+  const top = (m, n) => sortedEntries(m, n).map(([k, v]) => `<span class="chip" title="${num(v)} 次">${esc(k)}</span>`).join('');
+  $('#asnTable').innerHTML = `<thead><tr><th>扫描源</th><th>状态</th><th>时间窗</th><th>说明</th><th class="num">期间事件</th><th class="num">放行命中</th><th>攻击类型 / 目标</th><th></th></tr></thead><tbody>${list.map((x) => {
+    const [label, cls] = ASN_STATUS[x.status] || [x.status, ''];
+    const ops = canOperate() ? `${x.status !== 'ended' ? `<button type="button" class="btn" data-asn-end="${esc(x.id)}">${x.status === 'pending' ? '取消' : '提前结束'}</button> ` : ''}<button type="button" class="btn danger" data-asn-del="${esc(x.id)}">删除</button>` : '';
+    return `<tr class="${x.status === 'ended' ? 'muted' : ''}"><td class="mono">${esc(x.ip)}</td><td><span class="${cls}">${label}</span>${x.ended ? ' <span class="muted">（提前结束）</span>' : ''}</td>
+      <td class="nowrap">${esc(fmtShort(x.start))} ~ ${esc(fmtShort(x.end))}</td><td>${esc(x.note)}<div class="muted">${esc(x.creator)} · ${esc(fmtShort(x.created))}</div></td>
+      <td class="num">${num(x.events)}</td><td class="num">${num(x.hits)}</td><td><div class="cell-chips">${top(x.categories, 4)}${top(x.targets, 3)}</div></td>
+      <td class="nowrap num">${ops}</td></tr>`;
+  }).join('') || empty(8, '暂无授权扫描登记')}</tbody>`;
+}
+$('#asnForm').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const msg = (t, ok) => { $('#asnMsg').textContent = t; $('#asnMsg').className = 'form-msg ' + (ok ? 'ok' : 'err'); };
+  const body = { ip: $('#asnIP').value.trim(), start: $('#asnStart').value, end: $('#asnEnd').value, note: $('#asnNote').value.trim() };
+  if (!body.ip || !body.end || !body.note) { msg('请填写扫描源、结束时间与说明'); return; }
+  try {
+    const x = await api('/api/authscans', 'POST', body);
+    msg(`已登记 ${x.ip}：${fmtShort(x.start)} ~ ${fmtShort(x.end)}`, true);
+    $('#asnIP').value = ''; $('#asnNote').value = ''; $('#asnStart').value = '';
+  } catch (err) { msg(err.message); return; }
+  loadAuthScans().catch(console.error);
+});
+$('#asnTable').addEventListener('click', async (e) => {
+  const end = e.target.closest('[data-asn-end]');
+  const del = e.target.closest('[data-asn-del]');
+  try {
+    if (end && confirm('确定结束该登记？之后该来源的扫描将重新产生告警。')) await api(`/api/authscans/${encodeURIComponent(end.dataset.asnEnd)}/end`, 'POST', {});
+    else if (del && confirm('确定删除该登记及期间的统计？')) await api('/api/authscans/' + encodeURIComponent(del.dataset.asnDel), 'DELETE');
+    else return;
+  } catch (err) { alert(err.message); }
+  loadAuthScans().catch(console.error);
+});
+
 // ---------------- Syslog 发送端 ----------------
 const SND_STATUS = { online: ['在线', 'nt-on'], idle: ['静默', 'muted'], silent: ['断流', 'lv-critical'], rejected: ['已拒绝', 'lv-high'], blocked: ['已阻止', 'lv-high'], offline: ['未上线', 'nt-warn'] };
 const snd = { rep: null, editing: null, action: 'allow' };
@@ -1304,7 +1347,7 @@ $('#aiTestBtn').addEventListener('click', () => {
 // ---------------- 调度 ----------------
 Object.assign(loaders, {
   learn: () => loadLearn().catch(console.error),
-  incidents: () => Promise.all([loadIncidents(), loadSuppressions()]).catch(console.error),
+  incidents: () => Promise.all([loadIncidents(), loadSuppressions(), loadAuthScans()]).catch(console.error),
   assets: () => loadAssets().catch(console.error),
   reports: () => loadReports().catch(console.error),
   rawlog: () => loadRawlog().catch(console.error),

@@ -493,6 +493,7 @@ func (s *Store) IPDetail(ip string) *IPDetail {
 	d := s.ipDetail(ip)
 	if d != nil && isAttacker(d.Profile) {
 		d.Related = s.correlate(d.Profile)
+		s.addOASTMates(ip, d.Related)
 	}
 	return d
 }

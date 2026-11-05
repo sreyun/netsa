@@ -14,6 +14,7 @@ import (
 
 	"netsa/internal/alert"
 	"netsa/internal/assets"
+	"netsa/internal/authscan"
 	"netsa/internal/detect"
 	"netsa/internal/exposure"
 	"netsa/internal/geo"
@@ -47,6 +48,7 @@ type Pipeline struct {
 	// OnIntranetLearned 在自学习从防火墙日志识别出新的内网网段后调用（用于按新网段刷新已有攻击源的归属地）
 	OnIntranetLearned func(prefix string)
 	Suppress          *suppress.Manager // 误报抑制规则（可为空）
+	AuthScan          *authscan.Manager // 授权扫描登记（可为空）：登记的时间窗内扫描源只记录、不告警
 	Raw               *rawlog.Store     // 原始日志留存（可为空）
 	Assets            *assets.Manager   // 资产与漏洞（可为空）
 	Exposure          *exposure.Manager // 对外发布服务清单（DNAT 映射，可为空）
@@ -185,6 +187,14 @@ func (p *Pipeline) inspect(ev *model.Event) item {
 		it.whitelisted, it.hits = true, nil
 		return it
 	}
+	// 授权扫描：登记的时间窗内照常检测，命中只计入登记的统计，不告警、不计入攻击统计与评分、不参与自学习
+	if ev.Kind != model.KindDNS && !ev.SubjectHost {
+		if e := p.AuthScan.Match(ev.SrcIP, ev.Time); e != nil {
+			p.AuthScan.Record(e, ev, p.CurrentEngine().Inspect(ev))
+			it.whitelisted = true
+			return it
+		}
+	}
 	it.hits = append(it.hits, p.CurrentEngine().Inspect(ev)...)
 	if h, ok := p.domainIntelHit(ev); ok { // 内网主机解析情报标记的域名
 		it.hits = append(it.hits, h)
@@ -200,6 +210,17 @@ func (p *Pipeline) aggregate(items []item) {
 		p.learnIntranet(it.ev)
 		if !it.whitelisted && p.Behavior != nil {
 			hits[i] = append(hits[i], p.Behavior.ObserveHits(it.ev, it.hits)...)
+		}
+		// 设备报告的洪泛：该地址正处在按会话日志判断的突增中时注明，两种判定相互印证，升为高危
+		if it.ev.Kind == model.KindFirewall && p.Behavior != nil {
+			for j := range hits[i] {
+				if h := &hits[i][j]; detect.IsDeviceFlood(h) {
+					if c := p.Behavior.DDoSContext(it.ev.DstIP, it.ev.Time); c != "" {
+						h.Evidence += "；" + c
+						h.Severity = max(h.Severity, model.SevHigh)
+					}
+				}
+			}
 		}
 		reach, why := exposure.ReachUnknown, ""
 		if it.ev.Kind == model.KindFirewall {
@@ -321,8 +342,8 @@ func (p *Pipeline) enrichAssets(ev *model.Event, hits []model.Hit) []model.Hit {
 	if mt == nil {
 		return hits
 	}
-	if a := mt.Asset; a != nil {
-		ev.Asset = &model.AssetRef{Name: a.Name, Level: a.Importance, Owner: a.Owner}
+	if r := mt.Ref(); r != nil {
+		ev.Asset = r
 	}
 	var out []model.Hit
 	for i := range hits {

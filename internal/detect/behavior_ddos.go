@@ -276,6 +276,12 @@ func (b *Behavior) observeDst(ev *model.Event, internal bool) (model.Hit, bool) 
 	if failPct >= 50 {
 		sev = model.SevHigh
 	}
+	// 防火墙攻击防范同时报告了针对该地址的洪泛：两种判定相互印证，不只是业务量突增
+	corr := ""
+	if df, ok := b.deviceFloodNear(ev.DstIP, ev.Time); ok {
+		sev = model.SevHigh
+		corr = "；防火墙攻击防范同时报告「" + df.name + "」"
+	}
 	base := "平时没有足够的记录"
 	if d.windows >= surgeMature {
 		base = fmt.Sprintf("平时约 %.0f 条", d.base)
@@ -283,7 +289,7 @@ func (b *Behavior) observeDst(ev *model.Event, internal bool) (model.Hit, bool) 
 	return model.Hit{RuleID: "bhv-ddos", Name: "分布式拒绝服务(DDoS)", Category: CatFlood, Severity: sev, Phase: model.PhaseImpact,
 		Result: fwResult(ev),
 		Evidence: fmt.Sprintf("%s内 %s:%d 收到 %d 条连接（%s），来自 %d 个以上不同来源，其中 %d%% 被拒绝或没有应答；该来源 %d 条",
-			fmtDur(b.th.FwWindow), ev.DstIP, ev.DstPort, d.n, base, d.nSrcs, failPct, cnt)}, true
+			fmtDur(b.th.FwWindow), ev.DstIP, ev.DstPort, d.n, base, d.nSrcs, failPct, cnt) + corr}, true
 }
 
 // pruneSurge 清理长时间没有流量的站点与目的地址。
