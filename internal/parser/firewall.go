@@ -292,6 +292,18 @@ type KVFirewall struct{}
 
 func (KVFirewall) Name() string { return "kv_firewall" }
 
+var (
+	// 华为 / H3C 信息中心格式的日志头：%%01SHELL/6/DISPLAY_CMDRECORD(s)、%%10FILTER/6/FILTER_ZONE_IPV4_EXECUTION
+	reInfoCenter = regexp.MustCompile(`%%\d{2}[A-Z][A-Z0-9_\-]*/\d/[A-Z0-9_\-]+`)
+	reKVAddrKey  = regexp.MustCompile(`(?i)(src|source|dst|dest|destination)[ _\-]?(ip|addr|address)`)
+)
+
+// Skip 识别华为、H3C 设备的运维日志（命令记录、配置变更、接口状态、CPU 告警等）：格式正确，但没有源 / 目的地址，
+// 不是流量或安全事件，计为跳过而不是解析失败。带地址字段却解析失败的行仍计为失败，便于发现日志格式变化。
+func (KVFirewall) Skip(line string) bool {
+	return strings.Contains(line, "%%") && reInfoCenter.MatchString(line) && !reKVAddrKey.MatchString(line)
+}
+
 func (KVFirewall) Parse(line string) (*model.Event, bool) {
 	if strings.Count(line, "=") < 3 {
 		return nil, false

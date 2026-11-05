@@ -29,8 +29,9 @@ func (APISIX) Parse(line string) (*model.Event, bool) {
 	if !ok {
 		return nil, false
 	}
+	var user string
 	for range 2 {
-		if _, rest, ok = strings.Cut(rest, " "); !ok {
+		if user, rest, ok = strings.Cut(rest, " "); !ok {
 			return nil, false
 		}
 	}
@@ -75,6 +76,7 @@ func (APISIX) Parse(line string) (*model.Event, bool) {
 		Kind:    model.KindWeb,
 		Format:  "apisix",
 		SrcIP:   ip,
+		User:    dash(user),
 		Status:  status,
 		ReqTime: reqTime,
 		Host:    hostOnly(dash(host)),

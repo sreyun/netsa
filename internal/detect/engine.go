@@ -225,6 +225,10 @@ func (e *Engine) inspectWeb(ev *model.Event) []model.Hit {
 		// WAF（ModSecurity、naxsi、Lua WAF）与 nginx 限流的判定：同一请求在访问日志中另有记录并按规则检测，这里只采信设备的判定
 		return []model.Hit{deviceThreatHit(ev)}
 	}
+	if nonHTTPRequest(ev) {
+		// 二进制协议探测：只判断协议异常，不按 URI 规则匹配（其中的 \x00 曾被判为高危的“空字节截断”）
+		return specialWebChecks(ev, Normalize(ev.URI), WebResult(ev, e.minBytes))
+	}
 	uri := Normalize(ev.URI)
 	path := uri
 	if i := strings.IndexByte(path, '?'); i >= 0 {
@@ -282,6 +286,9 @@ func (e *Engine) inspectWeb(ev *model.Event) []model.Hit {
 		if r.ID == "trav-dotdot" && !strings.Contains(uri[len(path):], "..") && harmlessDotDot(ev.URI) {
 			continue
 		}
+		if r.ID == "rfi" && sameSiteURL(text[end:], ev.Host) {
+			continue
+		}
 		h := model.Hit{
 			RuleID: r.ID, Name: r.Name, Category: r.Category, Severity: r.sev, Phase: r.Phase,
 			Evidence: excerpt(text, start, end), Result: result, TagOnly: r.TagOnly,
@@ -332,6 +339,35 @@ func harmlessDotDot(uri string) bool {
 		}
 	}
 	return true
+}
+
+// sameSiteURL 判断参数中 "scheme://" 之后的地址是否指向本站（与请求的站点名相同或同一主域名）：
+// pdf.js 的 viewer.html?file=https://本站/group1/M00/…pdf、登录后的回跳地址引用的是自己的资源，不是包含远程文件。
+// 只比较主机名；http://本站@evil.com/、本站.evil.com 这类写法的主机名不同，照常告警。
+func sameSiteURL(rest, host string) bool {
+	if host == "" {
+		return false
+	}
+	h := rest
+	if i := strings.IndexAny(h, "/?#&\\:; "); i >= 0 {
+		h = h[:i]
+	}
+	if h == "" || !strings.Contains(h, ".") {
+		return false
+	}
+	host = strings.ToLower(host)
+	if h == host {
+		return true
+	}
+	a, _ := splitDomain(h)
+	b, _ := splitDomain(host)
+	return a == b && strings.Contains(a, ".")
+}
+
+// nonHTTPRequest 判断请求行是否根本不是 HTTP：TLS 握手、Oracle TNS、RDP 等二进制协议发往 HTTP 端口时，
+// nginx 记录的“请求行”是一串二进制，里面的 \x00 与符号不是 Web 攻击载荷。
+func nonHTTPRequest(ev *model.Event) bool {
+	return ev.Method == "" && ev.URI != "" && ev.URI[0] != '/'
 }
 
 // maxLuaArgs 是 OpenResty ngx.req.get_uri_args 默认最多读取的参数个数：之后的参数 Lua WAF 看不到（CVE-2018-9230）。
@@ -426,6 +462,8 @@ func specialWebChecks(ev *model.Event, uri, result string) []model.Hit {
 			name = "RDP协议探测"
 		case strings.HasPrefix(raw, "SSH-"):
 			name = "SSH协议探测"
+		case strings.Contains(raw, "(DESCRIPTION=") || strings.Contains(raw, "(CONNECT_DATA="):
+			name = "Oracle TNS协议探测"
 		}
 		add("proto-nonhttp", name, CatProtocol, model.SevLow, model.PhaseRecon, Printable(raw, 80))
 	case ev.Method == "CONNECT":

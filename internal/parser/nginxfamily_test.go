@@ -195,3 +195,23 @@ func TestJSONRequestNotNumeric(t *testing.T) {
 		}
 	}
 }
+
+// 华为、H3C 的运维日志（命令记录等）没有地址字段：计为跳过；带地址字段却解析失败的仍算失败。
+func TestHuaweiOperationLogsSkipped(t *testing.T) {
+	p := mustAuto(t, "auto", "")
+	for _, line := range []string{
+		`<190>2026/11/5 04:22:59 USG6300 %%01SHELL/6/DISPLAY_CMDRECORD(s)[82531]:记录显示命令信息。（任务＝FW，地址＝**，VPN实例名=，用户＝_system_，认证方式="Null"，命令＝"display ipsec backup statistics send"）`,
+		`<190>Nov  5 2026 04:44:58 USG6630E %%01SHELL/6/DISPLAY_CMDRECORD(s)[108663]:Recorded display command information. (Task=FW, Ip=**, VpnName=, User=_system_, AuthenticationMethod="Null", Command="display firewall statistics system normal")`,
+		`<188>Nov  5 2026 04:45:00 H3C %%10IFNET/3/PHY_UPDOWN: Physical state on the interface GigabitEthernet1/0/1 changed to down.`,
+	} {
+		if _, ok := p.Parse(line); ok {
+			t.Errorf("不应产生事件: %s", line)
+		}
+		if !p.Known(line) {
+			t.Errorf("应识别为可跳过的运维日志: %s", line)
+		}
+	}
+	if p.Known(`<190>Nov  5 2026 04:45:00 USG %%01SECIF/6/POLICYDENY(l)[0]:SourceIP=bad-value`) {
+		t.Error("带地址字段却解析失败的行应计为失败")
+	}
+}

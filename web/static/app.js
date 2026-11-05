@@ -396,7 +396,7 @@ async function loadOverview() {
     ['攻击源 IP', num(o.attackers), `独立来源 ${num(o.unique_ips)} · 近 1 小时活跃 ${num(o.recent.attackers)}`, '#ffc53d', '', 'attackers:'],
     ['高危以上攻击源', num((lc.critical || 0) + (lc.high || 0)), `严重 ${lc.critical || 0} · 高危 ${lc.high || 0}`, LV_COLOR.critical,
       `按攻击源 IP 的综合威胁等级统计：严重 ${lc.critical || 0} · 高危 ${lc.high || 0} · 中危 ${lc.medium || 0} · 低危 ${lc.low || 0}。触发过高危告警的 IP 至少为高危`, 'attackers:high'],
-    ['攻击拦截率', `${o.block_rate}%`, `已拦截 ${num(t.blocked)}`, '#52c41a', `已拦截 ${num(t.blocked)} 次，点击查看已拦截的告警`, 'alerts:blocked'],
+    ['攻击拦截率', `${o.block_rate}%`, `已拦截 ${num(t.blocked)}`, o.block_rate >= 80 ? '#52c41a' : o.block_rate >= 40 ? '#8fe9ff' : LV_COLOR.medium, `已拦截 ${num(t.blocked)} 次，点击查看已拦截的告警`, 'alerts:blocked'],
     ['疑似成功攻击', num(t.success), '需优先排查是否失陷', t.success > 0 ? LV_COLOR.critical : '#52c41a', '', 'alerts:success'],
     ['攻击面风险指数', `${o.surface_score}`, `风险发现 ${num(o.findings)} 项`,
       o.surface_score >= 60 ? LV_COLOR.critical : o.surface_score >= 30 ? LV_COLOR.high : o.surface_score > 0 ? LV_COLOR.medium : '#52c41a', '', 'surface:'],
@@ -481,7 +481,8 @@ function renderSituation() {
     : o.recent_success > 0 ? `近 1 小时出现 ${o.recent_success} 次疑似成功攻击，请尽快核查`
       : lvl === 'critical' || lvl === 'high' ? '攻击活动频繁，请关注高危攻击源并及时封禁'
         : lvl === 'medium' ? '存在持续的攻击活动，整体可控' : '整体态势平稳';
-  const item = (go, label, value, extra = '', cls = '') => `<button type="button" class="sit-item ${cls}" data-sit="${go}"><span>${label}</span><b>${value}</b>${extra}</button>`;
+  // 环比放在数字右侧，各卡片保持同样的两行高度
+  const item = (go, label, value, extra = '', cls = '') => `<button type="button" class="sit-item ${cls}" data-sit="${go}"><span>${label}</span><div class="sit-val"><b>${value}</b>${extra}</div></button>`;
   $('#situation').innerHTML = `<div class="sit-verdict" style="--c:${o.compromised ? LV_COLOR.critical : LV_COLOR[lvl] || '#52c41a'}"><span>态势研判</span><b>${esc(verdict)}</b></div>`
     + item('trend', '近 1 小时攻击', num(cur), delta)
     + item('new', '新增攻击源', num(o.new_attackers))
@@ -804,14 +805,29 @@ async function loadTopAttackers() {
 
 // 实时告警
 let feedSeen = 0;
-function feedItem(a) {
-  return `<li data-ip="${esc(a.src_ip)}" title="${esc(a.name)}：${esc(a.target)}"><span class="lv">${badge(a.severity)}</span>`
-    + `<span class="title">${esc(a.name)}</span><span class="time">${esc(fmtShort(a.time).slice(6))}</span>`
-    + `<div class="row2"><span class="ip">${esc(a.src_ip)}</span> ${esc(a.location || '')} → ${esc(a.target)}</div></li>`;
+// 连续出现的同名低危告警（互联网背景的端口扫描等）合并为一条，显示次数与来源数，避免把中高危告警挤出视野
+const feedGroups = new WeakMap(); // li → { n, ips }
+const feedKey = (a) => (a.severity === 'low' ? `low|${a.name}` : '');
+function feedItem(a, g) {
+  const n = g ? g.n : 1, srcs = g ? g.ips.size : 1;
+  return `<li data-ip="${esc(a.src_ip)}" data-key="${esc(feedKey(a))}" title="${esc(a.name)}：${esc(a.target)}"><span class="lv">${badge(a.severity)}</span>`
+    + `<span class="title">${esc(a.name)}${n > 1 ? `<em class="cnt">×${num(n)}</em>` : ''}</span><span class="time">${esc(fmtShort(a.time).slice(6))}</span>`
+    + `<div class="row2"><span class="ip">${esc(a.src_ip)}</span> ${esc(a.location || '')} → ${esc(a.target)}${srcs > 1 ? `<span class="srcs"> · ${num(srcs)} 个来源</span>` : ''}</div></li>`;
 }
 async function loadFeed() {
-  const list = await api('/api/alerts?limit=40&severity=low');
-  $('#feed').innerHTML = list.map(feedItem).join('') || '<li class="empty">暂无告警</li>';
+  const list = await api('/api/alerts?limit=60&severity=low');
+  // 接口按时间倒序：相邻的同名低危告警合并到最新的一条上
+  const rows = [];
+  for (const a of list) {
+    const last = rows[rows.length - 1], k = feedKey(a);
+    if (k && last && last.k === k) {
+      last.g.n++;
+      last.g.ips.add(a.src_ip);
+    } else rows.push({ a, k, g: { n: 1, ips: new Set([a.src_ip]) } });
+  }
+  const ul = $('#feed');
+  ul.innerHTML = rows.slice(0, 40).map((r) => feedItem(r.a, r.g)).join('') || '<li class="empty">暂无告警</li>';
+  [...ul.children].forEach((li, i) => rows[i] && feedGroups.set(li, rows[i].g));
 }
 // 用户向下翻看告警时，新告警插入顶部不应把正在阅读的内容挤走：保持滚动位置并提示新告警数量。
 let feedUnseen = 0;
@@ -820,8 +836,20 @@ function pushFeed(a) {
   const ul = $('#feed');
   if (ul.firstElementChild?.classList.contains('empty')) ul.innerHTML = '';
   const reading = ul.scrollTop > 4;
-  ul.insertAdjacentHTML('afterbegin', feedItem(a));
-  if (reading) {
+  const top = ul.firstElementChild, k = feedKey(a);
+  const merged = !!(k && top && top.dataset.key === k && feedGroups.has(top));
+  if (merged) {
+    // 与最上面一条同名的低危告警：合并计数，不新增一行
+    const g = feedGroups.get(top);
+    g.n++;
+    g.ips.add(a.src_ip);
+    top.outerHTML = feedItem(a, g);
+    feedGroups.set(ul.firstElementChild, g);
+  } else {
+    ul.insertAdjacentHTML('afterbegin', feedItem(a, k ? { n: 1, ips: new Set([a.src_ip]) } : null));
+    if (k) feedGroups.set(ul.firstElementChild, { n: 1, ips: new Set([a.src_ip]) });
+  }
+  if (reading && !merged) {
     ul.scrollTop += ul.firstElementChild.offsetHeight;
     feedUnseen++;
     const pill = $('#feedNew');

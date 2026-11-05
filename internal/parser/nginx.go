@@ -35,13 +35,13 @@ func (Nginx) Parse(line string) (*model.Event, bool) {
 	if len(line) < 20 {
 		return nil, false
 	}
-	var ip, tm, req, status, bytes, ref, ua, xff, host, tail string
+	var ip, user, tm, req, status, bytes, ref, ua, xff, host, tail string
 	if f, ok := fastCombined(line); ok && isIP(f.ip) {
-		ip, tm, req, status, bytes, ref, ua, xff, tail = f.ip, f.tm, f.req, f.status, f.bytes, f.ref, f.ua, f.xff, f.tail
+		ip, user, tm, req, status, bytes, ref, ua, xff, tail = f.ip, f.user, f.tm, f.req, f.status, f.bytes, f.ref, f.ua, f.xff, f.tail
 	} else if m := reNginxCombined.FindStringSubmatch(line); m != nil && isIP(m[1]) {
-		ip, tm, req, status, bytes, ref, ua, xff, tail = m[1], m[3], m[4], m[5], m[6], m[7], m[8], m[9], m[10]
+		ip, user, tm, req, status, bytes, ref, ua, xff, tail = m[1], m[2], m[3], m[4], m[5], m[6], m[7], m[8], m[9], m[10]
 	} else if m := reNginxVhost.FindStringSubmatch(line); m != nil && isIP(m[2]) && !isIP(m[1]) {
-		host, ip, tm, req, status, bytes, ref, ua, xff, tail = m[1], m[2], m[4], m[5], m[6], m[7], m[8], m[9], m[10], m[11]
+		host, ip, user, tm, req, status, bytes, ref, ua, xff, tail = m[1], m[2], m[3], m[4], m[5], m[6], m[7], m[8], m[9], m[10], m[11]
 	} else {
 		return nil, false
 	}
@@ -54,6 +54,7 @@ func (Nginx) Parse(line string) (*model.Event, bool) {
 		Referer: dash(unescapeNginx(ref)),
 		UA:      dash(unescapeNginx(ua)),
 		XFF:     dash(xff),
+		User:    dash(user),
 	}
 	if ev.XFF != "" {
 		ev.Format = "nginx_main"
@@ -239,6 +240,7 @@ func (NginxJSON) Parse(line string) (*model.Event, bool) {
 		UA:      dash(pick(kv, "http_user_agent", "user_agent.original", "user_agent", "user-agent", "agent", "ua", "request_user-agent")),
 		XFF:     dash(pick(kv, "http_x_forwarded_for", "x_forwarded_for", "x-forwarded-for", "xff", "request_x-forwarded-for")),
 		XRealIP: dash(pick(kv, "http_x_real_ip", "x_real_ip")),
+		User:    dash(pick(kv, "remote_user")),
 		DstIP:   pick(kv, "server_addr", "destination.ip"),
 	}
 	ev.Status, _ = strconv.Atoi(status)
@@ -433,6 +435,7 @@ func (f *LogFormat) Parse(line string) (*model.Event, bool) {
 		UA:      kv["http_user_agent"],
 		XFF:     kv["http_x_forwarded_for"],
 		XRealIP: kv["http_x_real_ip"],
+		User:    kv["remote_user"],
 		DstIP:   kv["server_addr"],
 	}
 	ev.Status, _ = strconv.Atoi(kv["status"])

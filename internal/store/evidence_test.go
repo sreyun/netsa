@@ -1,6 +1,7 @@
 package store
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -134,5 +135,74 @@ func TestIntelSeverityByEvidence(t *testing.T) {
 		if res.Level != c.sev {
 			t.Fatalf("%s / %d: 等级 %v，期望 %v", c.action, c.reach, res.Level, c.sev)
 		}
+	}
+}
+
+// 扫描开头的几条探测在兜底页面被认出之前已记为“疑似攻击成功”：确认该大小是兜底页面后撤销，不再列为疑似失陷资产。
+func TestCatchAllRetractsEarlySuccess(t *testing.T) {
+	s := New(1000, 1000, 100, time.Hour)
+	trav := func(uri string, bytes int64) {
+		s.Record(&model.Event{Time: time.Now(), Kind: model.KindWeb, SrcIP: "203.0.113.68", Host: "mg.example.com", Method: "GET",
+			URI: uri, Status: 200, Bytes: bytes}, []model.Hit{{RuleID: "trav-dotdot", Name: "目录穿越", Category: "目录穿越/文件包含",
+			Severity: model.SevHigh, Phase: model.PhaseExploit, Result: model.ResultSuccess, Evidence: uri}})
+	}
+	succ := func() int {
+		n := 0
+		for _, f := range s.Surface().Findings {
+			if f.Category == "攻击成功研判" {
+				n++
+			}
+		}
+		return n
+	}
+	trav(`/..\..\..\windows\win.ini`, 477)
+	trav("/exportFile?UID=..%5c..%5cwindows%5cwin.ini", 477)
+	trav("/data/real?f=../../etc/passwd", 2981) // 大小不同：不受影响
+	if succ() != 3 {
+		t.Fatalf("兜底页面认出之前应先记为疑似成功: %d", succ())
+	}
+	trav("/ACSServer/WebServlet?filename=../../../../windows/win.ini", 477) // 第 3 个不同路径返回同样大小
+	if n := succ(); n != 1 {
+		t.Fatalf("确认兜底页面后应撤销同大小的疑似成功，只保留大小不同的一条: %d", n)
+	}
+}
+
+// 分析员把来源的事件标为误报或忽略：撤销该来源名下没有证据的疑似攻击成功，有证据的保留。
+func TestFalsePositiveRetractsSuccess(t *testing.T) {
+	s := New(1000, 1000, 100, time.Hour)
+	size := int64(900)
+	rec := func(ip, uri string, proven bool) *model.Alert {
+		size += 137 // 各不相同：相同大小会被识别为兜底页面
+		r := s.Record(&model.Event{Time: time.Now(), Kind: model.KindWeb, SrcIP: ip, Host: "mg.example.com", Method: "GET", URI: uri, Status: 200, Bytes: size},
+			[]model.Hit{{RuleID: "rfi", Name: "远程文件包含", Category: "目录穿越/文件包含", Severity: model.SevHigh, Phase: model.PhaseExploit,
+				Result: model.ResultSuccess, Proven: proven, Evidence: uri}})
+		if len(r.Alerts) == 0 {
+			t.Fatalf("应生成告警: %s", uri)
+		}
+		return r.Alerts[0]
+	}
+	a := rec("98.82.59.253", "/static/pdf/web/viewer.html?file=https://x/a.pdf", false)
+	rec("98.82.59.253", "/exec?cmd=id", true)
+	rec("203.0.113.70", "/other?file=https://y/b.pdf", false)
+	count := func() (n int) {
+		for _, f := range s.Surface().Findings {
+			if f.Category == "攻击成功研判" {
+				n++
+			}
+		}
+		return
+	}
+	if count() != 3 {
+		t.Fatalf("应有 3 条疑似成功: %d", count())
+	}
+	v, err := s.UpdateIncidents([]uint64{a.IncidentID}, "alice", IncidentUpdate{Status: IncFalsePositive, Note: "本站 pdf 预览"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n := count(); n != 2 {
+		t.Fatalf("应只撤销该来源没有证据的一条: %d", n)
+	}
+	if d := s.Incident(v[0].ID); d == nil || !strings.Contains(fmt.Sprint(d.Notes), "撤销该来源 1 条") {
+		t.Fatalf("处置记录应注明撤销: %+v", d)
 	}
 }

@@ -101,6 +101,7 @@ type Behavior struct {
 	logins    map[string]*loginWin   // 登录接口 → 全局窗口
 	enum      map[string]*enumWin    // 来源 → 接口遍历窗口
 	beacons   map[string]*beacon     // 内网主机>外部地址:端口 → 连接时间
+	beaconDst map[string]int         // 外部地址:端口 → 已告警周期性外连的内网主机数（多台主机同规律外连多为统一部署的软件）
 	auth      map[string]*authWin    // 认证来源 → 登录失败窗口
 	dns       map[string]*dnsWin     // 内网主机 → DNS 查询窗口
 	errs      map[string]*hostErr    // 站点 → 返回 5xx 的不同来源（区分服务故障与攻击）
@@ -119,7 +120,7 @@ const maxAuthHosts = 256
 
 func NewBehavior(th config.Thresholds) *Behavior {
 	return &Behavior{th: th, web: map[string]*webWin{}, fw: map[string]*fwWin{}, logins: map[string]*loginWin{},
-		enum: map[string]*enumWin{}, beacons: map[string]*beacon{}, auth: map[string]*authWin{}, dns: map[string]*dnsWin{}, errs: map[string]*hostErr{},
+		enum: map[string]*enumWin{}, beacons: map[string]*beacon{}, beaconDst: map[string]int{}, auth: map[string]*authWin{}, dns: map[string]*dnsWin{}, errs: map[string]*hostErr{},
 		slow: map[string]*slowWin{}, attacked: map[string]time.Time{}, impact: map[string]*hostImpact{}}
 }
 
@@ -190,7 +191,11 @@ func (b *Behavior) observeWeb(ev *model.Event, attacked bool) []model.Hit {
 	case ev.Status == 404:
 		w.n404++
 	case ev.Status == 401:
-		w.n401++
+		// 只统计登录接口与 HTTP Basic 认证（日志记录了 $remote_user）的 401：App、单页应用带着过期令牌
+		// 启动或轮询时，十几个业务接口会同时返回 401，那是会话过期，不是暴力破解
+		if ev.User != "" || reLoginPath.MatchString(path) {
+			w.n401++
+		}
 	case ev.Status >= 500:
 		w.n5xx++
 		b.noteErr(ev)
@@ -501,9 +506,23 @@ func (b *Behavior) observeBeacon(ev *model.Event) []model.Hit {
 		return nil
 	}
 	bc.fired = true
-	return []model.Hit{{RuleID: "bhv-beacon", Name: "周期性外连（疑似C2心跳）", Category: CatBeacon, Severity: model.SevMedium,
+	h := model.Hit{RuleID: "bhv-beacon", Name: "周期性外连（疑似C2心跳）", Category: CatBeacon, Severity: model.SevMedium,
 		Phase: model.PhasePersistence, Result: fwResult(ev),
-		Evidence: fmt.Sprintf("%s 每隔约 %s 连接 %s:%d（截至本次共 %d 次连接，间隔波动 %.0f%%；同一对地址只告警一次）", ev.SrcIP, approxDur(mean), ev.DstIP, ev.DstPort, bc.n, 100*std/mean)}}
+		Evidence: fmt.Sprintf("%s 每隔约 %s 连接 %s:%d（截至本次共 %d 次连接，间隔波动 %.0f%%；同一对地址只告警一次）", ev.SrcIP, approxDur(mean), ev.DstIP, ev.DstPort, bc.n, 100*std/mean)}
+	dst := ev.DstIP + ":" + strconv.Itoa(ev.DstPort)
+	peers := b.beaconDst[dst]
+	if _, ok := b.beaconDst[dst]; ok || len(b.beaconDst) < 100000 {
+		b.beaconDst[dst] = peers + 1
+	}
+	switch {
+	case strings.EqualFold(ev.Proto, "icmp"):
+		// 定时 ping 外部地址多是链路 / 可用性监控；ICMP 隧道不会这样等间隔地只发探测包
+		h.Name, h.Severity = "周期性ICMP探测（多为链路监控）", model.SevLow
+	case peers >= 2:
+		h.Severity = model.SevLow
+		h.Evidence += fmt.Sprintf("；已有 %d 台内网主机以同样的规律连接该地址，多为统一部署的客户端、监控或更新代理", peers)
+	}
+	return []model.Hit{h}
 }
 
 // looksLikeLoginSuccess 判断本次登录响应是否与此前的失败响应明显不同：
@@ -607,11 +626,35 @@ func (b *Behavior) observeFw(ev *model.Event) []model.Hit {
 				Severity: model.SevMedium, Phase: model.PhaseCredential, Evidence: fmt.Sprintf("%s内对同一主机的 %s 端口发起 %d 次连接（防火墙日志只能看到连接次数，看不到认证结果）", win, name, w.auth[ev.DstPort])}
 		})
 	}
+	// 事件多但分散在大量端口 / 主机上的是高速扫描（已由端口扫描、主机扫描告警），不是洪泛：
+	// 互联网扫描源（如 79.124.58.130）5 分钟内对上百个地址的随机端口各连一次，曾被判为高危的“流量洪泛/DoS”
+	if w.events >= b.th.FloodEvents && w.fired&bitFlood == 0 && b.scanLike(w) {
+		w.fired |= bitFlood // 扫描窗口：不判为洪泛，之后的事件也不再重复判断
+	}
 	fire(bitFlood, w.events >= b.th.FloodEvents, func() model.Hit {
 		return model.Hit{RuleID: "bhv-flood", Name: "流量洪泛/DoS", Category: CatFlood,
 			Severity: model.SevHigh, Phase: model.PhaseImpact, Evidence: fmt.Sprintf("%s内产生 %d 条防火墙事件", win, w.events)}
 	})
 	return hits
+}
+
+// scanLike 判断窗口内的连接是否分散在大量端口或主机上（扫描），而不是集中打向少数目标。
+func (b *Behavior) scanLike(w *fwWin) bool {
+	if len(w.ports) >= b.th.PortScanPorts {
+		return true
+	}
+	hosts := map[string]struct{}{}
+	for _, s := range w.sweep {
+		if len(s) >= b.th.HostSweep {
+			return true
+		}
+		for h := range s {
+			if hosts[h] = struct{}{}; len(hosts) >= b.th.HostSweep {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func fwResult(ev *model.Event) string {

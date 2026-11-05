@@ -2,6 +2,7 @@ package store
 
 import (
 	"errors"
+	"fmt"
 	"sort"
 	"strings"
 	"time"
@@ -597,6 +598,11 @@ func (s *Store) UpdateIncidents(ids []uint64, user string, u IncidentUpdate) ([]
 				i.Closed, i.ClosedSev = now, i.Severity
 			case !wasActive: // 重新打开
 				i.Closed, i.Due, i.Reminded = time.Time{}, now.Add(slaFor(i.Severity, i.AssetLevel)), false
+			}
+			if u.Status == IncFalsePositive || u.Status == IncIgnored {
+				if n := s.surf.retractSuccess(i.Key); n > 0 {
+					actions = append(actions, fmt.Sprintf("撤销该来源 %d 条没有证据的疑似攻击成功记录", n))
+				}
 			}
 		}
 		if u.Assignee != nil && *u.Assignee != i.Assignee {

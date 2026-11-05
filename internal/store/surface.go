@@ -111,6 +111,9 @@ type Finding struct {
 	// Proven 表示攻击成功研判有响应码之外的证据。旧版本只凭 2xx 就记为严重，这些历史记录没有该标记，
 	// 按高危显示，不作为严重或高置信失陷的依据
 	Proven bool `json:"proven,omitempty"`
+	// 攻击成功研判记录站点与响应大小：之后确认该大小是站点的兜底页面时，据此撤销扫描开头几条被误记的“疑似成功”
+	Host  string `json:"host,omitempty"`
+	Bytes int64  `json:"bytes,omitempty"`
 }
 
 // effectiveSev 返回发现的有效等级：没有证据的攻击成功研判最高高危。
@@ -187,8 +190,39 @@ func (sf *surface) catchAll(host, path string, bytes int64) bool {
 	}
 	if len(paths) < softSamePath {
 		paths[path] = struct{}{}
+		if len(paths) == softSamePath {
+			sf.dropCatchAll(host, bytes)
+		}
 	}
 	return len(paths) >= softSamePath
+}
+
+// retractSuccess 撤销来源地址名下没有证据的“疑似攻击成功”记录（分析员把该来源的事件标为误报或忽略时调用，
+// 例如授权的漏洞扫描、本站 pdf 预览被误判），返回撤销的条数。有响应码之外证据的（Proven）保留；
+// 一条记录涉及多个来源时只去掉这个来源，全部去掉后才删除。
+func (sf *surface) retractSuccess(ip string) int {
+	n := 0
+	for id, f := range sf.Findings {
+		if f.Category != "攻击成功研判" || f.Proven || !slices.Contains(f.IPs, ip) {
+			continue
+		}
+		if f.IPs = slices.DeleteFunc(f.IPs, func(x string) bool { return x == ip }); len(f.IPs) == 0 {
+			delete(sf.Findings, id)
+			n++
+		}
+	}
+	return n
+}
+
+// dropCatchAll 撤销站点上响应为兜底页面大小的“疑似攻击成功”：兜底页面要等到 3 个不同探测路径返回同样大小才能认出，
+// 扫描开头的几条探测在此之前已被记为成功（例如 /..\..\windows\win.ini 拿到的其实是首页），确认后不应再列为疑似失陷。
+// 有响应码之外证据的（Proven）不撤销。
+func (sf *surface) dropCatchAll(host string, bytes int64) {
+	for id, f := range sf.Findings {
+		if f.Category == "攻击成功研判" && !f.Proven && f.Bytes == bytes && f.Host == host {
+			delete(sf.Findings, id)
+		}
+	}
 }
 
 // resourceKey 把指向同一资源的路径变体归一：百分号编码、重复斜杠、/./ 与 ../、末尾斜杠、;参数（Tomcat / Spring）。
@@ -458,8 +492,13 @@ func (sf *surface) observeWeb(ev *model.Event, hits []model.Hit, attacked bool) 
 			id := "succ:" + h.Category + ":" + key
 			sf.finding(id, "疑似攻击成功: "+h.Category, "攻击成功研判", h.Severity, asset,
 				ev.SrcIP+" "+ev.Method+" 返回 "+strconv.Itoa(ev.Status)+"，"+h.Name+": "+h.Evidence, rem, ev.SrcIP, ev.Time)
-			if f := sf.Findings[id]; f != nil && h.Proven {
-				f.Proven = true
+			if f := sf.Findings[id]; f != nil {
+				if h.Proven {
+					f.Proven = true
+				}
+				if f.Bytes == 0 {
+					f.Host, f.Bytes = host, ev.Bytes
+				}
 			}
 		}
 	}

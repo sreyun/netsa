@@ -12,8 +12,8 @@ import (
 //
 //	$remote_addr - $remote_user [$time_local] "$request" $status $body_bytes_sent "$http_referer" "$http_user_agent" ["$http_x_forwarded_for"] ...
 type combinedFields struct {
-	ip, tm, req, status, bytes, ref, ua, xff string
-	tail                                     string // XFF 之后的附加字段（如 $request_time $host）
+	ip, user, tm, req, status, bytes, ref, ua, xff string
+	tail                                           string // XFF 之后的附加字段（如 $request_time $host）
 }
 
 func fastCombined(line string) (f combinedFields, ok bool) {
@@ -23,11 +23,14 @@ func fastCombined(line string) (f combinedFields, ok bool) {
 	}
 	f.ip = line[:i]
 	rest := line[i+1:]
-	// ident 与 user
+	// ident 与 user（$remote_user：HTTP Basic 认证的账号）
 	for k := 0; k < 2; k++ {
 		j := strings.IndexByte(rest, ' ')
 		if j < 0 {
 			return f, false
+		}
+		if k == 1 {
+			f.user = rest[:j]
 		}
 		rest = rest[j+1:]
 	}
