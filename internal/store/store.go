@@ -210,6 +210,8 @@ type Totals struct {
 // Store 是线程安全的态势状态库。
 type Store struct {
 	mu          sync.RWMutex
+	campMu      sync.Mutex      // 攻击活动归并结果的缓存（campaign.go），计算期间不持有 mu
+	camp        *CampaignReport // 最近一次归并结果
 	maxIPs      int
 	maxAlerts   int
 	perRule     int

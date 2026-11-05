@@ -134,6 +134,7 @@ func (s *Server) Handler() http.Handler {
 		writeJSON(w, s.Store.Timeline(clamp(qint(r, "minutes", 60), 1, 31*24*60)))
 	}))
 	mux.HandleFunc("GET /api/attackers", cached(time.Second, s.attackers))
+	mux.HandleFunc("GET /api/campaigns", func(w http.ResponseWriter, r *http.Request) { writeJSON(w, s.Store.Campaigns()) })
 	mux.HandleFunc("GET /api/ip/{ip}", cached(2*time.Second, s.ipDetail)) // 含同源关联分析，短时缓存避免重复全量比对
 	mux.HandleFunc("GET /api/ip/{ip}/rdap", s.rdap)
 	mux.HandleFunc("GET /api/alerts", cached(time.Second, s.alerts))

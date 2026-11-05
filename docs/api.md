@@ -48,6 +48,7 @@
 | `GET /api/map?level=` | 地图数据：城市级地点（含攻击源列表）、国家与省份着色统计 |
 | `GET /api/attackers?level=&q=&sort=&limit=&offset=` | 攻击源列表；下钻条件 `country`、`city`、`net_type`、`isp`、`world`、`province`、`city_map`、`place`、`category`、`phase`、`technique`（ATT&CK 技术编号） |
 | `GET /api/ip/{ip}` / `GET /api/ip/{ip}/rdap` | IP 溯源详情（含 `related` 同源关联分析）/ WHOIS 注册信息 |
+| `GET /api/campaigns` | 攻击活动：多个攻击源之间的强关联归并的活动，含成员、关联依据、来源网段与建议封禁网段（缓存 1 分钟） |
 | `GET /api/alerts?severity=&category=&result=&kind=&ip=&q=` | 告警查询；下钻条件 `phase`、`target`、`from` / `to`（Unix 秒或 RFC3339）、`technique`、`asset`（目标资产）、`incident`（所属事件） |
 | `GET /api/surface` | 攻击面分析 |
 | `GET /api/assessment` | 安全评估：七个维度评分与总评、P0~P3 处置建议、疑似失陷资产、ATT&CK 矩阵（`GET /api/report` 中同样包含） |

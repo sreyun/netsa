@@ -144,11 +144,12 @@ type cand struct {
 
 // correlate 在全部攻击源中查找与 p 同源的地址。p 为画像副本；其他画像分批在读锁内比对，
 // 批间释放锁让日志写入继续进行。比对只做常数次比较与少量哈希查找，候选只保留前 30 名。
-func (s *Store) correlate(p *IPProfile) *Correlation {
-	res := &Correlation{Related: []*RelatedIP{}}
+// newCorrelator 构造目标画像的比对上下文（调用方保证 p 可安全读取）；地址无法解析时返回 nil。
+// UA 的使用人数（uaUsers）由调用方填写：单个地址的关联分析现场统计，攻击活动归并使用全局统计。
+func newCorrelator(p *IPProfile) *correlator {
 	addr, err := netip.ParseAddr(p.IP)
 	if err != nil {
-		return res
+		return nil
 	}
 	addr = addr.Unmap()
 	cr := &correlator{p: p}
@@ -162,11 +163,9 @@ func (s *Store) correlate(p *IPProfile) *Correlation {
 		a := addr.As4()
 		cr.pfx24, cr.pfx16 = fmt.Sprintf("%d.%d.%d.", a[0], a[1], a[2]), fmt.Sprintf("%d.%d.", a[0], a[1])
 	}
-	res.Subnet = cr.net24.String()
 	if g := p.Geo; g != nil {
 		cr.asn, cr.hosting, cr.label, cr.rdnsDom = g.ASN, g.Hosting, g.Label, regDomain(g.RDNS)
 	}
-	res.ASN = cr.asn
 	for ua := range p.UAs {
 		if ua != "" && ua != "-" && len(cr.uas) < 16 {
 			cr.uas = append(cr.uas, ua)
@@ -179,6 +178,17 @@ func (s *Store) correlate(p *IPProfile) *Correlation {
 		}
 	}
 	cr.targets = topKeys(p.Targets, topTargets)
+	return cr
+}
+
+func (s *Store) correlate(p *IPProfile) *Correlation {
+	res := &Correlation{Related: []*RelatedIP{}}
+	cr := newCorrelator(p)
+	if cr == nil {
+		return res
+	}
+	res.Subnet = cr.net24.String()
+	res.ASN = cr.asn
 
 	s.mu.RLock()
 	list := make([]*IPProfile, 0, len(s.ips))

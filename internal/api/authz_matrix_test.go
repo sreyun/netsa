@@ -20,7 +20,7 @@ var routePolicy = map[string]string{
 	"POST /api/auth/2fa/setup": "self", "POST /api/auth/2fa/enable": "self", "POST /api/auth/2fa/disable": "self",
 
 	// 只读：态势与统计
-	"GET /api/meta": auth.RoleViewer, "GET /api/overview": auth.RoleViewer, "GET /api/timeline": auth.RoleViewer, "GET /api/attackers": auth.RoleViewer,
+	"GET /api/meta": auth.RoleViewer, "GET /api/overview": auth.RoleViewer, "GET /api/timeline": auth.RoleViewer, "GET /api/attackers": auth.RoleViewer, "GET /api/campaigns": auth.RoleViewer,
 	"GET /api/ip/{ip}": auth.RoleViewer, "GET /api/ip/{ip}/rdap": auth.RoleViewer, "GET /api/alerts": auth.RoleViewer, "GET /api/alerts/summary": auth.RoleViewer,
 	"GET /api/map": auth.RoleViewer, "GET /api/surface": auth.RoleViewer, "GET /api/assessment": auth.RoleViewer, "GET /api/sources": auth.RoleViewer,
 	"GET /api/rules": auth.RoleViewer, "GET /api/rules/stats": auth.RoleViewer, "GET /api/rules/managed": auth.RoleViewer, "GET /api/exposure": auth.RoleViewer,

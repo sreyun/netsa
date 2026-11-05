@@ -23,6 +23,7 @@
       <button type="button" class="nav-g" aria-haspopup="true">威胁分析<span class="caret" aria-hidden="true">▾</span></button>
       <div class="nav-menu" role="menu">
         <button data-tab="attackers" data-label="攻击溯源" role="menuitem"><b>攻击溯源</b><span>攻击源画像、定位与同源关联</span></button>
+        <button data-tab="campaigns" data-label="攻击活动" role="menuitem"><b>攻击活动</b><span>多个攻击源归并的攻击活动与整体处置</span></button>
         <button data-tab="alerts" data-label="告警事件" role="menuitem"><b>告警事件</b><span>实时告警与归档告警检索</span></button>
         <button data-tab="rawlog" data-label="日志检索" role="menuitem" class="need-analyst"><b>日志检索</b><span>原始日志回溯与取证导出</span></button>
         <button data-tab="surface" data-label="攻击面分析" role="menuitem"><b>攻击面分析</b><span>暴露的服务、入口与风险发现</span></button>
@@ -126,6 +127,16 @@
     <div class="drill-bar" id="atkDrill" hidden></div>
     <div class="panel"><div class="table-wrap"><table class="table" id="atkTable"></table></div>
       <div class="pager" id="atkPager"></div></div>
+  </section>
+
+  <!-- 攻击活动：多个攻击源之间的强关联连成一次活动 -->
+  <section id="tab-campaigns" class="tab">
+    <div class="toolbar">
+      <span class="muted" id="campSummary"></span>
+      <span class="spacer"></span>
+      <button type="button" class="btn" id="campRefresh">刷新</button>
+    </div>
+    <div id="campList"></div>
   </section>
 
   <!-- 告警事件 -->

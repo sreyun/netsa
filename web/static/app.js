@@ -2006,9 +2006,38 @@ $('#userTable').addEventListener('click', async (e) => {
 });
 
 // ---------------- 调度 ----------------
+// ---------------- 攻击活动 ----------------
+// 多个攻击源之间的强关联（同网段且手法相似、共用罕见工具指纹、同一云厂商的地址轮换扫描同一主机……）连成一次活动
+async function loadCampaigns() {
+  const r = await api('/api/campaigns');
+  $('#campSummary').textContent = r.total
+    ? `${num(r.total)} 个攻击活动 · 涉及 ${num(r.members)} 个攻击源（参与归并 ${num(r.scanned)} 个） · ${fmtTime(r.generated)} 计算`
+    : `参与归并 ${num(r.scanned)} 个攻击源，暂未发现由多个攻击源构成的攻击活动`;
+  const row = (k, v) => (v ? `<div><span class="k">${k}</span>${v}</div>` : '');
+  $('#campList').innerHTML = (r.campaigns || []).map((c, i) => `<div class="panel camp" style="border-left-color:${LV_COLOR[c.level] || 'var(--border-hi)'}">
+      <div class="camp-head">${badge(c.level)}<b>攻击活动 #${i + 1}</b><span class="muted">${num(c.size)} 个攻击源 · ${num(c.attacks)} 次攻击 · ${esc(fmtShort(c.first_seen))} ~ ${esc(fmtShort(c.last_seen))}</span></div>
+      <div class="camp-grid">
+        ${row('关联依据', (c.reasons || []).map(esc).join('；'))}
+        ${row('攻击类型', (c.categories || []).map(esc).join('、'))}
+        ${row('来源网段', (c.nets || []).map((n) => `${esc(n.net)}（${num(n.count)}）`).join('、'))}
+        ${row('自治系统', (c.asns || []).map(esc).join('、'))}
+        ${row('工具指纹', (c.tools || []).map(esc).join('、'))}
+        ${row('主要目标', (c.targets || []).map((t) => `<span title="${esc(t)}">${esc(t.length > 60 ? t.slice(0, 60) + '…' : t)}</span>`).join('、'))}
+        ${row('建议封禁网段', c.block_nets?.length ? `<span class="mono">${c.block_nets.map(esc).join('、')}</span>` : '')}
+      </div>
+      <div class="camp-members">${(c.members || []).map((m) => `<button type="button" class="chip" data-ip="${esc(m.ip)}" title="${esc(m.location || '')} · 评分 ${Math.round(m.score)} · ${num(m.attacks)} 次攻击">${esc(m.ip)}</button>`).join('')}${c.size > (c.members || []).length ? `<span class="muted">… 共 ${num(c.size)} 个</span>` : ''}</div>
+    </div>`).join('') || '<div class="panel empty">暂无攻击活动</div>';
+}
+$('#campList').addEventListener('click', (e) => {
+  const b = e.target.closest('[data-ip]');
+  if (b) openIP(b.dataset.ip);
+});
+$('#campRefresh').addEventListener('click', () => loadCampaigns().catch(console.error));
+
 const loaders = {
   overview: () => Promise.all([loadOverview(), loadTrend(), loadMap(), loadTopAttackers(), loadSituationAssess()]).catch(console.error),
   attackers: () => loadAttackers().catch(console.error),
+  campaigns: () => loadCampaigns().catch(console.error),
   alerts: () => (alMode === 'history' ? loadHistory(false) : loadAlerts()).catch(console.error),
   surface: () => loadSurface().catch(console.error),
   assess: () => loadAssess().catch(console.error),
