@@ -15,6 +15,7 @@ import (
 	"netsa/internal/alert"
 	"netsa/internal/assets"
 	"netsa/internal/authscan"
+	"netsa/internal/deception"
 	"netsa/internal/detect"
 	"netsa/internal/exposure"
 	"netsa/internal/geo"
@@ -47,13 +48,14 @@ type Pipeline struct {
 	OnAlert     func(*model.Alert)
 	// OnIntranetLearned 在自学习从防火墙日志识别出新的内网网段后调用（用于按新网段刷新已有攻击源的归属地）
 	OnIntranetLearned func(prefix string)
-	Suppress          *suppress.Manager // 误报抑制规则（可为空）
-	AuthScan          *authscan.Manager // 授权扫描登记（可为空）：登记的时间窗内扫描源只记录、不告警
-	Raw               *rawlog.Store     // 原始日志留存（可为空）
-	Assets            *assets.Manager   // 资产与漏洞（可为空）
-	Exposure          *exposure.Manager // 对外发布服务清单（DNAT 映射，可为空）
-	Learn             *learn.Learner    // 自学习：按研判准确率校准规则等级（可为空）
-	Intel             *intel.DB         // 威胁情报：DNS 查询与域名情报比对（可为空）
+	Suppress          *suppress.Manager  // 误报抑制规则（可为空）
+	AuthScan          *authscan.Manager  // 授权扫描登记（可为空）：登记的时间窗内扫描源只记录、不告警
+	Deception         *deception.Manager // 诱饵（可为空）：命中即高置信攻击者
+	Raw               *rawlog.Store      // 原始日志留存（可为空）
+	Assets            *assets.Manager    // 资产与漏洞（可为空）
+	Exposure          *exposure.Manager  // 对外发布服务清单（DNAT 映射，可为空）
+	Learn             *learn.Learner     // 自学习：按研判准确率校准规则等级（可为空）
+	Intel             *intel.DB          // 威胁情报：DNS 查询与域名情报比对（可为空）
 
 	whitelist []netip.Prefix
 	processed atomic.Int64
@@ -199,6 +201,10 @@ func (p *Pipeline) inspect(ev *model.Event) item {
 	if h, ok := p.domainIntelHit(ev); ok { // 内网主机解析情报标记的域名
 		it.hits = append(it.hits, h)
 	}
+	if h, ok := p.tlsIntelHit(ev); ok { // TLS 客户端指纹命中情报
+		it.hits = append(it.hits, h)
+	}
+	it.hits = append(it.hits, p.Deception.Match(ev)...) // 诱饵路径、线索、账号与蜜罐
 	return it
 }
 
@@ -211,6 +217,7 @@ func (p *Pipeline) aggregate(items []item) {
 		p.learnIntranet(it.ev)
 		if !it.whitelisted && p.Behavior != nil {
 			hits[i] = append(hits[i], p.Behavior.ObserveHits(it.ev, it.hits)...)
+			late = append(late, p.Behavior.TakeLate()...) // 按目的地址告警的带宽型 DDoS
 		}
 		// 设备报告的洪泛：该地址正处在按会话日志判断的突增中时注明，两种判定相互印证，升为高危
 		if it.ev.Kind == model.KindFirewall && p.Behavior != nil {
@@ -224,7 +231,7 @@ func (p *Pipeline) aggregate(items []item) {
 			}
 		}
 		reach, why := exposure.ReachUnknown, ""
-		if it.ev.Kind == model.KindFirewall {
+		if it.ev.Kind == model.KindFirewall && !it.ev.Aux && !it.ev.Response {
 			reach, why = p.reachOf(it.ev)
 			it.ev.Reach = reach // 攻击面按同一证据判断服务是否真实对外开放
 			if reach == exposure.ReachYes {
@@ -248,7 +255,35 @@ func (p *Pipeline) aggregate(items []item) {
 			hits[i] = p.Learn.ObserveAttack(it.ev, hits[i])
 		}
 		hits[i] = p.Learn.Calibrate(it.ev, hits[i]) // 资产漏洞关联之前：有漏洞证据的升级不受校准影响
+		if !it.whitelisted && it.ev.File != nil {
+			if h, ok := p.fileHit(it.ev, it.ev.Time); ok { // 传输的文件：恶意文件哈希、攻击之后下载的载荷
+				hits[i] = append(hits[i], h)
+			}
+		}
+		// 诱饵命中即高置信攻击者：自动确认来源（之后的低危、中危命中升一级）；内网主机使用诱饵账号、连接蜜罐说明已经失陷
 		if !it.whitelisted {
+			for _, h := range hits[i] {
+				if h.Category != deception.Category {
+					continue
+				}
+				if src := it.ev.SrcIP; src != "" && !geo.IsPrivate(src) {
+					p.Learn.ConfirmSource(src, "decoy", h.Name+"："+h.Evidence, it.ev.Time)
+				} else if src != "" && h.Phase == model.PhaseExploit {
+					late = append(late, p.Behavior.MarkAttacked(src, it.ev.Time, h.Name, true)...)
+				}
+				break
+			}
+		}
+		// 主机侧的入侵证据（Web 进程执行命令、反弹 Shell、导出凭证、载荷落地）：主机已失陷，之后它发起的新内网连接按横向移动判断
+		if !it.whitelisted && (it.ev.Kind == model.KindProcess || it.ev.File != nil) {
+			for _, h := range hits[i] {
+				if hostCompromised(&h) {
+					late = append(late, p.Behavior.MarkAttacked(it.ev.SrcIP, it.ev.Time, h.Name, true)...)
+					break
+				}
+			}
+		}
+		if !it.whitelisted && !it.ev.Aux && !it.ev.Response && it.ev.Kind != model.KindProcess {
 			// 防火墙与 Web 日志联动：记录利用尝试，出站连接在攻击之后连接了攻击者或载荷中的回连地址时告警
 			var confirm *attackMark
 			if hits[i], confirm = p.observeCallback(it.ev, hits[i]); confirm != nil {

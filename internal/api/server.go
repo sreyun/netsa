@@ -27,6 +27,7 @@ import (
 	"netsa/internal/authscan"
 	"netsa/internal/block"
 	"netsa/internal/config"
+	"netsa/internal/deception"
 	"netsa/internal/detect"
 	"netsa/internal/exposure"
 	"netsa/internal/forward"
@@ -79,6 +80,7 @@ type Server struct {
 	Archive   *archive.Archive   // 为 nil 表示未启用告警归档
 	Suppress  *suppress.Manager  // 误报抑制规则
 	AuthScan  *authscan.Manager  // 授权扫描登记
+	Deception *deception.Manager // 诱饵
 	RawLog    *rawlog.Store      // 原始日志留存，为 nil 表示未启用
 	Assets    *assets.Manager    // 资产与漏洞
 	Exposure  *exposure.Manager  // 对外发布服务清单（DNAT 映射），为 nil 表示未启用
@@ -253,6 +255,9 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/authscans", s.authScanCreate)
 	mux.HandleFunc("POST /api/authscans/{id}/end", s.authScanEnd)
 	mux.HandleFunc("DELETE /api/authscans/{id}", s.authScanDelete)
+	mux.HandleFunc("GET /api/deception", s.deceptionStatus)
+	mux.HandleFunc("POST /api/deception", s.deceptionCreate)
+	mux.HandleFunc("DELETE /api/deception/{id}", s.deceptionDelete)
 
 	mux.HandleFunc("GET /api/alert/robots", s.alertInfo)
 	mux.HandleFunc("POST /api/alert/robots", s.robotCreate)

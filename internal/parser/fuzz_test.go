@@ -23,6 +23,16 @@ var fuzzSeeds = []string{
 	`{"timestamp":"2026-10-25T10:00:03.000+0800","event_type":"dns","src_ip":"10.0.0.50","dns":{"type":"query","rrname":"pool.minexmr.com","rrtype":"A"}}`,
 	`1,2026/10/29 08:49:59,0,TRAFFIC,end,,2026/10/29 08:49:59,198.51.100.40,203.0.113.10,0.0.0.0,10.0.0.5,allow-web`,
 	`#Fields: date time s-ip cs-method cs-uri-stem cs-uri-query s-port cs-username c-ip cs(User-Agent) sc-status`,
+	// P3：Zeek、主机进程、抗 D、应用登录、蜜罐
+	"#fields	ts	uid	id.orig_h	id.orig_p	id.resp_h	id.resp_p	proto	conn_state	orig_bytes",
+	"1730000000.5	C1	45.33.1.2	40001	10.0.0.10	22	tcp	-	-	-	-	S0	F	T	0	S	1	44	0	0	-",
+	`{"_path":"files","ts":1730000004.0,"fuid":"F1","id.orig_h":"10.0.0.10","id.orig_p":1,"id.resp_h":"203.0.113.80","id.resp_p":80,"mime_type":"application/x-executable","is_orig":true}`,
+	`{"winlog":{"channel":"Microsoft-Windows-Sysmon/Operational","event_id":1,"event_data":{"Image":"C:\cmd.exe","CommandLine":"cmd /c whoami","ParentImage":"w3wp.exe"}},"host":{"ip":"10.0.0.12"}}`,
+	`node=web02 type=EXECVE msg=audit(1730000000.100:500): argc=2 a0="bash" a1=2D69`,
+	`{"rule":{"level":10,"description":"x","mitre":{"id":["T1110"]}},"agent":{"ip":"10.0.0.2"},"data":{"srcip":"45.33.1.2"}}`,
+	`{"attack_type":"UDP Flood","attacked_ip":"43.242.97.44","max_mbps":12500,"status":"blackhole"}`,
+	`{"event":"user_login","username":"a","client_ip":"1.1.1.1","result":"success"}`,
+	`{"logtype":4002,"src_host":"45.33.1.2","dst_host":"10.0.9.9","dst_port":22,"logdata":{"USERNAME":"root"}}`,
 	`time=2026/10/29 08:49:5`, `a=b c=d e=`, `{"a":`, `\x`, `\\x22`, `<1>`, `"`,
 }
 

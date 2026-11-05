@@ -72,7 +72,9 @@ func newEntrySet(name string, allow map[string]bool) *entrySet {
 	return &entrySet{l: &list{name: name, addrs: map[netip.Addr]bool{}, domains: map[string]struct{}{}}, allow: allow}
 }
 
-func (s *entrySet) size() int { return len(s.l.addrs) + s.l.count + len(s.l.domains) }
+func (s *entrySet) size() int {
+	return len(s.l.addrs) + s.l.count + len(s.l.domains) + len(s.l.fingers)
+}
 
 // hostsSink 是 hosts 文件中把恶意域名指向的“黑洞”地址：0.0.0.0 evil.example。
 var hostsSink = map[string]bool{"0.0.0.0": true, "127.0.0.1": true, "::": true, "::1": true}
@@ -88,7 +90,11 @@ func (s *entrySet) addLine(line string) {
 	case len(f) >= 2 && hostsSink[f[0]]:
 		s.addDomain(f[1])
 	default:
-		s.addIndicator(f[0])
+		tok := f[0]
+		if i := strings.IndexByte(tok, ','); i > 0 {
+			tok = tok[:i] // CSV（如 SSLBL 的 ja3_md5,Firstseen,…）取第一列
+		}
+		s.addIndicator(tok)
 	}
 }
 
@@ -96,6 +102,15 @@ func (s *entrySet) addLine(line string) {
 func (s *entrySet) addIndicator(v string) {
 	v = strings.Trim(strings.TrimSpace(v), `"'`)
 	if v == "" {
+		return
+	}
+	if k := fingerKey(v); k != "" {
+		if s.size() < maxFeedEntries {
+			if s.l.fingers == nil {
+				s.l.fingers = map[string]struct{}{}
+			}
+			s.l.fingers[k] = struct{}{}
+		}
 		return
 	}
 	if h := urlHost(v); h != "" {
@@ -410,6 +425,10 @@ func writeFeedCache(path string, l *list) error {
 	}
 	for d := range l.domains {
 		b.WriteString(d)
+		b.WriteByte('\n')
+	}
+	for f := range l.fingers {
+		b.WriteString(f)
 		b.WriteByte('\n')
 	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {

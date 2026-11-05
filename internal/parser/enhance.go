@@ -24,10 +24,14 @@ var (
 	keyTLSCipher = []string{"ssl_cipher", "tls.cipher", "tls_cipher", "tlscipher", "cipher"}
 	keyJA3       = []string{"ja3", "tls.client.ja3", "http_ssl_ja3", "ssl_ja3", "ja3_hash"}
 	keyJA4       = []string{"ja4", "tls.client.ja4", "http_ssl_ja4", "ssl_ja4"}
+	keyBody      = []string{"request_body", "req_body", "post_body", "http.request.body.content", "requestbody"}
 )
 
 // fillEnhanced 读取 Web 日志的增强字段（kv 的键已小写）。
 func fillEnhanced(ev *model.Event, kv map[string]string) {
+	if v := dash(pick(kv, keyBody...)); v != "" {
+		ev.Body = truncBody(v)
+	}
 	if v := pick(kv, keyReqLength...); v != "" {
 		ev.ReqLength, _ = strconv.ParseInt(v, 10, 64)
 	}

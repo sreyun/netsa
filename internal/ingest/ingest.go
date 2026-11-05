@@ -211,8 +211,8 @@ func (s *source) parseLineStatus(p *parser.Auto, line string) (ev *model.Event, 
 		}
 	}()
 	s.lines.Add(1)
-	if strings.HasPrefix(line, "#Fields:") {
-		p.Directive(line) // W3C（IIS）字段声明
+	if strings.HasPrefix(line, "#Fields:") || strings.HasPrefix(line, "#fields") || strings.HasPrefix(line, "#path") {
+		p.Directive(line) // W3C（IIS）、Zeek 的字段声明
 	}
 	if parser.Skippable(line) {
 		s.skipped.Add(1)

@@ -419,6 +419,49 @@ $('#asnTable').addEventListener('click', async (e) => {
   loadAuthScans().catch(console.error);
 });
 
+// ---------------- 诱饵 ----------------
+// 诱饵路径、线索、账号与蜜罐：命中即高置信攻击者；使用同一线索或账号的地址互相关联
+const DCY_KIND = { path: '诱饵路径', token: '诱饵线索', account: '诱饵账号', host: '蜜罐地址' };
+const DCY_HINT = { path: '如 /backup_2026.zip 或 /admin_old/*', token: '如 写在诱饵文件中的接口密钥 x-ops-key-7f3a9c', account: '如 svc_backup', host: '如 10.0.9.9、10.0.8.0/24 或 10.0.9.9:3389' };
+async function loadDeception() {
+  const r = await api('/api/deception');
+  const decoys = r.decoys || [], attackers = r.attackers || [];
+  const name = {};
+  decoys.forEach((d) => { name[d.id] = `${DCY_KIND[d.kind] || d.kind} ${d.value}`; });
+  name.opencanary = 'OpenCanary 蜜罐';
+  $('#dcyCount').textContent = `${decoys.length} 个 · 累计命中 ${num(r.total || 0)} 次 · ${num(attackers.length)} 个来源`;
+  $('#dcyTable').innerHTML = `<thead><tr><th>类型</th><th>诱饵</th><th>说明</th><th class="num">命中</th><th class="num">来源</th><th>最近命中</th><th></th></tr></thead><tbody>${decoys.map((d) => `<tr>
+    <td class="nowrap">${esc(DCY_KIND[d.kind] || d.kind)}</td><td class="mono">${esc(d.value)}</td>
+    <td>${esc(d.note || '')}<div class="muted">${d.config ? '配置文件' : esc(d.creator || '') + ' · ' + esc(fmtShort(d.created))}</div></td>
+    <td class="num">${num(d.hits)}</td><td class="num">${num(d.sources)}</td><td class="nowrap muted">${zero(d.last_hit) ? '-' : esc(fmtShort(d.last_hit))}</td>
+    <td class="num">${canOperate() && !d.config ? `<button type="button" class="btn danger" data-dcy-del="${esc(d.id)}">删除</button>` : ''}</td></tr>`).join('') || empty(7, '暂无诱饵：在上方登记，或在配置文件的 deception 中配置')}</tbody>`;
+  const linked = {};
+  (r.links || []).forEach((l) => l.ips.forEach((ip) => { (linked[ip] = linked[ip] || []).push(...l.ips.filter((x) => x !== ip)); }));
+  $('#dcyAttackers').innerHTML = `<thead><tr><th>来源</th><th>命中的诱饵</th><th class="num">次数</th><th>首次 / 最近</th><th>关联的地址</th></tr></thead><tbody>${attackers.slice(0, 200).map((a) => `<tr>
+    <td>${ipLink(a.ip)}${a.internal ? ' <span class="chip">内网</span>' : ''}</td><td><div class="cell-chips">${(a.decoys || []).map((id) => `<span class="chip">${esc(name[id] || id)}</span>`).join('')}</div></td>
+    <td class="num">${num(a.hits)}</td><td class="nowrap muted">${esc(fmtShort(a.first_seen))} / ${esc(fmtShort(a.last_seen))}</td>
+    <td>${[...new Set(linked[a.ip] || [])].slice(0, 6).map((ip) => ipLink(ip)).join(' ') || '<span class="muted">-</span>'}</td></tr>`).join('') || empty(5, '暂无命中')}</tbody>`;
+}
+$('#dcyKind').addEventListener('change', () => { $('#dcyValue').placeholder = DCY_HINT[$('#dcyKind').value]; });
+$('#dcyForm').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const msg = (t, ok) => { $('#dcyMsg').textContent = t; $('#dcyMsg').className = 'form-msg ' + (ok ? 'ok' : 'err'); };
+  const body = { kind: $('#dcyKind').value, value: $('#dcyValue').value.trim(), note: $('#dcyNote').value.trim() };
+  if (!body.value) { msg('请填写诱饵'); return; }
+  try {
+    const d = await api('/api/deception', 'POST', body);
+    msg(`已登记${DCY_KIND[d.kind]} ${d.value}`, true);
+    $('#dcyValue').value = ''; $('#dcyNote').value = '';
+  } catch (err) { msg(err.message); return; }
+  loadDeception().catch(console.error);
+});
+$('#dcyTable').addEventListener('click', async (e) => {
+  const del = e.target.closest('[data-dcy-del]');
+  if (!del || !confirm('确定删除该诱饵？之后访问它不再告警。')) return;
+  try { await api('/api/deception/' + encodeURIComponent(del.dataset.dcyDel), 'DELETE'); } catch (err) { alert(err.message); }
+  loadDeception().catch(console.error);
+});
+
 // ---------------- Syslog 发送端 ----------------
 const SND_STATUS = { online: ['在线', 'nt-on'], idle: ['静默', 'muted'], silent: ['断流', 'lv-critical'], rejected: ['已拒绝', 'lv-high'], blocked: ['已阻止', 'lv-high'], offline: ['未上线', 'nt-warn'] };
 const snd = { rep: null, editing: null, action: 'allow' };
@@ -1108,7 +1151,7 @@ async function loadLearn() {
         <td class="nowrap">${canOperate() ? `<button type="button" class="btn" data-ln="apply" data-id="${esc(s.id)}">采纳</button> <button type="button" class="btn" data-ln="dismiss" data-id="${esc(s.id)}">忽略</button>` : ''}</td></tr>`).join('')}</tbody></table>`
     : '<div class="muted">暂无建议。分析员把事件处置为“误报”后，同一规则在同一目标上反复误报、或同一来源多次被整体判为误报时，会在这里提示。</div>';
   // 从日志与 AI 自动学到的攻击行为
-  const AUTO_KIND = { evidence: '成功证据', ai: '模型研判', campaign: '同一攻击活动', callback: '攻击后回连' };
+  const AUTO_KIND = { evidence: '成功证据', ai: '模型研判', campaign: '同一攻击活动', callback: '攻击后回连', decoy: '命中诱饵' };
   const atkEmpty = (s) => `<div class="muted">${s}</div>`;
   $('#lnAttack').innerHTML = `<h4>自动确认的攻击源 <small class="muted">共 ${num(atk.auto_total)} 个，显示最近 ${num(atk.auto_sources.length)} 个</small></h4>`
     + (atk.auto_sources.length
@@ -1348,7 +1391,7 @@ $('#aiTestBtn').addEventListener('click', () => {
 // ---------------- 调度 ----------------
 Object.assign(loaders, {
   learn: () => loadLearn().catch(console.error),
-  incidents: () => Promise.all([loadIncidents(), loadSuppressions(), loadAuthScans()]).catch(console.error),
+  incidents: () => Promise.all([loadIncidents(), loadSuppressions(), loadAuthScans(), loadDeception()]).catch(console.error),
   assets: () => loadAssets().catch(console.error),
   reports: () => loadReports().catch(console.error),
   rawlog: () => loadRawlog().catch(console.error),

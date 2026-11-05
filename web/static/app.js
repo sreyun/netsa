@@ -2030,6 +2030,7 @@ async function loadCampaigns() {
         ${row('自治系统', (c.asns || []).map(esc).join('、'))}
         ${row('工具指纹', (c.tools || []).map(esc).join('、'))}
         ${row('OAST 关联标识', (c.oast || []).map((k) => `<span class="mono" title="interactsh 关联 ID / dnslog 子域名：同一次扫描任务的载荷中不变">${esc(k)}</span>`).join('、'))}
+        ${row('诱饵', (c.decoys || []).map((k) => `<span class="mono" title="只有读过诱饵的人才知道：使用它的地址是同一个攻击者">${esc(k)}</span>`).join('、'))}
         ${row('主要目标', (c.targets || []).map((t) => `<span title="${esc(t)}">${esc(t.length > 60 ? t.slice(0, 60) + '…' : t)}</span>`).join('、'))}
         ${row('建议封禁网段', c.block_nets?.length ? `<span class="mono">${c.block_nets.map(esc).join('、')}</span>` : '')}
       </div>

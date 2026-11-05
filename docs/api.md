@@ -32,6 +32,7 @@
 | `GET /api/ai/settings`、`PUT /api/ai/settings`、`POST /api/ai/test`、`POST /api/ai/models` | 外部模型配置（协议、地址、名称、密钥、启用；响应不含密钥）、连接测试与读取模型列表（管理员） |
 | `GET/POST /api/suppressions`、`DELETE /api/suppressions/{id}` | 误报抑制规则（写操作需运营分析员以上） |
 | `GET/POST /api/authscans`、`POST /api/authscans/{id}/end`、`DELETE /api/authscans/{id}` | 授权扫描登记：扫描源（地址或网段）、起止时间（`start` / `end`，RFC3339 或按展示时区的 `2006-01-02T15:04`；不填结束时间时可用 `hours`）、说明；期间只记录不告警，返回期间的事件数、命中数、攻击类型与目标（写操作需运营分析员以上） |
+| `GET /api/deception`、`POST /api/deception`、`DELETE /api/deception/{id}` | 诱饵：诱饵列表（类型、值、说明、命中次数、来源数，`config` 为配置文件中的诱饵）、命中过诱饵的来源（`attackers`）与使用同一线索 / 账号的来源（`links`）；登记 `{"kind":"path|token|account|host","value":"…","note":"…"}`（写操作需运营分析员以上，配置文件中的诱饵不能在页面删除） |
 | `GET /api/syslog/senders`、`POST /api/syslog/senders`、`PUT/DELETE /api/syslog/senders/{id}`、`PUT /api/syslog/policy` | syslog 发送端画像、登记与白名单开关（写操作需管理员） |
 | `GET /api/rawlog/search?from=&to=&ip=&q=&source=&attacks=1&limit=&clip=&cursor=`、`GET /api/rawlog/export?…`、`GET /api/rawlog/status`、`POST /api/rawlog/verify` | 原始日志检索 / 导出（运营分析员以上）/ 留存状态 / 完整性校验（管理员）。检索结果中的 `next` 传给 `cursor` 取下一页；`clip` 限制每条返回的字节数 |
 | `GET/POST /api/assets`、`PUT/DELETE /api/assets/{id}`、`POST /api/assets/import?type=assets|vulns&mode=merge|replace`、`GET /api/assets/template?type=` | 资产台账与导入（请求体为 CSV） |

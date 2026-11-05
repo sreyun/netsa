@@ -33,7 +33,8 @@ type Campaign struct {
 	Nets       []NetCount       `json:"nets"`
 	ASNs       []string         `json:"asns,omitempty"`
 	Tools      []string         `json:"tools,omitempty"`
-	OAST       []string         `json:"oast,omitempty"` // 成员共用的带外回连标识（interactsh 关联 ID、dnslog 子域名）
+	OAST       []string         `json:"oast,omitempty"`   // 成员共用的带外回连标识（interactsh 关联 ID、dnslog 子域名）
+	Decoys     []string         `json:"decoys,omitempty"` // 成员共用的诱饵线索 / 诱饵账号
 	Reasons    []string         `json:"reasons"`
 	BlockNets  []string         `json:"block_nets,omitempty"` // 建议整体封禁的网段：有 3 个以上成员的 /24
 }
@@ -195,12 +196,22 @@ func (s *Store) buildCampaigns() *CampaignReport {
 	}
 
 	// 同一 OAST 关联标识（interactsh 关联 ID、dnslog 子域名）：同一次扫描任务的多个出口地址，直接连到同一活动
-	oastOf := map[int][]string{}
-	if s.OASTLinks != nil {
-		links := s.OASTLinks()
-		pos := make(map[string]int, len(list))
-		for i, o := range list {
-			pos[o.IP] = i // 地址创建后不再修改，读取无需加锁
+	// 使用同一诱饵线索、诱饵账号的来源同样直接连到同一活动
+	oastOf, decoyOf := map[int][]string{}, map[int][]string{}
+	pos := make(map[string]int, len(list))
+	for _, src := range []struct {
+		fn     func() map[string][]string
+		reason string
+		tag    map[int][]string
+	}{{s.OASTLinks, "同一 OAST 关联标识（同一次扫描任务）", oastOf}, {s.DecoyLinks, "使用同一诱饵线索 / 诱饵账号", decoyOf}} {
+		if src.fn == nil {
+			continue
+		}
+		links := src.fn()
+		if len(pos) == 0 {
+			for i, o := range list {
+				pos[o.IP] = i // 地址创建后不再修改，读取无需加锁
+			}
 		}
 		keys := make([]string, 0, len(links))
 		for k := range links {
@@ -218,13 +229,13 @@ func (s *Store) buildCampaigns() *CampaignReport {
 				continue
 			}
 			for _, i := range idx {
-				oastOf[i] = append(oastOf[i], k)
+				src.tag[i] = append(src.tag[i], k)
 			}
 			for _, j := range idx[1:] {
 				if ra, rb := find(idx[0]), find(j); ra != rb {
 					parent[ra] = rb
 				}
-				edges = append(edges, campEdge{idx[0], j, []string{"同一 OAST 关联标识（同一次扫描任务）"}})
+				edges = append(edges, campEdge{idx[0], j, []string{src.reason}})
 			}
 		}
 	}
@@ -255,6 +266,11 @@ func (s *Store) buildCampaigns() *CampaignReport {
 			for _, k := range oastOf[i] {
 				if !slices.Contains(c.OAST, k) && len(c.OAST) < 5 {
 					c.OAST = append(c.OAST, k)
+				}
+			}
+			for _, k := range decoyOf[i] {
+				if !slices.Contains(c.Decoys, k) && len(c.Decoys) < 5 {
+					c.Decoys = append(c.Decoys, k)
 				}
 			}
 		}

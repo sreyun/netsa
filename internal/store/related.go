@@ -537,14 +537,25 @@ func shortUA(ua string) string {
 	return ua
 }
 
-// addOASTMates 把与该地址使用同一 OAST 关联标识的来源列为强关联：同一次扫描任务的其他出口地址。
+// addOASTMates 把与该地址使用同一 OAST 关联标识的来源列为强关联：同一次扫描任务的其他出口地址；
+// 使用同一诱饵线索、诱饵账号的来源同样列为强关联（只有拿到诱饵的人才知道）。
 // 这些来源的网段、手法可能完全不同，按特征评分发现不了。
 func (s *Store) addOASTMates(ip string, c *Correlation) {
-	if s.OASTLinks == nil || c == nil {
+	if c == nil {
 		return
 	}
+	if s.OASTLinks != nil {
+		s.addLinkMates(ip, c, s.OASTLinks(), func(k string) string { return "同一 OAST 关联标识 " + k + "（同一次扫描任务）" })
+	}
+	if s.DecoyLinks != nil {
+		s.addLinkMates(ip, c, s.DecoyLinks(), func(k string) string { return "使用同一" + k + "（只有读过诱饵的人才知道）" })
+	}
+}
+
+// addLinkMates 把 links 中与该地址同组的来源列为强关联（评分 100）。
+func (s *Store) addLinkMates(ip string, c *Correlation, links map[string][]string, reason func(string) string) {
 	mates := map[string]string{} // 来源 → 共用的标识
-	for k, ips := range s.OASTLinks() {
+	for k, ips := range links {
 		if !slices.Contains(ips, ip) {
 			continue
 		}
@@ -557,7 +568,6 @@ func (s *Store) addOASTMates(ip string, c *Correlation) {
 	if len(mates) == 0 {
 		return
 	}
-	reason := func(k string) string { return "同一 OAST 关联标识 " + k + "（同一次扫描任务）" }
 	for _, r := range c.Related {
 		if k, ok := mates[r.IP]; ok {
 			if r.Score < relatedStrong {

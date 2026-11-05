@@ -4,6 +4,7 @@ import (
 	"strings"
 
 	"netsa/internal/detect"
+	"netsa/internal/geo"
 	"netsa/internal/intel"
 	"netsa/internal/model"
 	"netsa/internal/store"
@@ -19,19 +20,25 @@ import (
 
 // domainIntelHit 检查 DNS 查询是否命中域名情报。
 func (p *Pipeline) domainIntelHit(ev *model.Event) (model.Hit, bool) {
-	if p.Intel == nil || ev.Kind != model.KindDNS || ev.Host == "" {
+	if p.Intel == nil {
 		return model.Hit{}, false
 	}
-	names := p.Intel.MatchDomain(ev.Host)
+	domain, verb := ev.Host, "解析"
+	switch {
+	case ev.Kind == model.KindDNS:
+	case ev.SNI != "" && geo.IsPrivate(ev.SrcIP) && !geo.IsPrivate(ev.DstIP):
+		domain, verb = ev.SNI, "TLS 连接" // 握手中的服务器名称：加密连接不经过内网 DNS 时同样能发现
+	default:
+		return model.Hit{}, false
+	}
+	if domain == "" {
+		return model.Hit{}, false
+	}
+	names := p.Intel.MatchDomain(domain)
 	if len(names) == 0 {
 		return model.Hit{}, false
 	}
-	kind, rank := intel.KindAttacker, -1
-	for _, n := range names {
-		if k := p.Intel.KindOf(n); domainRank[k] > rank {
-			kind, rank = k, domainRank[k]
-		}
-	}
+	kind := p.worstKind(names)
 	h := model.Hit{RuleID: "intel-dns", Phase: model.PhasePersistence, Result: model.ResultAllowed, Feeds: names}
 	switch kind {
 	case intel.KindC2:
@@ -45,7 +52,15 @@ func (p *Pipeline) domainIntelHit(ev *model.Event) (model.Hit, bool) {
 	default:
 		h.Name, h.Category, h.Severity = "解析情报标记的恶意域名", store.CatMalDomain, model.SevMedium
 	}
-	h.Evidence = ev.SrcIP + " 查询 " + detect.Printable(ev.Host, 120) + "，命中 " + strings.Join(names, "、")
+	h.Evidence = ev.SrcIP + " 查询 " + detect.Printable(domain, 120) + "，命中 " + strings.Join(names, "、")
+	if ev.Kind != model.KindDNS {
+		h.RuleID = "intel-sni"
+		h.Name = strings.Replace(h.Name, "解析", verb, 1)
+		h.Evidence = ev.SrcIP + " 以 TLS 连接 " + detect.Printable(domain, 120) + "（" + ev.DstIP + "），命中 " + strings.Join(names, "、")
+		if ev.Reply == model.ReplyNone {
+			h.Result = model.ResultFailed
+		}
+	}
 	if strings.EqualFold(ev.RCode, "NXDOMAIN") {
 		if h.Severity > model.SevLow {
 			h.Severity--
