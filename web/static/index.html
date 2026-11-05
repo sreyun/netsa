@@ -290,6 +290,20 @@
         <span class="form-msg" id="asnMsg"></span>
       </form>
       <div class="table-wrap"><table class="table" id="asnTable"></table></div></div>
+    <div class="panel"><h3>诱饵 <small id="dcyCount"></small></h3>
+      <div class="nt-help">诱饵不承载任何业务，正常用户不会碰到：诱饵路径（站点上不被引用的文件，如 /backup_2026.zip，以 * 结尾为前缀）、诱饵线索（写在诱饵文件内容中的接口密钥、内部域名）、
+        诱饵账号（不分配给任何人的账号）、蜜罐地址（地址、网段或 地址:端口）。命中即高置信攻击者，自动确认来源；使用同一线索或账号的地址互相关联为同一攻击者。
+        配置文件中的诱饵（deception）在此只读展示。</div>
+      <form class="asn-form need-analyst" id="dcyForm" autocomplete="off" novalidate>
+        <select id="dcyKind" aria-label="诱饵类型"><option value="path">诱饵路径</option><option value="token">诱饵线索</option><option value="account">诱饵账号</option><option value="host">蜜罐地址</option></select>
+        <input id="dcyValue" placeholder="如 /backup_2026.zip" aria-label="诱饵">
+        <input id="dcyNote" placeholder="说明：放在哪里、内容是什么" aria-label="说明">
+        <button type="submit" class="btn">登记</button>
+        <span class="form-msg" id="dcyMsg"></span>
+      </form>
+      <div class="table-wrap"><table class="table" id="dcyTable"></table></div>
+      <h4>命中过诱饵的来源</h4>
+      <div class="table-wrap"><table class="table" id="dcyAttackers"></table></div></div>
   </section>
 
   <!-- 资产与漏洞 -->

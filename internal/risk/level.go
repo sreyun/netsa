@@ -76,6 +76,17 @@ var catFloor = map[string]model.Severity{
 	"数据外传":       model.SevMedium,   // 内网主机外发流量突增：是否为业务（备份、同步）需要核实
 	"大量下载":       model.SevMedium,
 	"横向移动":       model.SevMedium,
+	// 主机侧证据（P3）：进程日志说明动作已经在主机上发生
+	"主机命令执行":  model.SevHigh,
+	"反弹Shell": model.SevHigh,
+	"凭证窃取":    model.SevHigh,
+	"可疑命令":    model.SevMedium,
+	"持久化":     model.SevMedium,
+	"痕迹清除":    model.SevMedium,
+	"载荷下载":    model.SevHigh,
+	"恶意文件":    model.SevHigh,
+	"账号盗用":    model.SevMedium, // 不可能的旅行、新国家登录、多地并发：需要核实是否为出差、代理
+	"诱饵命中":    model.SevMedium, // 诱饵本身不承载业务：访问即说明在搜集信息，等级由诱饵类型给出
 }
 
 // responseProvable 是「响应码 / 响应大小可以判定攻击是否成功」的分类。

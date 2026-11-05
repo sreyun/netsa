@@ -21,13 +21,15 @@
 | `syslog.tls` / `tls_cert` / `tls_key` / `tls_client_ca` | syslog over TLS 监听与证书；配置客户端 CA 时要求双向认证 |
 | `syslog.allowlist` / `senders` / `rate_limit` | 发送端白名单（`true` 时界面不能关闭）/ 配置文件登记的发送端（名称、分组、`allow` / `block`、断流阈值）/ 单发送端每秒日志上限 |
 | `alert.source_silence` / `sources[].silence` | 数据源断流告警的默认阈值（默认 30m，`off` 关闭）/ 单个数据源的阈值 |
+| `flow.netflow` / `sflow` / `sampling` / `exporters` / `window` | 流量采集：NetFlow v5 / v9 与 IPFIX、sFlow v5 的 UDP 监听地址（为空不启用）/ 设备没有报告采样率时使用的采样率 / 按设备（地址或网段）登记名称与采样率 / 合并窗口（默认 10s） |
+| `deception.paths` / `tokens` / `accounts` / `hosts` / `file` | 诱饵：诱饵路径（`*` 结尾为前缀）/ 写在诱饵内容中的线索 / 诱饵账号 / 蜜罐地址（IP、网段或 `地址:端口`）/ 页面登记的诱饵与命中记录文件（默认 `deception.json`）；与“事件处置 → 诱饵”中登记的合并生效 |
 | `rawlog.*` | 原始日志留存：`enabled`、`dir`、`retention_days`（默认 180）、`max_size_gb`、`attacks_only` |
 | `audit.dir` / `retention_days` | 防篡改审计链的目录与留存天数（默认 180） |
 | `report.recipients` / `weekly` / `monthly` / `smtp.*` | 周报 / 月报的收件人、发送时间（如 `mon 09:00`、`1 09:00`）与发信服务器 |
-| `intel.blocklists` / `tor_exit_url` | 威胁情报：命中的来源告警，内网主机外连其中地址判为疑似失陷 |
+| `intel.blocklists` / `tor_exit_url` | 威胁情报：命中的来源告警，内网主机外连其中地址判为疑似失陷；也可写 JA3 / JA4 指纹与文件哈希 |
 | `alert.base_url` / `dedup_window` | 告警消息中的大屏链接 / 推送去重窗口 |
 | `alert.report_time` | 每日安全日报推送时间（HH:MM，按 `timezone`，默认 09:00，`off` 关闭）；机器人需勾选“接收每日安全日报” |
-| `detect.thresholds` | 行为检测阈值：CC、目录扫描、暴力破解、端口扫描、主机探测、洪泛，以及分布式暴力破解（`dist_window`、`dist_brute_*`）、分布式 CC（`dist_cc_*`）、多源 DDoS（`ddos_events`、`ddos_sources`）、数据外传（`exfil_window`、`exfil_bytes`）、单来源下载量突增（`download_window`、`download_bytes`）、接口遍历（`enum_*`）、周期性外连（`beacon_conns`）、主机认证（`auth_failures`、`auth_users`）、DNS（`dns_nxdomain`、`dns_subdomains`） |
+| `detect.thresholds` | 行为检测阈值：CC、目录扫描、暴力破解、端口扫描、主机探测、洪泛，以及分布式暴力破解（`dist_window`、`dist_brute_*`）、分布式 CC（`dist_cc_*`）、多源 DDoS（`ddos_events`、`ddos_sources`）、数据外传（`exfil_window`、`exfil_bytes`）、单来源下载量突增（`download_window`、`download_bytes`）、带宽型 DDoS（`ddos_bps`、`ddos_pps`）、接口遍历（`enum_*`）、周期性外连（`beacon_conns`）、主机认证（`auth_failures`、`auth_users`）、DNS（`dns_nxdomain`、`dns_subdomains`） |
 | `alert.webhooks` | 配置文件方式的告警机器人：`type`、`url`、`secret`（加签）、`levels`（多选 medium / high / critical） |
 | `server.web_dir` / `serve -web` | 从磁盘目录加载前端页面，用于定制界面 |
 | `detect.whitelist` | 自有监控、扫描器等白名单，只统计流量不检测 |

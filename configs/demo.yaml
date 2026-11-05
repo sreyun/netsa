@@ -65,3 +65,7 @@ rawlog:
   retention_days: 180
 audit:
   dir: state/demo-audit
+
+# 演示用诱饵：/backup.zip、/old/ 是扫描器常探测的路径，模拟日志中的扫描会命中；页面中可继续登记
+deception:
+  paths: ["/backup.zip", "/old/*"]

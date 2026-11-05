@@ -435,11 +435,20 @@ var controlCats = map[string]bool{
 	"DNS隧道": true, "带外探测回连": true, "DGA域名": true, "动态域名/内网穿透": true,
 }
 
+// hostStages 是主机侧证据（进程日志、流量日志中的文件、账号盗用）所处的阶段。
+var hostStages = map[string]int{
+	"主机命令执行": stBreach, "反弹Shell": stControl, "凭证窃取": stLateral, "可疑命令": stPersist, "持久化": stPersist, "痕迹清除": stPersist,
+	"账号盗用": stBreach, "载荷下载": stPersist, "恶意文件": stPersist,
+}
+
 // targetStage 返回命中在被攻击资产链路中的阶段。
 func targetStage(h *model.Hit) int {
 	switch h.Category {
 	case "账号异常", "主机安全事件":
 		return stPersist
+	}
+	if st, ok := hostStages[h.Category]; ok {
+		return st
 	}
 	switch h.Phase {
 	case model.PhaseImpact:
@@ -465,6 +474,8 @@ func (r *chainRoles) actorStage(h *model.Hit) (int, bool) {
 		return stLateral, true
 	}
 	switch {
+	case h.Category == "载荷下载" || h.Category == "恶意文件":
+		return stPersist, true // 资产自己下载的攻击载荷
 	case controlCats[h.Category]:
 		return stControl, true
 	case h.Phase == model.PhaseCollection:

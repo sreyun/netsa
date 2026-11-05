@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"netsa/internal/config"
+	"netsa/internal/geo"
 	"netsa/internal/model"
 )
 
@@ -123,10 +124,15 @@ type Behavior struct {
 	ewSeen, ewSeenPrev map[uint64]int64
 	ewSrcs             map[string]*ewSource
 	ewPend             map[string][]ewPending
-	logons             map[string]logonMark
-	authSince          time.Time
-	latest             time.Time // 已处理事件的最新时间（排除未来时间的异常日志），作为窗口过期的基准
-	lastPrune          time.Time // 上次清理的系统时间
+	bw                 map[string]*bwWin       // 目的地址 → 入向流量（带宽型 DDoS）
+	accts              map[string]*acctProfile // 账号 → 成功登录的地点（账号盗用）
+	// Geo 返回地址的定位（账号盗用检测按地点判断）；为空时不检测。在行为检测的锁内调用，必须只查本地数据
+	Geo         func(ip string) *geo.Info
+	pendingLate []Late // 需要以其他事件记录的命中（TakeLate 取出）
+	logons      map[string]logonMark
+	authSince   time.Time
+	latest      time.Time // 已处理事件的最新时间（排除未来时间的异常日志），作为窗口过期的基准
+	lastPrune   time.Time // 上次清理的系统时间
 }
 
 // maxWindows 是同时跟踪的行为窗口上限：大量不同来源（如伪造源地址的扫描）时不再为新来源建窗口，防止内存耗尽。
@@ -141,7 +147,7 @@ func NewBehavior(th config.Thresholds) *Behavior {
 		slow: map[string]*slowWin{}, attacked: map[string]time.Time{}, impact: map[string]*hostImpact{},
 		sites: map[string]*siteWin{}, dsts: map[dstKey]*dstWin{}, homes: map[string]*homeSize{},
 		exfil: map[string]*exfilWin{}, downloads: map[string]*dlWin{}, scripts: map[string]*scriptStat{}, shellSites: map[string]*shellSite{},
-		attackedSrv: map[string]srvMark{}, ewSrcs: map[string]*ewSource{}, ewPend: map[string][]ewPending{}, logons: map[string]logonMark{}}
+		attackedSrv: map[string]srvMark{}, ewSrcs: map[string]*ewSource{}, ewPend: map[string][]ewPending{}, bw: map[string]*bwWin{}, accts: map[string]*acctProfile{}, logons: map[string]logonMark{}}
 }
 
 // Observe 处理一个事件并返回触发的行为告警。
@@ -149,6 +155,19 @@ func (b *Behavior) Observe(ev *model.Event) []model.Hit { return b.ObserveHits(e
 
 // ObserveHits 与 Observe 相同，ruleHits 是同一事件命中的攻击规则：用于把攻击之后的写操作与业务受损关联起来。
 func (b *Behavior) ObserveHits(ev *model.Event, ruleHits []model.Hit) []model.Hit {
+	// 主机进程事件与同一连接的辅助记录（ssl.log、files.log）不是新的连接：不参与连接统计与行为检测
+	if ev.Kind == model.KindProcess || ev.Aux {
+		return nil
+	}
+	// 单向流量记录的应答方向：只计入入向带宽（反射放大的流量就是应答）
+	if ev.Response {
+		if ev.Kind == model.KindFirewall && !isPrivateIP(ev.SrcIP) {
+			b.mu.Lock()
+			b.observeBandwidth(ev)
+			b.mu.Unlock()
+		}
+		return nil
+	}
 	// 出站流量（内网主机访问公网）不做扫描 / 洪泛 / 暴力破解判定：正常上网会连接大量不同的公网地址与端口，
 	// 按入站攻击的阈值判断会产生大量误报；只检测按固定间隔回连同一地址的 C2 心跳。
 	// 内网主机之间的横向扫描（目的为内网地址）仍按入站规则检测。
@@ -162,6 +181,7 @@ func (b *Behavior) ObserveHits(ev *model.Event, ruleHits []model.Hit) []model.Hi
 		b.maybePrune(ev)
 		if ev.Kind == model.KindAuth {
 			hits := b.observeAuth(ev)
+			hits = append(hits, b.observeTakeover(ev)...)
 			if h, ok := b.observeLogonChain(ev); ok {
 				hits = append(hits, h)
 			}
@@ -212,6 +232,9 @@ func (b *Behavior) ObserveHits(ev *model.Event, ruleHits []model.Hit) []model.Hi
 			hits = append(hits, h)
 		}
 		return hits
+	}
+	if ev.Kind == model.KindFirewall {
+		b.observeBandwidth(ev) // 入向流量：带宽型 DDoS
 	}
 	if isPrivateIP(ev.SrcIP) && isPrivateIP(ev.DstIP) { // 东西向：内网主机之间的远程管理连接
 		return append(b.observeEastWest(ev), b.observeFw(ev)...)
@@ -754,6 +777,8 @@ func (b *Behavior) prune(now time.Time) {
 	b.pruneDevFloods(now)
 	b.pruneExfil(now)
 	b.pruneLateral(now)
+	b.pruneBandwidth(now)
+	b.pruneAccounts(now)
 	for k, w := range b.logins {
 		if now.Sub(w.start) > 2*b.th.DistWindow || w.start.Sub(now) > 2*b.th.DistWindow {
 			delete(b.logins, k)

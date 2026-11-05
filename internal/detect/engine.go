@@ -160,7 +160,7 @@ func (e *Engine) Rules() []*Rule { return e.rules }
 // 所有分支的命中都会经过 risk.Finalize 统一裁决等级：特征规则、设备告警、防火墙端口探测
 // 各自声明的等级只作为「建议值」，最终是否够严重由分类底线与响应结果共同决定。
 func (e *Engine) Inspect(ev *model.Event) []model.Hit {
-	if ev.Outbound {
+	if ev.Outbound || ev.Aux || ev.Response { // 辅助记录（ssl.log、files.log）由流水线按情报检查，规则已在会话日志上匹配过；单向流的应答方向不是新的连接
 		return nil
 	}
 	var hits []model.Hit
@@ -171,8 +171,13 @@ func (e *Engine) Inspect(ev *model.Event) []model.Hit {
 		hits = inspectDNS(ev)
 	case model.KindAuth:
 		hits = inspectAuth(ev)
+	case model.KindProcess:
+		hits = inspectProcess(ev)
 	default:
 		hits = e.inspectWeb(ev)
+		if ev.Body != "" && ev.Threat == "" {
+			hits = e.inspectBody(ev, hits)
+		}
 	}
 	for i := range hits {
 		before := hits[i].Severity
@@ -183,6 +188,30 @@ func (e *Engine) Inspect(ev *model.Event) []model.Hit {
 				hits[i].Evidence = Printable(hits[i].Evidence+"（"+d+"）", 400)
 			}
 		}
+	}
+	return hits
+}
+
+// inspectBody 按查询参数的方式检查日志记录的请求体（Zeek 的 post_body、nginx 的 $request_body）：
+// 访问日志看不到 POST 载荷，记录了请求体时同样按规则匹配。与 URI 命中同一规则的不重复。
+func (e *Engine) inspectBody(ev *model.Event, hits []model.Hit) []model.Hit {
+	p := ev.URI
+	if i := strings.IndexByte(p, '?'); i >= 0 {
+		p = p[:i]
+	}
+	b := *ev
+	b.URI, b.Body = p+"?"+strings.NewReplacer("\r", " ", "\n", " ").Replace(ev.Body), ""
+	seen := make(map[string]bool, len(hits))
+	for _, h := range hits {
+		seen[h.RuleID] = true
+	}
+	for _, h := range e.inspectWeb(&b) {
+		if seen[h.RuleID] {
+			continue
+		}
+		seen[h.RuleID] = true
+		h.Evidence = Printable("请求体："+h.Evidence, 400)
+		hits = append(hits, h)
 	}
 	return hits
 }

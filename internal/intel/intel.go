@@ -41,6 +41,7 @@ type list struct {
 	name    string
 	kind    string
 	domains map[string]struct{}
+	fingers map[string]struct{} // TLS 客户端指纹（JA3 / JA4）与文件哈希
 	addrs   map[netip.Addr]bool
 	// 网段按前缀长度分组：查询时只需对出现过的每种长度做一次掩码与哈希查找（IPv4 最多 32 次），
 	// 与网段数量无关。出站流量逐条比对情报时，数千条网段的情报库也不会成为瓶颈。

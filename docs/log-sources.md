@@ -19,6 +19,7 @@ access_log /var/log/nginx/access.log netsa;
 - 用后端响应码复核“疑似成功”：`$upstream_status` 为 `-` 表示请求没有转发到后端（静态文件、`return`、缓存、`try_files` 兜底），载荷没有被应用处理，不判为成功；后端返回 5xx 而 nginx 改写成 200 的判为后端异常；
 - 用请求长度识别 WebShell 交互（每次执行的命令不同，请求大小随之变化）与上传（请求体较大的 POST）；
 - 记录客户端 TLS 指纹（协议与加密套件；网关记录了 JA3 / JA4 时用 `ja3=`、`ja4=`），同源关联据此比对轮换出口的同一工具。
+- 可选：JSON 格式加上 `"request_body":"$request_body"`，POST 请求体（截断到前 4 KB）与查询参数一样参与规则匹配，补上访问日志看不到载荷的缺口。请求体可能含有口令等敏感信息，开启前确认原始日志留存的访问控制与保留期限。
 
 自定义格式时把上面的 `log_format` 原样（可多行）粘贴到数据源的 `log_format` 字段；JSON 格式自动识别。远程 nginx 也可直接发送 syslog：`access_log syslog:server=netsa服务器IP:5514,tag=nginx netsa;`
 
@@ -116,11 +117,64 @@ WAF 判定在告警中显示为“设备告警: <WAF 给出的名称>”，结�
 
 接入后在大屏 **数据源** 页查看自动识别的格式、解析成功/失败数与失败样例。注意 `timezone` 需与日志产生方一致（syslog 等日志不含时区）。
 
+## 流量日志：Zeek、NetFlow / sFlow 与云抗 D 服务
+
+访问日志与防火墙日志看不到请求体、TLS 指纹与被挡在边界之外的攻击流量，流量级数据源可以补上：
+
+| 数据源 | 接入方式 | 用途 |
+| --- | --- | --- |
+| **Zeek** `conn.log` | 跟踪文件（制表符格式带 `#fields` 表头，或 `LogAscii::use_json=T` 的 JSON），`type: zeek` 或自动识别 | 会话事件：双向字节数、包数与连接状态（`S0` 无应答、`REJ` 被拒绝、`SF` 正常结束），用于扫描、数据外传、带宽型 DDoS、外连情报 |
+| **Zeek** `http.log` | 同上 | Web 事件：请求体与响应体长度；装了 `http-post-body` 类脚本时 `post_body` 字段与查询参数一样参与规则匹配 |
+| **Zeek** `ssl.log` | 同上 | TLS 版本、加密套件、SNI；装了 `ja3` / `ja4` 包时还有客户端指纹，按[指纹情报](detection.md#tls-指纹与文件情报)判断木马与攻击工具 |
+| **Zeek** `files.log` | 同上 | 传输的文件（类型、文件名、大小、MD5 / SHA1 / SHA256）：哈希情报、遭受攻击后从攻击者地址下载的可执行文件 |
+| **NetFlow v5 / v9、IPFIX** | `flow.netflow: ":2055"`，设备的流量导出指向 netsa | 会话事件（按采样率还原字节数与包数），带宽型 DDoS、东西向与出站流量统计；Cisco ASA 的 NSEL 拒绝事件记为拒绝 |
+| **sFlow v5** | `flow.sflow: ":6343"` | 同上，按样本的原始报文头解析地址、端口与协议 |
+| **云抗 D 服务** | 阿里云 DDoS 防护、腾讯云大禹、华为云 AAD 等的攻击事件（JSON，经日志服务投递、Webhook 落盘或 syslog 转发） | 按被攻击的地址告警（攻击类型、峰值带宽与包速率、清洗 / 黑洞状态），与按流量判断的带宽型 DDoS 相互印证 |
+
+- Zeek 的 `ssl.log` 与 `files.log` 描述的是 `conn.log` 中已经记录过的连接，作为辅助记录只用于情报匹配、指纹、文件证据与关联，不重复计入事件量与连接统计。`dns.log` 由 DNS 解析器处理（见下节）。
+- 流量记录按（源、目的、目的端口、协议）在 `flow.window`（默认 10 秒）内合并为一个事件；核心设备每秒数万条流也不会把检测压垮。流量记录是单向的：服务端发回客户端的方向（源端口为服务端口、目的端口为更大的临时端口）不是新的连接，只计入入向带宽（反射放大的流量就是应答），不参与扫描、回连、外连情报与外传检测。设备没有在选项模板中报告采样率时，用 `flow.exporters` 按设备登记采样率（`sampling: 1000` 表示 1:1000），否则字节数会少算。
+- 数据源页面中，`netflow` / `sflow` 两个监听分别显示识别出的格式、设备数、收到的数据包数与解析失败的样例。
+- 云抗 D 服务的字段按公开文档整理（被攻击的地址 `ip` / `vip` / `attacked_ip`、攻击类型、`max_bps` / `mbps` / `gbps`、`max_pps` / `kpps`、状态），各厂商、各版本写法不同，接入后请在数据源页核对识别情况；攻击结束的事件只计为跳过。
+
+推荐的 Zeek 配置：
+
+```zeek
+@load policy/tuning/json-logs      # 输出 JSON（也可保持 TSV，表头会被识别）
+@load ja3                          # zkg install ja3（或 ja4）：ssl.log 增加客户端指纹
+@load http-post-body               # 可选：http.log 增加 post_body（截断到前 4 KB 参与匹配）
+```
+
+## 主机进程日志（EDR / HIDS）
+
+| 数据源 | 格式 | 说明 |
+| --- | --- | --- |
+| **Sysmon** | Winlogbeat、NXLog、Elastic Agent 输出的 JSON | 1 进程创建、3 网络连接、10 进程访问（lsass）、11 文件创建、12 / 13 / 14 注册表 |
+| **Windows 4688** | 同上（Security 日志） | 进程创建；需在组策略中开启“在进程创建事件中包含命令行” |
+| **Elastic Defend / ECS** | `event.category: process` 的 JSON | 进程启动 |
+| **Linux auditd** | `audit.log` 或经 syslog 转发；建议 `log_format = ENRICHED` | `EXECVE` 记录（与同一事件的 `SYSCALL` 记录合并出进程路径与账号）；建议规则 `-a always,exit -F arch=b64 -S execve -k exec` |
+| **Wazuh / OSSEC** | `alerts.json` | 按告警等级（12 以上严重、10 高危、7 中危、4 低危）与 MITRE 编号归类；网络来源的告警（SSH 暴力破解等）以来源地址为攻击者 |
+
+`type` 可写 `edr`（或 `sysmon`、`hids`），也可以自动识别。事件的主体是上报日志的主机：Winlogbeat 的 `host.ip`、Wazuh 的 `agent.ip`；日志里没有本机地址时，经 syslog 接收的取发送端地址。检测内容见[主机进程检测](detection.md#主机进程检测)。
+
+## 应用登录日志
+
+业务系统、统一身份认证、SSO 网关输出的 JSON 登录日志按常见键名识别：事件类型（`event` / `action` / `type` / `operation` 中含 login、logon、signin、authenticate、登录）、账号（`username` / `user` / `account` / `user.name` …）、来源地址（`client_ip` / `remote_addr` / `source.ip` …，X-Forwarded-For 取第一个）、结果（`result` / `outcome` / `status`：success、failed …）与系统名称（`app` / `service` …）。缺少其中任何一类的日志不会被识别为登录。
+
+```json
+{"time":"2026-11-01T09:00:00+08:00","event":"user_login","username":"zhangsan","client_ip":"203.0.113.10","result":"success","app":"OA"}
+```
+
+登录日志与 SSH、VPN、RDP 认证日志一样参与暴力破解、撞库检测，成功登录参与[账号盗用](detection.md#账号盗用)检测（不可能的旅行、首次从新的国家登录、多地并发登录）。
+
+## 蜜罐日志
+
+**OpenCanary** 的 JSON 日志（`logtype` 2000 以上的交互记录）每一条都按蜜罐命中处理，与 `deception.hosts` 中登记的蜜罐地址一样，见[诱饵](detection.md#诱饵)。
+
 ## 主机认证日志与 DNS 日志
 
 | 类型 | 支持的格式 | 检测 |
 | --- | --- | --- |
-| 主机 / VPN 认证（`type: auth`） | Linux `auth.log` / `secure`（sshd、PAM、useradd、usermod）、Windows 安全事件（NXLog / Winlogbeat JSON、Snare 及中英文事件文本，4624 / 4625 / 4740 / 4720 / 4728 / 4732 / 4756 / 1102 / 4697 / 7045 / 4698 / 4771 / 4776）、FortiGate SSL VPN 与管理登录、Cisco ASA AAA / AnyConnect、OpenVPN、SQL Server 登录 | 暴力破解（`auth_failures`）、密码喷洒 / 账号枚举（`auth_users` 个不同账号）、**多次失败后登录成功（账号疑似失陷）**、公网 IP 直接登录特权账号、安全日志被清除、新建账号、加入管理员组、新安装服务 / 计划任务 |
+| 主机 / VPN 认证（`type: auth`） | Linux `auth.log` / `secure`（sshd、PAM、useradd、usermod）、Windows 安全事件（NXLog / Winlogbeat JSON、Snare 及中英文事件文本，4624 / 4625 / 4740 / 4720 / 4728 / 4732 / 4756 / 1102 / 4697 / 7045 / 4698 / 4771 / 4776）、FortiGate SSL VPN 与管理登录、Cisco ASA AAA / AnyConnect、OpenVPN、SQL Server 登录、[应用登录日志](#应用登录日志) | 暴力破解（`auth_failures`）、密码喷洒 / 账号枚举（`auth_users` 个不同账号）、**多次失败后登录成功（账号疑似失陷）**、公网 IP 直接登录特权账号、安全日志被清除、新建账号、加入管理员组、新安装服务 / 计划任务、**账号盗用**（不可能的旅行、首次从新的国家登录、多地并发登录） |
 | DNS（`type: dns`） | BIND querylog、dnsmasq、CoreDNS、Windows DNS 调试日志、Zeek `dns.log`、Suricata eve.json（`event_type: dns`）及 JSON DNS 日志 | **DNSLog 带外回连**（内网主机解析 dnslog.cn、ceye.io、oast.* 等，说明盲打的 RCE / SSRF / Log4j 已被触发）、矿池域名（挖矿木马）、DNS 隧道（超长高熵子域名、同一主域名下大量不同子域名）、DGA 随机域名与 NXDOMAIN 风暴、动态域名 / 内网穿透服务；配置了域名情报时，解析情报标记的远控、恶意软件、钓鱼、矿池域名（见[在线情报](integrations.md#在线情报)） |
 
 DNS 与主机事件的主体是**内网主机本身**（判断其是否失陷），不受 `detect.whitelist` 影响；命中后计入“失陷研判”与 ATT&CK 矩阵（T1071.004、T1568.002、T1496、T1070.001、T1136、T1098 等）。认证日志也可经 syslog 接收，没有远程来源的主机事件（如日志被清除）以发送日志的设备为主体。

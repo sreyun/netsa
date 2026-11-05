@@ -99,6 +99,28 @@ syslog:
   #  - cidr: 203.0.113.66
   #    action: block         # 阻止：任何模式下都拒绝该来源
 
+# 流量采集（NetFlow v5 / v9、IPFIX、sFlow v5，UDP）：用于带宽型 DDoS、东西向与出站流量统计。监听地址为空时不启用。
+# 同一（源、目的、目的端口、协议）的流在合并窗口内合并为一个事件；字节数与包数按采样率还原
+# （设备在选项模板中报告的采样率、sFlow 样本自带的采样率，或下面按设备配置的采样率）。
+flow:
+  netflow: ""          # 例如 ":2055"（NetFlow v5 / v9 与 IPFIX 共用）
+  sflow: ""            # 例如 ":6343"
+  sampling: 1          # 设备没有报告采样率时使用
+  window: 10s
+  exporters: []
+  #  - cidr: 10.0.0.254
+  #    name: 核心交换机
+  #    sampling: 1000     # 1:1000 采样
+
+# 诱饵：不承载业务的路径、线索、账号与蜜罐地址，命中即高置信攻击者（自动确认来源）；使用同一线索或账号的地址互相关联。
+# 也可在“事件处置 → 诱饵”中登记（与此处合并生效）。
+deception:
+  paths: []            # 例如 ["/backup_2026.zip", "/admin_old/*"]（* 结尾为前缀）；放在站点上、不被任何页面引用
+  tokens: []           # 写在诱饵文件内容中的线索（接口密钥、内部域名、URL 路径），至少 6 个字符
+  accounts: []         # 不分配给任何人的账号，例如 ["svc_backup"]
+  hosts: []            # 蜜罐地址：IP、网段（IPv4 至少 /24）或 地址:端口，例如 ["10.0.9.9", "10.0.8.0/24:3389"]
+  file: ""             # 页面登记的诱饵与命中记录，默认与 storage.snapshot 同目录的 deception.json
+
 # 真实 IP 还原：仅当直连地址属于可信代理时才信任 X-Forwarded-For / X-Real-IP
 real_ip:
   header: x_forwarded_for   # x_forwarded_for | x_real_ip | none
@@ -179,6 +201,8 @@ intel:
   #  - name: 本地黑名单
   #    path: data/blacklist.txt   # 每行一个 IP、网段、域名或 URL，也支持 hosts 文件格式（0.0.0.0 evil.example）
   #    kind: c2                   # c2 远控 / malware 恶意软件投递 / phishing 钓鱼 / mining 矿池 / attacker 攻击来源 / 留空为通用黑名单
+  #    # 也可写 TLS 客户端指纹（JA3 的 32 位 MD5、JA4，可带 ja3: / ja4: 前缀）与文件哈希（MD5 / SHA1 / SHA256），
+  #    # abuse.ch SSLBL 的 ja3_fingerprints.csv、MalwareBazaar 的哈希列表可直接使用（CSV 取第一列）
   tor_exit_url: ""               # 例如 https://check.torproject.org/torbulkexitlist
   domain_allowlist: []           # 本单位的域名：域名情报中等于或位于其下的条目不生效
   feeds: []                      # 在线情报源，示例见 configs/docker.yaml 与 docs/integrations.md「在线情报」
@@ -224,6 +248,8 @@ detect:
     exfil_bytes: 1073741824      #   且为该主机平时的 10 倍以上（平时没有足够记录时按 4 倍该值）；默认 1 GB
     download_window: 10m         # 单来源下载量突增：窗口内同一外部来源从动态接口、文件下载的响应字节数达到 download_bytes
     download_bytes: 536870912    #   （图片、音视频、样式脚本不计入）；默认 512 MB，提供大文件下载的站点请调大
+    ddos_bps: 1000000000         # 带宽型 DDoS：同一目的地址 1 分钟内的入向流量达到 ddos_bps（比特每秒，默认 1 Gbps）或 ddos_pps（包每秒）
+    ddos_pps: 300000             #   且为平时的 10 倍以上（流量日志与带字节数的会话日志）；按目的地址告警
 
 # 对外发布服务清单（DNAT 端口映射）。默认关闭，保持原有检测行为。
 # 开启后：防火墙日志中目标为**公网地址**、端口未列入本清单的端口探测与端口级暴力破解，

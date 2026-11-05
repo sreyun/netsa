@@ -20,24 +20,26 @@ type Config struct {
 	Timezone string `yaml:"timezone"`
 	// TimeCorrection 为 auto（默认）时，自动识别实时日志与实际时间之间的整时区偏差并校正（例如日志按 UTC 记录、
 	// 却按 timezone 解析导致时间慢 8 小时）；off 关闭。
-	TimeCorrection string         `yaml:"time_correction"`
-	Server         ServerConfig   `yaml:"server"`
-	Home           HomeConfig     `yaml:"home"`
-	Sources        []SourceConfig `yaml:"sources"`
-	Syslog         SyslogConfig   `yaml:"syslog"`
-	RealIP         RealIPConfig   `yaml:"real_ip"`
-	Geo            GeoConfig      `yaml:"geo"`
-	Intel          IntelConfig    `yaml:"intel"`
-	Detect         DetectConfig   `yaml:"detect"`
-	Exposure       ExposureConfig `yaml:"exposure"`
-	Alert          AlertConfig    `yaml:"alert"`
-	Archive        ArchiveConfig  `yaml:"archive"`
-	RawLog         RawLogConfig   `yaml:"rawlog"`
-	Audit          AuditConfig    `yaml:"audit"`
-	Report         ReportConfig   `yaml:"report"`
-	Learn          LearnConfig    `yaml:"learn"`
-	AI             AIConfig       `yaml:"ai"`
-	Storage        StorageConfig  `yaml:"storage"`
+	TimeCorrection string          `yaml:"time_correction"`
+	Server         ServerConfig    `yaml:"server"`
+	Home           HomeConfig      `yaml:"home"`
+	Sources        []SourceConfig  `yaml:"sources"`
+	Syslog         SyslogConfig    `yaml:"syslog"`
+	Flow           FlowConfig      `yaml:"flow"`
+	Deception      DeceptionConfig `yaml:"deception"`
+	RealIP         RealIPConfig    `yaml:"real_ip"`
+	Geo            GeoConfig       `yaml:"geo"`
+	Intel          IntelConfig     `yaml:"intel"`
+	Detect         DetectConfig    `yaml:"detect"`
+	Exposure       ExposureConfig  `yaml:"exposure"`
+	Alert          AlertConfig     `yaml:"alert"`
+	Archive        ArchiveConfig   `yaml:"archive"`
+	RawLog         RawLogConfig    `yaml:"rawlog"`
+	Audit          AuditConfig     `yaml:"audit"`
+	Report         ReportConfig    `yaml:"report"`
+	Learn          LearnConfig     `yaml:"learn"`
+	AI             AIConfig        `yaml:"ai"`
+	Storage        StorageConfig   `yaml:"storage"`
 	// 对接外部系统（说明见 docs/integrations.md）
 	Forward   []ForwardConfig  `yaml:"forward"`
 	Block     BlockConfig      `yaml:"block"`
@@ -94,6 +96,41 @@ type SourceConfig struct {
 	Host          string   `yaml:"host"`       // 日志中没有 $host 时使用的站点名
 	// Silence 为断流告警阈值：实时日志超过该时间没有新内容时推送告警，例如 10m；off 关闭；为空使用 alert.source_silence
 	Silence string `yaml:"silence"`
+}
+
+// FlowConfig 是流量采集（NetFlow v5 / v9、IPFIX、sFlow v5，UDP）。监听地址为空时不启用。
+type FlowConfig struct {
+	NetFlow string `yaml:"netflow" json:"netflow"` // NetFlow v5 / v9 与 IPFIX 的监听地址，如 :2055
+	SFlow   string `yaml:"sflow" json:"sflow"`     // sFlow v5 的监听地址，如 :6343
+	// Sampling 是设备没有报告采样率时使用的采样率（默认 1，即不采样）；sFlow 样本自带采样率
+	Sampling int `yaml:"sampling" json:"sampling"`
+	// Exporters 按设备（地址或网段）指定名称与采样率
+	Exporters []FlowExporter `yaml:"exporters" json:"-"`
+	// Window 是合并窗口：同一（源、目的、目的端口、协议）的流在窗口内合并为一个事件，默认 10s
+	Window time.Duration `yaml:"window" json:"window"`
+}
+
+// FlowExporter 是一台流量设备。
+type FlowExporter struct {
+	CIDR     string `yaml:"cidr"`
+	Name     string `yaml:"name"`
+	Sampling int    `yaml:"sampling"`
+}
+
+// DeceptionConfig 是诱饵（P3-2）：诱饵路径、诱饵账号与蜜罐地址。诱饵不承载业务，访问即说明在搜集信息或使用窃取的凭证。
+// 页面中维护的诱饵与配置文件合并生效。
+type DeceptionConfig struct {
+	// Paths 是诱饵路径：放在站点上、不被任何页面引用的文件或接口（如 /backup_2026.zip、/.env.bak）。以 * 结尾表示前缀
+	Paths []string `yaml:"paths"`
+	// Tokens 是放在诱饵文件内容中的线索（URL 路径、域名、接口密钥片段）：只有读过诱饵的人才知道，
+	// 之后任何地址使用它都与读取诱饵的地址关联为同一攻击者
+	Tokens []string `yaml:"tokens"`
+	// Accounts 是诱饵账号：不分配给任何人，写在诱饵文件或内存凭证中；任何登录尝试都说明凭证已被窃取
+	Accounts []string `yaml:"accounts"`
+	// Hosts 是蜜罐地址（IP、网段，可写 地址:端口）：没有业务，任何连接都是扫描或横向移动
+	Hosts []string `yaml:"hosts"`
+	// File 保存页面维护的诱饵与命中记录，默认与状态快照放在同一目录（deception.json）
+	File string `yaml:"file"`
 }
 
 type SyslogConfig struct {
@@ -317,6 +354,10 @@ type Thresholds struct {
 	// 单来源下载量突增：download_window 内同一外部来源从动态接口、文件下载的响应字节数达到 download_bytes
 	DownloadWindow time.Duration `yaml:"download_window"`
 	DownloadBytes  int64         `yaml:"download_bytes"`
+	// 带宽型 DDoS：同一目的地址 1 分钟内的入向流量达到 ddos_bps（比特每秒）或 ddos_pps（包每秒），且为平时的 10 倍以上
+	// （流量日志、带字节数的会话日志；平时没有足够记录时只看阈值）
+	DDoSBps int64 `yaml:"ddos_bps"`
+	DDoSPps int64 `yaml:"ddos_pps"`
 }
 
 type AlertConfig struct {
@@ -460,6 +501,9 @@ func Default() *Config {
 				ExfilBytes:     1 << 30,
 				DownloadWindow: 10 * time.Minute,
 				DownloadBytes:  512 << 20,
+				// 带宽型 DDoS
+				DDoSBps: 1_000_000_000,
+				DDoSPps: 300_000,
 			},
 		},
 		RawLog: RawLogConfig{RetentionDays: 180},
@@ -684,6 +728,12 @@ func (c *Config) fill() {
 	}
 	if t.DownloadBytes <= 0 {
 		t.DownloadBytes = dt.DownloadBytes
+	}
+	if t.DDoSBps <= 0 {
+		t.DDoSBps = dt.DDoSBps
+	}
+	if t.DDoSPps <= 0 {
+		t.DDoSPps = dt.DDoSPps
 	}
 	for _, p := range []struct {
 		v   *int

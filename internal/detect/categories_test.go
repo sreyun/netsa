@@ -15,6 +15,7 @@ func TestCategoriesKnownToRisk(t *testing.T) {
 		CatAdminProbe, CatScanner, CatMapping, CatAutomation, CatProtocol, CatCC, CatDirScan, CatBruteForce, CatPortScan,
 		CatHostSweep, CatFlood, CatIoT, CatRiskService, CatIntel, CatSpoof, CatCrawl, CatBeacon, CatDestroy,
 		CatDNSTunnel, CatDGA, CatOOB, CatMining, CatDynDNS, CatHostEvent, CatAccount, CatVulnEndpoint, CatExfil, CatDownload, CatLateral,
+		CatHostExec, CatRevShell, CatSuspCmd, CatCredTheft, CatPersistence, CatEvasion,
 	} {
 		h := model.Hit{Category: c, Severity: model.SevInfo, Result: model.ResultUnknown}
 		risk.Finalize(&h)

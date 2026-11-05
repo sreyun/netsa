@@ -17,12 +17,13 @@ func WebParsers() []Parser {
 
 // FirewallParsers 返回内置的防火墙/安全设备日志解析器，顺序即识别优先级。
 func FirewallParsers() []Parser {
-	return []Parser{Netfilter{}, PFSense{}, WindowsFirewall{}, CiscoASA{}, PaloAlto{}, SnortFast{}, JSONFirewall{}, AttackDefense{}, KVFirewall{}}
+	return []Parser{Netfilter{}, PFSense{}, WindowsFirewall{}, CiscoASA{}, PaloAlto{}, SnortFast{}, CloudDDoS{}, OpenCanary{}, JSONFirewall{}, AttackDefense{}, KVFirewall{}}
 }
 
 // AllParsers 返回全部内置解析器。
 func AllParsers() []Parser {
-	return append(append(WebParsers(), HostParsers()...), FirewallParsers()...)
+	// Zeek 在最前：JSON 要求 id.orig_h 键、制表符格式要求关键字段合法，不会误认其他日志；放在后面则 Zeek 的 JSON 可能被通用解析器截走
+	return append(append(append(append(ZeekParsers(), WebParsers()...), HostParsers()...), ProcessParsers()...), FirewallParsers()...)
 }
 
 // Skippable 判断是否为空行或注释行（例如 W3C / Windows 防火墙日志头）。
@@ -36,12 +37,13 @@ type parserBox struct{ p Parser }
 // Auto 是带格式自动识别的解析器：先在全部候选解析器中试探，某一格式连续命中后锁定，
 // 锁定的格式持续失败时再重新识别。锁定后的热路径无锁，可被多个 goroutine 并发调用。
 type Auto struct {
-	locked atomic.Pointer[parserBox]
-	mu     sync.Mutex
-	cands  []Parser
-	hits   map[string]int
-	miss   int
-	wrap   atomic.Int32 // 识别出的包装格式（Docker / 采集器 / CRI），wrapNone 表示未包装
+	locked   atomic.Pointer[parserBox]
+	mu       sync.Mutex
+	cands    []Parser
+	hits     map[string]int
+	miss     int
+	wrap     atomic.Int32 // 识别出的包装格式（Docker / 采集器 / CRI），wrapNone 表示未包装
+	zeekPath string       // Zeek 表头中最近的 #path（mu 保护）
 }
 
 // NewAuto 根据数据源类型构造解析器。typ 取值 auto / nginx / web / firewall / dns / auth 或具体解析器名；
@@ -65,7 +67,11 @@ func NewAuto(typ, logFormat string) (*Auto, error) {
 	case "dns":
 		cands = append(cands, BindDNS{}, Dnsmasq{}, CoreDNS{}, WindowsDNS{}, ZeekDNS{}, JSONDNS{})
 	case "auth", "host", "secure", "vpn":
-		cands = append(cands, LinuxAuth{}, WindowsSecurity{}, VPNAuth{})
+		cands = append(cands, LinuxAuth{}, WindowsSecurity{}, VPNAuth{}, AppLogin{})
+	case "edr", "hids", "process", "sysmon":
+		cands = append(cands, ProcessParsers()...)
+	case "zeek", "bro":
+		cands = append(append(cands, ZeekParsers()...), ZeekDNS{})
 	default:
 		found := false
 		for _, p := range AllParsers() {
@@ -108,6 +114,10 @@ func (a *Auto) detected() string {
 // Directive 处理日志中的指令行。目前支持 W3C 扩展日志（IIS）的 "#Fields:"：
 // 按声明的字段顺序重建 IIS 解析器，兼容管理员自定义的记录字段。
 func (a *Auto) Directive(line string) {
+	if strings.HasPrefix(line, "#path") || strings.HasPrefix(line, "#fields") {
+		a.zeekDirective(line)
+		return
+	}
 	w, ok := NewW3C(line)
 	if !ok {
 		return
@@ -122,6 +132,34 @@ func (a *Auto) Directive(line string) {
 	if b := a.locked.Load(); b != nil {
 		if _, isW3C := b.p.(*W3C); isW3C {
 			a.locked.Store(&parserBox{w})
+		}
+	}
+}
+
+// zeekDirective 处理 Zeek 的表头：#path 声明日志类型，#fields 声明字段顺序。按表头重建同类型的解析器并优先使用。
+func (a *Auto) zeekDirective(line string) {
+	line = strings.TrimRight(line, "\r\n")
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if rest, ok := strings.CutPrefix(line, "#path"); ok {
+		a.zeekPath = strings.TrimSpace(rest)
+		return
+	}
+	z := NewZeekHeader(a.zeekPath, line)
+	if z == nil {
+		return
+	}
+	out := []Parser{z}
+	for _, p := range a.cands {
+		if old, ok := p.(*ZeekTSV); ok && (old.kind == z.kind || old.header) {
+			continue // 同类型的默认解析器与之前文件的表头解析器被替换
+		}
+		out = append(out, p)
+	}
+	a.cands = out
+	if b := a.locked.Load(); b != nil {
+		if _, ok := b.p.(*ZeekTSV); ok {
+			a.locked.Store(&parserBox{z})
 		}
 	}
 }

@@ -198,9 +198,11 @@ type Totals struct {
 	Web      int64 `json:"web"`
 	Firewall int64 `json:"firewall"`
 	Outbound int64 `json:"outbound"`
-	DNS      int64 `json:"dns,omitempty"`    // DNS 查询日志
-	Auth     int64 `json:"auth,omitempty"`   // 主机 / VPN 认证日志
-	Egress   int64 `json:"egress,omitempty"` // 防火墙日志中内网主机访问公网的流量
+	DNS      int64 `json:"dns,omitempty"`     // DNS 查询日志
+	Auth     int64 `json:"auth,omitempty"`    // 主机 / VPN 认证日志
+	Process  int64 `json:"process,omitempty"` // 主机进程日志（EDR / HIDS）
+	Aux      int64 `json:"aux,omitempty"`     // 流量日志的辅助记录（TLS 握手、传输的文件）
+	Egress   int64 `json:"egress,omitempty"`  // 防火墙日志中内网主机访问公网的流量
 	Attacks  int64 `json:"attacks"`
 	Alerts   int64 `json:"alerts"`
 	Blocked  int64 `json:"blocked"`
@@ -255,6 +257,8 @@ type Store struct {
 	// OASTLinks 返回被多个来源使用过的带外回连标识 → 来源（learn.Learner.OASTLinks），攻击活动归并与同源关联据此
 	// 把同一次扫描任务的多个出口地址连在一起。在状态库的锁之外调用
 	OASTLinks func() map[string][]string
+	// DecoyLinks 返回使用同一诱饵线索、诱饵账号的来源（deception.Manager.Links），同样直接关联。在状态库的锁之外调用
+	DecoyLinks func() map[string][]string
 	// IntelKind 返回情报的类别（c2 / malware / phishing / mining / attacker，空为通用黑名单），决定情报命中的等级
 	IntelKind func(name string) string
 	// Calibrate 是自学习校准（learn.Learner.Calibrate）：状态库自己生成的情报命中（入站情报、外连情报地址）
@@ -337,6 +341,8 @@ func (s *Store) countEvent(ev *model.Event, b *Bucket, day *DayStat) {
 	case model.KindAuth:
 		day.Auth++
 		s.totals.Auth++
+	case model.KindProcess:
+		s.totals.Process++
 	default:
 		s.totals.Firewall++
 		b.Fw++
@@ -350,23 +356,33 @@ func (s *Store) countEvent(ev *model.Event, b *Bucket, day *DayStat) {
 func (s *Store) recordLocked(ev *model.Event, hits []model.Hit) RecordResult {
 	var res RecordResult
 
-	count := !ev.Replay // 补发命中的事件副本已经计入过事件量
+	count := !ev.Replay && !ev.Aux // 补发命中的事件副本已经计入过事件量；辅助记录描述的是已经计入的连接
 	if count {
 		s.totals.Events++
+	}
+	if ev.Aux && !ev.Replay {
+		s.totals.Aux++
+		if !hasAttack(hits) {
+			// 没有命中的 TLS 握手：只给已有的画像记录客户端指纹（同源关联），不建立新画像
+			if p := s.ips[ev.SrcIP]; p != nil && ev.TLSFinger != "" {
+				incBounded(&p.TLS, truncate(ev.TLSFinger, 80), 4)
+			}
+			return res
+		}
 	}
 	// 外连威胁情报地址：内网主机（或本机）主动连接已知恶意地址是典型的失陷迹象（木马回连 C2、挖矿、数据外传）。
 	// 普通出站流量不作为攻击来源统计；命中情报的出站连接以发起连接的主机为主体记录告警。
 	var c2 *model.Hit
-	if ev.Kind == model.KindFirewall && s.IntelMatch != nil && count {
+	if ev.Kind == model.KindFirewall && s.IntelMatch != nil && count && !ev.Response { // 单向流的应答方向：服务端回复访客，不是主动外连
 		if c2 = s.c2Hit(ev); c2 != nil {
 			*c2 = s.calibrated(ev, *c2)
 		}
 	}
-	if ev.Outbound {
-		if count {
+	if ev.Outbound || ev.Response {
+		if count && ev.Outbound {
 			s.totals.Outbound++
 		}
-		if c2 == nil && !hasAttack(hits) { // 出站流量只记录外连恶意地址、周期性外连等失陷迹象
+		if c2 == nil && !hasAttack(hits) { // 出站流量只记录外连恶意地址、周期性外连等失陷迹象；单向流的应答方向只计入总量
 			return res
 		}
 	}
@@ -395,7 +411,7 @@ func (s *Store) recordLocked(ev *model.Event, hits []model.Hit) RecordResult {
 	if count {
 		s.countEvent(ev, b, day)
 	}
-	if (ev.Kind == model.KindDNS || ev.Kind == model.KindAuth) && !hasAttack(hits) {
+	if (ev.Kind == model.KindDNS || ev.Kind == model.KindAuth || ev.Kind == model.KindProcess) && !hasAttack(hits) {
 		return res // DNS 查询与认证日志量大，只记录总量；命中异常时才以主体（内网主机 / 登录来源）建立画像
 	}
 
@@ -613,7 +629,7 @@ func (s *Store) recordLocked(ev *model.Event, hits []model.Hit) RecordResult {
 	}
 	if ev.Kind == model.KindWeb {
 		s.surf.observeWeb(ev, hits, attacked)
-	} else if ev.Kind == model.KindDNS || ev.Kind == model.KindAuth {
+	} else if ev.Kind == model.KindDNS || ev.Kind == model.KindAuth || ev.Kind == model.KindProcess || ev.Aux {
 		s.hostFinding(ev, hits)
 	} else if c2 == nil && (geo.IsPrivate(ev.SrcIP) || ev.Outbound) && hasCategory(hits, CatBeacon) {
 		// 按固定间隔回连同一外部地址：疑似 C2 心跳，置信度低于命中情报的外连

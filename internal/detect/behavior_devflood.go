@@ -69,6 +69,9 @@ func (b *Behavior) DDoSContext(dst string, t time.Time) string {
 		}
 		return fmt.Sprintf("按会话日志同时检测到该地址 %d 端口的连接突增（%s内 %d 条、%d 个以上来源）", k.port, fmtDur(b.th.FwWindow), d.n, d.nSrcs)
 	}
+	if w, ok := b.bandwidthNear(dst, t); ok {
+		return fmt.Sprintf("按流量日志同时检测到该地址的入向流量突增（峰值 %s、%s，%s 个来源）", fmtBps(w.peakBps), fmtPps(w.peakPps), countStr(w.nsrc, bwSrcCounts))
+	}
 	return ""
 }
 

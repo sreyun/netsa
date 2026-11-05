@@ -87,6 +87,9 @@ const (
 	KindFirewall Kind = "firewall"
 	KindDNS      Kind = "dns"  // DNS 查询日志（主体为发起查询的内网主机）
 	KindAuth     Kind = "auth" // 主机 / VPN 认证日志（SSH、RDP、Windows 登录、VPN 登录等）
+	// KindProcess 是主机的进程、文件、注册表、进程访问事件与 EDR / HIDS 告警（Sysmon、Windows 4688、auditd、Wazuh），
+	// 主体为上报日志的主机：DstIP 为主机地址（日志记录了时），Host 为主机名
+	KindProcess Kind = "process"
 )
 
 // 防火墙动作归一化取值。
@@ -219,12 +222,72 @@ type Event struct {
 	// 资产攻击链路据此把之后连接这些地址的服务器与被攻击的站点串起来
 	PayloadAddrs []string
 
+	// Body 是日志记录的请求体（Zeek 的 post_body、nginx 的 $request_body；截断到 4 KB），与查询参数一样参与规则匹配
+	Body string
+	// Aux 表示同一连接的辅助记录（Zeek ssl.log、files.log）：连接本身已由会话日志（conn.log）记录，
+	// 只用于情报匹配、TLS 指纹、文件证据与关联，不计入事件量、连接统计与行为检测
+	Aux bool
+	// SNI 是 TLS 握手中的服务器名称（Zeek ssl.log 的 server_name）
+	SNI string
+	// File 是传输的文件（Zeek files.log），Proc 是进程事件的详情（KindProcess）
+	File *FileInfo
+	Proc *ProcInfo
+	// Bps / Pps 是抗 D 服务、流量设备报告的攻击峰值（比特每秒、包每秒）
+	Bps int64
+	Pps int64
+	// Sampling 是流量日志（NetFlow / sFlow）的采样率，SentBytes / Packets 已按采样率还原
+	Sampling int
+	// Response 表示单向流量记录中服务端发回客户端的方向（源端口为服务端口、目的端口为临时端口）：
+	// 不是新的连接，只计入带宽统计，不参与扫描、回连、外连情报与外传检测
+	Response bool
+
 	Raw string
+}
+
+// FileInfo 是流量日志记录的一次文件传输。
+type FileInfo struct {
+	Name   string
+	Mime   string
+	Size   int64
+	MD5    string
+	SHA1   string
+	SHA256 string
+	Proto  string // 传输协议：HTTP / FTP / SMB / SMTP …
+}
+
+// ProcInfo 是一次主机进程事件。
+type ProcInfo struct {
+	Op          string // process（进程创建）/ network（网络连接）/ file（文件创建）/ registry（注册表）/ access（进程访问）/ alert（EDR 告警）
+	Image       string // 进程路径
+	CommandLine string
+	Parent      string // 父进程路径
+	ParentCmd   string
+	User        string
+	PID         int
+	Target      string // 文件路径、注册表键、被访问的进程（lsass.exe）
+	Access      string // 进程访问权限（Sysmon 10 的 GrantedAccess）
+	Rule        string // EDR / HIDS 告警的规则编号
+	Level       int    // EDR / HIDS 告警的等级（Wazuh 0~15）
+	Mitre       []string
 }
 
 // Target 返回事件的攻击目标描述。
 func (e *Event) Target() string {
 	switch e.Kind {
+	case KindProcess:
+		t := e.Host
+		if t == "" {
+			t = e.DstIP
+		}
+		if e.Proc != nil {
+			switch {
+			case e.Proc.Target != "" && e.Proc.Op != "process":
+				t += " " + e.Proc.Target
+			case e.Proc.Image != "":
+				t += " " + e.Proc.Image
+			}
+		}
+		return t
 	case KindDNS:
 		t := "DNS " + e.Host
 		if e.QType != "" {
@@ -245,6 +308,9 @@ func (e *Event) Target() string {
 			t += " @" + e.DstIP
 		}
 		return t
+	}
+	if e.File != nil && e.File.Name != "" {
+		return e.SrcIP + " ← " + e.DstIP + " 文件 " + e.File.Name
 	}
 	if e.Kind == KindWeb {
 		h := e.Host

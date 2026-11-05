@@ -12,7 +12,7 @@ import (
 // HostParsers 返回主机 / VPN 认证日志与 DNS 日志解析器。这些格式特征明确，排在防火墙解析器之前，
 // 避免通用的键值对 / JSON 防火墙解析器把认证与 DNS 日志当作流量日志。
 func HostParsers() []Parser {
-	return []Parser{LinuxAuth{}, WindowsSecurity{}, VPNAuth{}, BindDNS{}, Dnsmasq{}, CoreDNS{}, WindowsDNS{}, ZeekDNS{}, JSONDNS{}}
+	return []Parser{LinuxAuth{}, WindowsSecurity{}, VPNAuth{}, AppLogin{}, BindDNS{}, Dnsmasq{}, CoreDNS{}, WindowsDNS{}, ZeekDNS{}, JSONDNS{}}
 }
 
 func authEvent(format, service, src, user string, ok bool) *model.Event {
