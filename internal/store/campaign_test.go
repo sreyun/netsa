@@ -143,3 +143,47 @@ func BenchmarkCampaigns(b *testing.B) {
 		}
 	}
 }
+
+// TLS 指纹与行为节奏：网段、运营商、UA 都不同的两个出口，JA3 相同且罕见时列为关联；行为节奏只作辅助线索。
+func TestCorrelateTLSAndRhythm(t *testing.T) {
+	s := New(10000, 1000, 5, time.Hour)
+	s.GeoLookup = func(ip string) *geo.Info { return &geo.Info{IP: ip, Country: "美国", ASN: uint(len(ip)) * 1000} }
+	now := time.Now()
+	base := time.Date(now.Year(), now.Month(), now.Day()-4, 2, 0, 0, 0, time.Local) // 过去的时间：未来的时间会按当前时间统计
+	rec := func(ip, ua, ja3 string, start time.Time, gap time.Duration, n int) {
+		pfx := "r"
+		if ja3 == "" {
+			pfx = ip // 没有指纹的地址用各自的规则与目标：只看节奏
+		}
+		for i := range n {
+			s.Record(&model.Event{Kind: model.KindWeb, SrcIP: ip, Host: pfx + ".example.com", URI: fmt.Sprintf("/%s%d", pfx, i), Status: 404, UA: ua, TLSFinger: ja3,
+				Time: start.Add(time.Duration(i) * gap)}, []model.Hit{attackHit(fmt.Sprintf("%s%d", pfx, i%3), "扫描", model.SevLow, model.ResultFailed)})
+		}
+	}
+	ja3 := "ja3:72a589da586844d7f0818ce684948eea"
+	rec("198.51.100.10", "Mozilla/5.0 (A)", ja3, base, 3*time.Second, 60)
+	rec("203.0.113.20", "Mozilla/5.0 (B)", ja3, base.Add(24*time.Hour), 3*time.Second, 60)
+	rec("192.0.2.30", "Mozilla/5.0 (C)", "", base.Add(48*time.Hour), 3*time.Second, 60) // 只有节奏相似
+	for i := range 30 {                                                                 // 其他攻击源，让 JA3 显得罕见
+		rec(fmt.Sprintf("100.%d.1.1", 64+i), fmt.Sprintf("tool-%d", i), "", base, time.Minute, 2)
+	}
+	d := s.IPDetail("198.51.100.10")
+	var tls, rhythm *RelatedIP
+	for _, r := range d.Related.Related {
+		switch r.IP {
+		case "203.0.113.20":
+			tls = r
+		case "192.0.2.30":
+			rhythm = r
+		}
+	}
+	if tls == nil || !strings.Contains(strings.Join(tls.Reasons, "；"), "TLS 指纹") || !strings.Contains(strings.Join(tls.Reasons, "；"), "行为节奏") {
+		t.Fatalf("JA3 相同的出口应列为关联并注明节奏相似: %+v", tls)
+	}
+	if rhythm != nil {
+		t.Fatalf("只有节奏相似不构成关联: %+v", rhythm)
+	}
+	if p := s.Profile("198.51.100.10"); p.Rhythm == nil || p.Rhythm.N != 60 || p.Rhythm.Hours[2] == 0 || p.Rhythm.Gaps[2] == 0 {
+		t.Fatalf("行为节奏: %+v", p.Rhythm)
+	}
+}

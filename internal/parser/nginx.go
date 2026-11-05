@@ -77,12 +77,17 @@ func parseTail(ev *model.Event, tail string) {
 		return
 	}
 	reqTime, host := -1.0, ""
+	var extra map[string]string // key=value 形式的增强字段（rl=、us=、ssl= 等）
 	for i, tok := range strings.Fields(tail) {
-		if i >= 8 {
+		if i >= 12 {
 			break
 		}
 		tok = strings.Trim(tok, `"`)
 		if k, v, ok := strings.Cut(tok, "="); ok {
+			if extra == nil {
+				extra = map[string]string{}
+			}
+			extra[strings.ToLower(k)] = strings.Trim(v, `"`)
 			switch strings.ToLower(k) {
 			case "rt", "request_time", "req_time":
 				if f, err := strconv.ParseFloat(v, 64); err == nil && reqTime < 0 {
@@ -107,6 +112,9 @@ func parseTail(ev *model.Event, tail string) {
 	}
 	if reqTime >= 0 {
 		ev.ReqTime = reqTime
+	}
+	if extra != nil {
+		fillEnhanced(ev, extra)
 	}
 	if host != "" && (ev.Host == "" || !strings.Contains(ev.Host, ".")) {
 		if h, _, err := net.SplitHostPort(host); err == nil {
@@ -247,6 +255,7 @@ func (NginxJSON) Parse(line string) (*model.Event, bool) {
 	ev.Bytes, _ = strconv.ParseInt(pick(kv, "body_bytes_sent", "http.response.body.bytes", "bytes_sent", "size", "bytes", "downstreamcontentsize"), 10, 64)
 	ev.ReqTime = reqTimeOf(kv, pick(kv, "request_time", "duration"))
 	ev.DstPort, _ = strconv.Atoi(pick(kv, "server_port"))
+	fillEnhanced(ev, kv)
 	if req != "" {
 		setRequest(ev, req)
 	}
@@ -418,7 +427,11 @@ func (f *LogFormat) Parse(line string) (*model.Event, bool) {
 	kv := make(map[string]string, len(f.names))
 	for i, name := range f.names {
 		if _, ok := kv[name]; !ok {
-			kv[name] = dash(unescapeNginx(m[i+1]))
+			v := unescapeNginx(m[i+1])
+			if name != "upstream_status" { // “-”表示请求没有转发到后端，需要保留
+				v = dash(v)
+			}
+			kv[name] = v
 		}
 	}
 	ip := pick(kv, "remote_addr", "http_x_real_ip", "realip_remote_addr")
@@ -442,6 +455,7 @@ func (f *LogFormat) Parse(line string) (*model.Event, bool) {
 	ev.Bytes, _ = strconv.ParseInt(pick(kv, "body_bytes_sent", "bytes_sent"), 10, 64)
 	ev.ReqTime = reqTimeOf(kv, kv["request_time"])
 	ev.DstPort, _ = strconv.Atoi(kv["server_port"])
+	fillEnhanced(ev, kv)
 	ev.SrcPort, _ = strconv.Atoi(kv["remote_port"])
 	if r := kv["request"]; r != "" {
 		setRequest(ev, r)

@@ -33,7 +33,7 @@ var routePolicy = map[string]string{
 	"GET /api/block/edl": auth.RoleViewer, // 防火墙用只读令牌拉取
 
 	// 运营分析员：处置事件、误报抑制、原始日志（可能有 Cookie、令牌、个人信息）、平台账号的学习记录
-	"GET /api/incidents/assignees": auth.RoleAnalyst, "POST /api/incidents/bulk": auth.RoleAnalyst, "POST /api/incidents/ai-batch": auth.RoleAnalyst,
+	"GET /api/incidents/assignees": auth.RoleAnalyst, "GET /api/incidents/{id}/evidence": auth.RoleAnalyst, "POST /api/incidents/bulk": auth.RoleAnalyst, "POST /api/incidents/ai-batch": auth.RoleAnalyst,
 	"POST /api/incidents/{id}": auth.RoleAnalyst, "POST /api/incidents/{id}/ai": auth.RoleAnalyst, "GET /api/learn": auth.RoleAnalyst,
 	"POST /api/learn/suggestions/{id}/{action}": auth.RoleAnalyst, "GET /api/rawlog/search": auth.RoleAnalyst, "GET /api/rawlog/export": auth.RoleAnalyst,
 	"POST /api/suppressions": auth.RoleAnalyst, "DELETE /api/suppressions/{id}": auth.RoleAnalyst,

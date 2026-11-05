@@ -96,26 +96,37 @@ type beacon struct {
 // Behavior 基于时间窗口识别 CC、目录扫描、暴力破解、端口扫描等行为。
 // 窗口以日志自身时间为准，因此同样适用于历史日志的离线分析。
 type Behavior struct {
-	mu        sync.Mutex
-	th        config.Thresholds
-	web       map[string]*webWin
-	fw        map[string]*fwWin
-	logins    map[string]*loginWin   // 登录接口 → 全局窗口
-	enum      map[string]*enumWin    // 来源 → 接口遍历窗口
-	beacons   map[string]*beacon     // 内网主机>外部地址:端口 → 连接时间
-	beaconDst map[string]int         // 外部地址:端口 → 已告警周期性外连的内网主机数（多台主机同规律外连多为统一部署的软件）
-	auth      map[string]*authWin    // 认证来源 → 登录失败窗口
-	dns       map[string]*dnsWin     // 内网主机 → DNS 查询窗口
-	errs      map[string]*hostErr    // 站点 → 返回 5xx 的不同来源（区分服务故障与攻击）
-	slow      map[string]*slowWin    // 来源 → 超时窗口（只为收到过超时的来源建立）
-	attacked  map[string]time.Time   // 来源 → 最近一次命中攻击规则的时间
-	impact    map[string]*hostImpact // 站点 → 超时统计、业务路径可用性与可疑来源
-	sites     map[string]*siteWin    // 站点 → 请求量窗口与基线（分布式 CC）
-	homes     map[string]*homeSize   // 站点 → 首页的响应大小（识别对不存在的路径返回首页的兜底页面）
-	dsts      map[dstKey]*dstWin     // 目的地址:端口 → 事件量窗口与基线（多源 DDoS）
-	devFloods map[string]devFlood    // 目的地址 → 设备最近报告的洪泛（behavior_devflood.go）
-	latest    time.Time              // 已处理事件的最新时间（排除未来时间的异常日志），作为窗口过期的基准
-	lastPrune time.Time              // 上次清理的系统时间
+	mu         sync.Mutex
+	th         config.Thresholds
+	web        map[string]*webWin
+	fw         map[string]*fwWin
+	logins     map[string]*loginWin   // 登录接口 → 全局窗口
+	enum       map[string]*enumWin    // 来源 → 接口遍历窗口
+	beacons    map[string]*beacon     // 内网主机>外部地址:端口 → 连接时间
+	beaconDst  map[string]int         // 外部地址:端口 → 已告警周期性外连的内网主机数（多台主机同规律外连多为统一部署的软件）
+	auth       map[string]*authWin    // 认证来源 → 登录失败窗口
+	dns        map[string]*dnsWin     // 内网主机 → DNS 查询窗口
+	errs       map[string]*hostErr    // 站点 → 返回 5xx 的不同来源（区分服务故障与攻击）
+	slow       map[string]*slowWin    // 来源 → 超时窗口（只为收到过超时的来源建立）
+	attacked   map[string]time.Time   // 来源 → 最近一次命中攻击规则的时间
+	impact     map[string]*hostImpact // 站点 → 超时统计、业务路径可用性与可疑来源
+	sites      map[string]*siteWin    // 站点 → 请求量窗口与基线（分布式 CC）
+	homes      map[string]*homeSize   // 站点 → 首页的响应大小（识别对不存在的路径返回首页的兜底页面）
+	dsts       map[dstKey]*dstWin     // 目的地址:端口 → 事件量窗口与基线（多源 DDoS）
+	devFloods  map[string]devFlood    // 目的地址 → 设备最近报告的洪泛（behavior_devflood.go）
+	exfil      map[string]*exfilWin   // 内网主机 → 外发字节窗口与基线（behavior_exfil.go）
+	downloads  map[string]*dlWin      // 外部来源 → 下载量窗口
+	scripts    map[string]*scriptStat // 站点+脚本路径 → 访问画像（behavior_webshell.go）
+	shellSites map[string]*shellSite  // 站点 → 首次出现时间与最近的上传
+	// 横向移动（behavior_lateral.go）：被攻击的内网服务器、东西向连接对的首次出现时间、来源的观察期、最近的网络登录
+	attackedSrv        map[string]srvMark
+	ewSeen, ewSeenPrev map[uint64]int64
+	ewSrcs             map[string]*ewSource
+	ewPend             map[string][]ewPending
+	logons             map[string]logonMark
+	authSince          time.Time
+	latest             time.Time // 已处理事件的最新时间（排除未来时间的异常日志），作为窗口过期的基准
+	lastPrune          time.Time // 上次清理的系统时间
 }
 
 // maxWindows 是同时跟踪的行为窗口上限：大量不同来源（如伪造源地址的扫描）时不再为新来源建窗口，防止内存耗尽。
@@ -128,7 +139,9 @@ func NewBehavior(th config.Thresholds) *Behavior {
 	return &Behavior{th: th, web: map[string]*webWin{}, fw: map[string]*fwWin{}, logins: map[string]*loginWin{},
 		enum: map[string]*enumWin{}, beacons: map[string]*beacon{}, beaconDst: map[string]int{}, auth: map[string]*authWin{}, dns: map[string]*dnsWin{}, errs: map[string]*hostErr{},
 		slow: map[string]*slowWin{}, attacked: map[string]time.Time{}, impact: map[string]*hostImpact{},
-		sites: map[string]*siteWin{}, dsts: map[dstKey]*dstWin{}, homes: map[string]*homeSize{}}
+		sites: map[string]*siteWin{}, dsts: map[dstKey]*dstWin{}, homes: map[string]*homeSize{},
+		exfil: map[string]*exfilWin{}, downloads: map[string]*dlWin{}, scripts: map[string]*scriptStat{}, shellSites: map[string]*shellSite{},
+		attackedSrv: map[string]srvMark{}, ewSrcs: map[string]*ewSource{}, ewPend: map[string][]ewPending{}, logons: map[string]logonMark{}}
 }
 
 // Observe 处理一个事件并返回触发的行为告警。
@@ -148,7 +161,11 @@ func (b *Behavior) ObserveHits(ev *model.Event, ruleHits []model.Hit) []model.Hi
 		defer b.mu.Unlock()
 		b.maybePrune(ev)
 		if ev.Kind == model.KindAuth {
-			return b.observeAuth(ev)
+			hits := b.observeAuth(ev)
+			if h, ok := b.observeLogonChain(ev); ok {
+				hits = append(hits, h)
+			}
+			return hits
 		}
 		return b.observeDNS(ev, &f)
 	}
@@ -170,11 +187,16 @@ func (b *Behavior) ObserveHits(ev *model.Event, ruleHits []model.Hit) []model.Hi
 	if ev.Kind == model.KindFirewall {
 		b.noteDeviceFlood(ev, ruleHits)
 	}
+	b.noteAttackTargets(ev, ruleHits)
 	if ev.SrcIP == "" { // 设备只记录了目的地址的多源洪泛：没有来源可统计，只用于印证
 		return nil
 	}
 	if egress {
-		return b.observeBeacon(ev)
+		hits := b.observeBeacon(ev)
+		if h, ok := b.observeExfil(ev); ok {
+			hits = append(hits, h)
+		}
+		return hits
 	}
 	if ev.Kind == model.KindWeb {
 		var sig scanSignals
@@ -182,7 +204,17 @@ func (b *Behavior) ObserveHits(ev *model.Event, ruleHits []model.Hit) []model.Hi
 			sig.attacked = sig.attacked || h.Severity >= model.SevMedium
 			sig.add(&h)
 		}
-		return b.observeWeb(ev, sig)
+		hits := b.observeWeb(ev, sig)
+		if h, ok := b.observeDownload(ev); ok {
+			hits = append(hits, h)
+		}
+		if h, ok := b.observeWebShell(ev); ok {
+			hits = append(hits, h)
+		}
+		return hits
+	}
+	if isPrivateIP(ev.SrcIP) && isPrivateIP(ev.DstIP) { // 东西向：内网主机之间的远程管理连接
+		return append(b.observeEastWest(ev), b.observeFw(ev)...)
 	}
 	return b.observeFw(ev)
 }
@@ -720,6 +752,8 @@ func (b *Behavior) Size() int {
 func (b *Behavior) prune(now time.Time) {
 	b.pruneSurge(now)
 	b.pruneDevFloods(now)
+	b.pruneExfil(now)
+	b.pruneLateral(now)
 	for k, w := range b.logins {
 		if now.Sub(w.start) > 2*b.th.DistWindow || w.start.Sub(now) > 2*b.th.DistWindow {
 			delete(b.logins, k)

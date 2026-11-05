@@ -311,6 +311,12 @@ type Thresholds struct {
 	// 多源 DDoS：fw_window 内同一目的地址与端口的防火墙事件达到 ddos_events 且为平时的 5 倍以上，来自 ddos_sources 个以上来源
 	DDoSEvents  int `yaml:"ddos_events"`
 	DDoSSources int `yaml:"ddos_sources"`
+	// 数据外传：exfil_window 内内网主机外发的字节数达到 exfil_bytes 且为平时的 10 倍以上（平时没有足够记录时只看 exfil_bytes 的 4 倍）
+	ExfilWindow time.Duration `yaml:"exfil_window"`
+	ExfilBytes  int64         `yaml:"exfil_bytes"`
+	// 单来源下载量突增：download_window 内同一外部来源从动态接口、文件下载的响应字节数达到 download_bytes
+	DownloadWindow time.Duration `yaml:"download_window"`
+	DownloadBytes  int64         `yaml:"download_bytes"`
 }
 
 type AlertConfig struct {
@@ -449,6 +455,11 @@ func Default() *Config {
 				DistCCIPRequests: 30,
 				DDoSEvents:       20000,
 				DDoSSources:      200,
+				// 数据窃取
+				ExfilWindow:    10 * time.Minute,
+				ExfilBytes:     1 << 30,
+				DownloadWindow: 10 * time.Minute,
+				DownloadBytes:  512 << 20,
 			},
 		},
 		RawLog: RawLogConfig{RetentionDays: 180},
@@ -661,6 +672,18 @@ func (c *Config) fill() {
 	}
 	if t.SlowRequest <= 0 {
 		t.SlowRequest = dt.SlowRequest
+	}
+	if t.ExfilWindow <= 0 {
+		t.ExfilWindow = dt.ExfilWindow
+	}
+	if t.ExfilBytes <= 0 {
+		t.ExfilBytes = dt.ExfilBytes
+	}
+	if t.DownloadWindow <= 0 {
+		t.DownloadWindow = dt.DownloadWindow
+	}
+	if t.DownloadBytes <= 0 {
+		t.DownloadBytes = dt.DownloadBytes
 	}
 	for _, p := range []struct {
 		v   *int

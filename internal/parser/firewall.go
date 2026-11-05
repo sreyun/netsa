@@ -247,6 +247,9 @@ var (
 	// 应答方向（目标 → 发起方）的包数 / 字节数：华为会话日志 RcvPkts / RcvBytes、FortiGate rcvdpkt / rcvdbyte、ECS destination.packets
 	kvRcvPkts  = []string{"rcvpkts", "rcvdpkt", "receivedpkts", "recvpkts", "rcvpackets", "packetsreceived", "destinationpackets"}
 	kvRcvBytes = []string{"rcvbytes", "rcvdbyte", "receivedbytes", "recvbytes", "bytesreceived", "destinationbytes"}
+	// 发起方发送的字节数 / 包数：华为 SendBytes / SendPkts、FortiGate sentbyte / sentpkt、ECS source.bytes、Palo Alto bytes_sent
+	kvSentBytes = []string{"sendbytes", "sentbyte", "sentbytes", "bytessent", "sourcebytes", "sendbyte", "origbytes", "txbytes"}
+	kvSentPkts  = []string{"sendpkts", "sentpkt", "sentpkts", "pktssent", "sourcepackets", "origpkts", "txpkts"}
 )
 
 // fillSession 提取防火墙记录的会话信息，用于判断探测是否真的到达了服务。
@@ -270,6 +273,12 @@ func fillSession(ev *model.Event, kv map[string]string, act string) {
 	}
 	if isIP(nat) && nat != "0.0.0.0" {
 		ev.NatDstIP = nat
+	}
+	// 会话字节数（数据外传按内网主机统计外发字节）：会话建立时的日志计数恒为 0，同样不采信
+	if !strings.EqualFold(strings.Trim(act, `"' `), "start") {
+		ev.SentBytes = atoi64(pick(kv, kvSentBytes...))
+		ev.RecvBytes = atoi64(pick(kv, kvRcvBytes...))
+		ev.Packets = atoi64(pick(kv, kvSentPkts...)) + atoi64(pick(kv, kvRcvPkts...))
 	}
 	if strings.EqualFold(strings.Trim(act, `"' `), "start") {
 		return
@@ -458,4 +467,12 @@ func isDate(s string) bool {
 func isClock(s string) bool {
 	return len(s) == 8 && s[2] == ':' && s[5] == ':' &&
 		isDigit(s[0]) && isDigit(s[1]) && isDigit(s[3]) && isDigit(s[4]) && isDigit(s[6]) && isDigit(s[7])
+}
+
+func atoi64(s string) int64 {
+	n, err := strconv.ParseInt(strings.Trim(s, `"' `), 10, 64)
+	if err != nil || n < 0 {
+		return 0
+	}
+	return n
 }

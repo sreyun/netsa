@@ -26,7 +26,8 @@ func TestAttackMapping(t *testing.T) {
 	for _, cat := range []string{detect.CatSQLi, detect.CatXSS, detect.CatTraversal, detect.CatCmdExec, detect.CatExpr, detect.CatSSRF,
 		detect.CatXXE, detect.CatDeser, detect.CatWebShell, detect.CatCVE, detect.CatSensitive, detect.CatAdminProbe, detect.CatScanner,
 		detect.CatMapping, detect.CatAutomation, detect.CatProtocol, detect.CatCC, detect.CatDirScan, detect.CatBruteForce, detect.CatPortScan,
-		detect.CatHostSweep, detect.CatFlood, detect.CatIoT, detect.CatRiskService, detect.CatSpoof, detect.CatCrawl, detect.CatBeacon, CatC2, CatMalware} {
+		detect.CatHostSweep, detect.CatFlood, detect.CatIoT, detect.CatRiskService, detect.CatSpoof, detect.CatCrawl, detect.CatBeacon, CatC2, CatMalware,
+		detect.CatExfil, detect.CatDownload, detect.CatLateral} {
 		ts := categoryTechniques[cat]
 		if len(ts) == 0 {
 			t.Errorf("攻击类型 %s 未映射到 ATT&CK", cat)

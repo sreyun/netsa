@@ -14,6 +14,12 @@ log_format netsa '$remote_addr - $remote_user [$time_local] "$request" $status $
 access_log /var/log/nginx/access.log netsa;
 ```
 
+**增强字段（推荐）**：在格式末尾再加上 `rl=$request_length us=$upstream_status urt=$upstream_response_time ssl=$ssl_protocol cipher=$ssl_cipher`（JSON 格式用同名字段），可以：
+
+- 用后端响应码复核“疑似成功”：`$upstream_status` 为 `-` 表示请求没有转发到后端（静态文件、`return`、缓存、`try_files` 兜底），载荷没有被应用处理，不判为成功；后端返回 5xx 而 nginx 改写成 200 的判为后端异常；
+- 用请求长度识别 WebShell 交互（每次执行的命令不同，请求大小随之变化）与上传（请求体较大的 POST）；
+- 记录客户端 TLS 指纹（协议与加密套件；网关记录了 JA3 / JA4 时用 `ja3=`、`ja4=`），同源关联据此比对轮换出口的同一工具。
+
 自定义格式时把上面的 `log_format` 原样（可多行）粘贴到数据源的 `log_format` 字段；JSON 格式自动识别。远程 nginx 也可直接发送 syslog：`access_log syslog:server=netsa服务器IP:5514,tag=nginx netsa;`
 
 **JSON 格式**：字段名不限顺序、不区分大小写，嵌套对象自动展开，常见写法均可识别（来源 `remote_addr` / `client_ip`，请求 `request` 整行或 `request_method` + `request_uri` + `args`，状态码字符串或数字，时间 `time_iso8601` / `time_local` / `@timestamp` / `msec`）。推荐加上 `escape=json`：

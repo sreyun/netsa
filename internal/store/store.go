@@ -44,6 +44,8 @@ type IPProfile struct {
 	Status     map[int]int               `json:"status"`
 	UAs        map[string]int            `json:"uas"`
 	Proxies    map[string]int            `json:"proxies,omitempty"` // 经由的 CDN/反向代理
+	TLS        map[string]int            `json:"tls,omitempty"`     // 客户端 TLS 指纹（JA3 / JA4，或协议/加密套件）
+	Rhythm     *Rhythm                   `json:"rhythm,omitempty"`  // 行为节奏：活跃时段与请求间隔（攻击源才记录）
 	LastXFF    string                    `json:"last_xff,omitempty"`
 	Tags       map[string]string         `json:"tags"`
 	Intel      []string                  `json:"intel,omitempty"`
@@ -321,20 +323,49 @@ func (s *Store) safeRecord(ev *model.Event, hits []model.Hit) (res RecordResult)
 	return s.recordLocked(ev, hits)
 }
 
+// countEvent 计入事件量（总量、分钟桶、每日统计）。
+func (s *Store) countEvent(ev *model.Event, b *Bucket, day *DayStat) {
+	day.Events++
+	switch ev.Kind {
+	case model.KindWeb:
+		s.totals.Web++
+		b.Web++
+		day.Web++
+	case model.KindDNS:
+		day.DNS++
+		s.totals.DNS++
+	case model.KindAuth:
+		day.Auth++
+		s.totals.Auth++
+	default:
+		s.totals.Firewall++
+		b.Fw++
+		day.Firewall++
+		if ev.DstIP != "" && geo.IsPrivate(ev.SrcIP) && !geo.IsPrivate(ev.DstIP) {
+			s.totals.Egress++ // 内网主机访问公网的出站流量（外连检测的数据基础）
+		}
+	}
+}
+
 func (s *Store) recordLocked(ev *model.Event, hits []model.Hit) RecordResult {
 	var res RecordResult
 
-	s.totals.Events++
+	count := !ev.Replay // 补发命中的事件副本已经计入过事件量
+	if count {
+		s.totals.Events++
+	}
 	// 外连威胁情报地址：内网主机（或本机）主动连接已知恶意地址是典型的失陷迹象（木马回连 C2、挖矿、数据外传）。
 	// 普通出站流量不作为攻击来源统计；命中情报的出站连接以发起连接的主机为主体记录告警。
 	var c2 *model.Hit
-	if ev.Kind == model.KindFirewall && s.IntelMatch != nil {
+	if ev.Kind == model.KindFirewall && s.IntelMatch != nil && count {
 		if c2 = s.c2Hit(ev); c2 != nil {
 			*c2 = s.calibrated(ev, *c2)
 		}
 	}
 	if ev.Outbound {
-		s.totals.Outbound++
+		if count {
+			s.totals.Outbound++
+		}
 		if c2 == nil && !hasAttack(hits) { // 出站流量只记录外连恶意地址、周期性外连等失陷迹象
 			return res
 		}
@@ -361,34 +392,11 @@ func (s *Store) recordLocked(ev *model.Event, hits []model.Hit) RecordResult {
 		s.buckets[minute] = b
 	}
 	day := s.dayLocked(t)
-	day.Events++
-	switch ev.Kind {
-	case model.KindWeb:
-		s.totals.Web++
-		b.Web++
-		day.Web++
-	case model.KindDNS, model.KindAuth:
-		// DNS 查询与认证日志量大，只记录总量；命中异常时才以主体（内网主机 / 登录来源）建立画像
-		if ev.Kind == model.KindDNS {
-			day.DNS++
-		} else {
-			day.Auth++
-		}
-		if ev.Kind == model.KindDNS {
-			s.totals.DNS++
-		} else {
-			s.totals.Auth++
-		}
-		if !hasAttack(hits) {
-			return res
-		}
-	default:
-		s.totals.Firewall++
-		b.Fw++
-		day.Firewall++
-		if ev.DstIP != "" && geo.IsPrivate(ev.SrcIP) && !geo.IsPrivate(ev.DstIP) {
-			s.totals.Egress++ // 内网主机访问公网的出站流量（外连检测的数据基础）
-		}
+	if count {
+		s.countEvent(ev, b, day)
+	}
+	if (ev.Kind == model.KindDNS || ev.Kind == model.KindAuth) && !hasAttack(hits) {
+		return res // DNS 查询与认证日志量大，只记录总量；命中异常时才以主体（内网主机 / 登录来源）建立画像
 	}
 
 	if ev.SrcIP == "" {
@@ -446,7 +454,9 @@ func (s *Store) recordLocked(ev *model.Event, hits []model.Hit) RecordResult {
 		}
 	}
 	oldLevel, oldSeen, oldFirst := p.Level, p.LastSeen, p.FirstSeen
-	p.Events++
+	if count {
+		p.Events++
+	}
 	if ev.Time.After(p.LastSeen) {
 		p.LastSeen = ev.Time
 	}
@@ -455,7 +465,9 @@ func (s *Store) recordLocked(ev *model.Event, hits []model.Hit) RecordResult {
 	}
 	s.agg.moveLastSeen(p, oldSeen)
 	s.agg.moveFirstSeen(p, oldFirst)
-	if ev.Kind == model.KindWeb {
+	switch {
+	case !count: // 补发的命中不再计入访问统计
+	case ev.Kind == model.KindWeb:
 		p.WebReqs++
 		incBounded(&p.Status, ev.Status, 50)
 		if ev.UA != "" {
@@ -465,7 +477,7 @@ func (s *Store) recordLocked(ev *model.Event, hits []model.Hit) RecordResult {
 			incBounded(&p.Proxies, ev.PeerIP, 20)
 			p.LastXFF = ev.XFF
 		}
-	} else {
+	default:
 		p.FwEvents++
 		if ev.Action == model.ActionDeny {
 			p.Denied++
@@ -475,6 +487,9 @@ func (s *Store) recordLocked(ev *model.Event, hits []model.Hit) RecordResult {
 		}
 	}
 
+	if ev.TLSFinger != "" {
+		incBounded(&p.TLS, truncate(ev.TLSFinger, 80), 4)
+	}
 	if ev.Kind == model.KindWeb && ev.Status >= 200 && ev.Status < 300 {
 		hits = s.verifySuccess(ev, hits)
 	}
@@ -590,6 +605,12 @@ func (s *Store) recordLocked(ev *model.Event, hits []model.Hit) RecordResult {
 		p.recompute()
 		s.agg.setLevel(p, oldLevel)
 	}
+	if p.Attacks > 0 && count { // 攻击源的行为节奏（活跃时段与请求间隔），同源关联据此比对轮换出口的同一攻击者
+		if p.Rhythm == nil {
+			p.Rhythm = &Rhythm{}
+		}
+		p.Rhythm.observe(t, s.location())
+	}
 	if ev.Kind == model.KindWeb {
 		s.surf.observeWeb(ev, hits, attacked)
 	} else if ev.Kind == model.KindDNS || ev.Kind == model.KindAuth {
@@ -614,7 +635,7 @@ func (s *Store) recordLocked(ev *model.Event, hits []model.Hit) RecordResult {
 		// 钓鱼网站、攻击来源类情报只告警，不作为失陷迹象登记
 		s.surf.finding("c2:"+ev.SrcIP, "内网主机外连威胁情报地址", "失陷迹象", c2.Severity, ev.SrcIP, c2.Evidence,
 			"立即隔离该主机，排查恶意进程、计划任务、自启动项与可疑账号；在出口防火墙封禁该地址，并核查同网段其他主机是否存在相同外连", ev.DstIP, ev.Time)
-	} else {
+	} else if count {
 		s.surf.observeFw(ev, s.published(ev))
 	}
 	res.Level, res.Score = p.Level, p.Score

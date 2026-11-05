@@ -189,6 +189,9 @@ type Event struct {
 	// NoSource 表示设备只记录了被攻击的目的地址，没有来源（防火墙攻击防范的多源洪泛日志，来源多为伪造地址）：
 	// 不建立来源画像，只计入攻击统计、资产攻击链路，并与多源 DDoS 检测相互印证
 	NoSource bool
+	// Replay 表示事后补发命中的事件副本：原事件已经计入事件量（服务器被判定失陷时补记它此前发起的横向连接），
+	// 只记录命中，不再计入事件量与画像的访问统计
+	Replay bool
 	// DNS 日志：Host 为查询的域名，QType 为查询类型，RCode 为响应码（NOERROR / NXDOMAIN …）
 	QType string
 	RCode string
@@ -196,6 +199,22 @@ type Event struct {
 	// Asset 为攻击目标对应的资产（登记了资产台账时由流水线填写，仅攻击事件）
 	Asset   *AssetRef
 	ReqTime float64
+	// Web 日志的增强字段（nginx 的 log_format 增加 $request_length $upstream_status $upstream_response_time
+	// $ssl_protocol $ssl_cipher 后才有）：请求长度（含请求头与请求体）；后端应用的响应码（0 为日志没有记录，
+	// -1 为请求没有转发到后端，由 nginx 自己响应：静态文件、return、限流、缓存）；后端耗时；TLS 协议与加密套件
+	ReqLength    int64
+	Upstream     int
+	UpstreamTime float64
+	TLSProto     string
+	TLSCipher    string
+	// TLSFinger 是客户端的 TLS 指纹（流量日志的 JA3 / JA4；只有 Web 日志时为“协议/加密套件”）
+	TLSFinger string
+	// SentBytes / RecvBytes 是防火墙、流量日志记录的会话字节数：发起方发送 / 接收（0 为没有记录）；Packets 为包数
+	SentBytes int64
+	RecvBytes int64
+	Packets   int64
+	// SrcHost 是认证日志记录的来源主机名（Windows 4624 的 WorkstationName），用于串起横向登录链
+	SrcHost string
 	// PayloadAddrs 是利用载荷中写明的公网地址（反弹 Shell、下载执行、JNDI 的回连地址），由流水线的联动检测提取。
 	// 资产攻击链路据此把之后连接这些地址的服务器与被攻击的站点串起来
 	PayloadAddrs []string
