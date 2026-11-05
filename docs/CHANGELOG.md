@@ -4,6 +4,14 @@
 
 只记录影响使用的变化。完整的改动见 [Git 提交记录](https://github.com/sreyun/netsa/commits/master)。
 
+## 1.7.10
+
+### CC 与 DDoS 检测
+
+- **分布式 CC**（`bhv-distcc`，高危）：按站点汇总，请求量比平时暴增 5 倍以上（且不少于 `dist_cc_requests`），一半以上集中在同一路径，且有 `dist_cc_ips` 个以上来源各集中请求该路径 `dist_cc_ip_requests` 次以上。单个来源都低于 `cc_requests` 时，按来源统计发现不了这类攻击。正常的访问高峰（访客请求各种页面）与 App 低频轮询不会告警。
+- **多源 DDoS**（`bhv-ddos`）：按防火墙日志的目的地址与端口汇总，事件量比该目标平时暴增 5 倍以上（且不少于 `ddos_events`），来自 `ddos_sources` 个以上来源。多数连接被拒绝或没有应答时为高危，否则中危；每次最多告警 50 个参与者。
+- 平时的水平按每个窗口的滑动平均自动学习，突增窗口不计入；刚启动没有平时水平时，分布式 CC 按 2 倍、多源 DDoS 按 10 倍的绝对阈值判断。
+
 ## 1.7.9
 
 ### Tengine、OpenResty 与 nginx 系网关的日志

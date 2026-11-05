@@ -27,7 +27,7 @@
 | `intel.blocklists` / `tor_exit_url` | 威胁情报：命中的来源告警，内网主机外连其中地址判为疑似失陷 |
 | `alert.base_url` / `dedup_window` | 告警消息中的大屏链接 / 推送去重窗口 |
 | `alert.report_time` | 每日安全日报推送时间（HH:MM，按 `timezone`，默认 09:00，`off` 关闭）；机器人需勾选“接收每日安全日报” |
-| `detect.thresholds` | 行为检测阈值：CC、目录扫描、暴力破解、端口扫描、主机探测、洪泛，以及分布式暴力破解（`dist_*`）、接口遍历（`enum_*`）、周期性外连（`beacon_conns`）、主机认证（`auth_failures`、`auth_users`）、DNS（`dns_nxdomain`、`dns_subdomains`） |
+| `detect.thresholds` | 行为检测阈值：CC、目录扫描、暴力破解、端口扫描、主机探测、洪泛，以及分布式暴力破解（`dist_window`、`dist_brute_*`）、分布式 CC（`dist_cc_*`）、多源 DDoS（`ddos_events`、`ddos_sources`）、接口遍历（`enum_*`）、周期性外连（`beacon_conns`）、主机认证（`auth_failures`、`auth_users`）、DNS（`dns_nxdomain`、`dns_subdomains`） |
 | `alert.webhooks` | 配置文件方式的告警机器人：`type`、`url`、`secret`（加签）、`levels`（多选 medium / high / critical） |
 | `server.web_dir` / `serve -web` | 从磁盘目录加载前端页面，用于定制界面 |
 | `detect.whitelist` | 自有监控、扫描器等白名单，只统计流量不检测 |

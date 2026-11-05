@@ -303,6 +303,14 @@ type Thresholds struct {
 	TimeoutWindow   time.Duration `yaml:"timeout_window"`
 	TimeoutRequests int           `yaml:"timeout_requests"`
 	SlowRequest     time.Duration `yaml:"slow_request"` // 日志记录了请求耗时（nginx $request_time）时生效
+	// 分布式 CC：web_window 内站点请求量达到 dist_cc_requests 且为平时的 5 倍以上，一半以上集中在同一路径，
+	// 且至少 dist_cc_ips 个来源各请求该路径 dist_cc_ip_requests 次以上（占其请求的大部分）
+	DistCCRequests   int `yaml:"dist_cc_requests"`
+	DistCCIPs        int `yaml:"dist_cc_ips"`
+	DistCCIPRequests int `yaml:"dist_cc_ip_requests"`
+	// 多源 DDoS：fw_window 内同一目的地址与端口的防火墙事件达到 ddos_events 且为平时的 5 倍以上，来自 ddos_sources 个以上来源
+	DDoSEvents  int `yaml:"ddos_events"`
+	DDoSSources int `yaml:"ddos_sources"`
 }
 
 type AlertConfig struct {
@@ -435,6 +443,12 @@ func Default() *Config {
 				TimeoutWindow:   10 * time.Minute,
 				TimeoutRequests: 20,
 				SlowRequest:     10 * time.Second,
+				// 分布式 CC 与多源 DDoS
+				DistCCRequests:   3000,
+				DistCCIPs:        20,
+				DistCCIPRequests: 30,
+				DDoSEvents:       20000,
+				DDoSSources:      200,
 			},
 		},
 		RawLog: RawLogConfig{RetentionDays: 180},
@@ -658,6 +672,8 @@ func (c *Config) fill() {
 		{&t.DistBruteLogins, dt.DistBruteLogins}, {&t.DistBruteIPs, dt.DistBruteIPs}, {&t.EnumIDs, dt.EnumIDs}, {&t.BeaconConns, dt.BeaconConns},
 		{&t.AuthFailures, dt.AuthFailures}, {&t.AuthUsers, dt.AuthUsers}, {&t.DNSNXDomain, dt.DNSNXDomain}, {&t.DNSSubdomains, dt.DNSSubdomains},
 		{&t.TimeoutRequests, dt.TimeoutRequests},
+		{&t.DistCCRequests, dt.DistCCRequests}, {&t.DistCCIPs, dt.DistCCIPs}, {&t.DistCCIPRequests, dt.DistCCIPRequests},
+		{&t.DDoSEvents, dt.DDoSEvents}, {&t.DDoSSources, dt.DDoSSources},
 		{&c.Detect.AlertsPerRule, d.Detect.AlertsPerRule},
 		{&c.Storage.MaxIPs, d.Storage.MaxIPs}, {&c.Storage.MaxAlerts, d.Storage.MaxAlerts},
 		{&c.Geo.CacheSize, d.Geo.CacheSize},

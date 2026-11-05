@@ -108,6 +108,8 @@ type Behavior struct {
 	slow      map[string]*slowWin    // 来源 → 超时窗口（只为收到过超时的来源建立）
 	attacked  map[string]time.Time   // 来源 → 最近一次命中攻击规则的时间
 	impact    map[string]*hostImpact // 站点 → 超时统计、业务路径可用性与可疑来源
+	sites     map[string]*siteWin    // 站点 → 请求量窗口与基线（分布式 CC）
+	dsts      map[dstKey]*dstWin     // 目的地址:端口 → 事件量窗口与基线（多源 DDoS）
 	latest    time.Time              // 已处理事件的最新时间（排除未来时间的异常日志），作为窗口过期的基准
 	lastPrune time.Time              // 上次清理的系统时间
 }
@@ -121,7 +123,8 @@ const maxAuthHosts = 256
 func NewBehavior(th config.Thresholds) *Behavior {
 	return &Behavior{th: th, web: map[string]*webWin{}, fw: map[string]*fwWin{}, logins: map[string]*loginWin{},
 		enum: map[string]*enumWin{}, beacons: map[string]*beacon{}, beaconDst: map[string]int{}, auth: map[string]*authWin{}, dns: map[string]*dnsWin{}, errs: map[string]*hostErr{},
-		slow: map[string]*slowWin{}, attacked: map[string]time.Time{}, impact: map[string]*hostImpact{}}
+		slow: map[string]*slowWin{}, attacked: map[string]time.Time{}, impact: map[string]*hostImpact{},
+		sites: map[string]*siteWin{}, dsts: map[dstKey]*dstWin{}}
 }
 
 // Observe 处理一个事件并返回触发的行为告警。
@@ -268,6 +271,9 @@ func (b *Behavior) observeWeb(ev *model.Event, attacked bool) []model.Hit {
 		if h, ok := b.enumerate(ev); ok {
 			hits = append(hits, h)
 		}
+	}
+	if h, ok := b.observeSite(ev, path); ok {
+		hits = append(hits, h)
 	}
 	return append(hits, b.observeImpact(ev, path, attacked)...)
 }
@@ -635,6 +641,9 @@ func (b *Behavior) observeFw(ev *model.Event) []model.Hit {
 		return model.Hit{RuleID: "bhv-flood", Name: "流量洪泛/DoS", Category: CatFlood,
 			Severity: model.SevHigh, Phase: model.PhaseImpact, Evidence: fmt.Sprintf("%s内产生 %d 条防火墙事件", win, w.events)}
 	})
+	if h, ok := b.observeDst(ev, internal); ok {
+		hits = append(hits, h)
+	}
 	return hits
 }
 
@@ -687,6 +696,7 @@ func (b *Behavior) Size() int {
 }
 
 func (b *Behavior) prune(now time.Time) {
+	b.pruneSurge(now)
 	for k, w := range b.logins {
 		if now.Sub(w.start) > 2*b.th.DistWindow || w.start.Sub(now) > 2*b.th.DistWindow {
 			delete(b.logins, k)
