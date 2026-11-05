@@ -267,7 +267,7 @@ var sensitiveRules = []sensitiveRule{
 		"删除 Web 目录中的版本库目录；nginx 中添加 location ~ /\\.(git|svn|hg) { deny all; }"},
 	{regexp.MustCompile(`/\.env(\.\w+)?$|/\.aws/credentials$|/id_[rd]sa$|/\.htpasswd$|/\.git-credentials$|/credentials(\.json|\.xml)?$|/\.kube/config$`), "密钥/凭证文件可公开访问", model.SevCritical,
 		"立即删除该文件并轮换其中涉及的全部密钥、口令与令牌"},
-	{regexp.MustCompile(`/[^/]*(backup|bak|db|database|dump|site|www|wwwroot|web|htdocs|admin|sql|config|old)[^/]*\.(zip|rar|tar|tar\.gz|tgz|7z|sql|sql\.gz|bak|dump|mdb|sqlite)$|\.(sql|sql\.gz|bak)$`), "备份/数据库文件可下载", model.SevCritical,
+	{regexp.MustCompile(`/[^/]*(backup|bak|db|database|dump|site|www|wwwroot|web|htdocs|admin|sql|config|old)[^/]*\.(zip|rar|tar|tar\.gz|tgz|7z|xz|lz|zst|sql|sql\.gz|bak|bkp|dump|mdb|sqlite)$|\.(sql|bak|bkp)(\.(gz|xz|lz|zst|bz2|zip|7z))?$|\.(php|asp|aspx|jsp|inc|conf|ini)(\.|_|-)(bak|bkp|backup|old|orig|original|save|copy)$`), "备份/数据库文件可下载", model.SevCritical,
 		"删除 Web 目录下的备份文件，备份应存放在不可通过 HTTP 访问的位置"},
 	{regexp.MustCompile(`/web-inf/|/meta-inf/|/web\.config$|/wp-config\.php\.\w+$|/application(-\w+)?\.(properties|ya?ml)$|/config\.(php|inc|json|ya?ml|xml)\.(bak|old|swp)$|/\.user\.ini$`), "配置文件泄露", model.SevHigh,
 		"禁止访问配置文件，检查是否泄露数据库连接串等敏感信息"},

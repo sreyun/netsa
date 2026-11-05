@@ -24,7 +24,7 @@
 
 - **零依赖，一键部署**：Go 单二进制，前端、世界与中国省市地图、离线定位库全部内置，不需要 Elasticsearch、Kafka 或数据库。Docker 镜像同时提供 amd64 与 arm64，关闭在线溯源后可在隔离网络中完全离线运行。
 - **日志不用先适配**：自动识别 40 余种格式，覆盖 nginx / Tengine / OpenResty / APISIX / Kong / Apache / IIS / Caddy、ModSecurity 等 WAF、iptables、华为、H3C、FortiGate、Palo Alto、Suricata、Linux 与 Windows 认证、主流 DNS，以及 Docker、Filebeat 等采集器的包装格式。
-- **检测准，告警可信**：81 条特征规则（部分改编自 OWASP CRS）、libinjection 语法分析加行为检测，用响应、会话证据和资产漏洞复核“表面成功”。等级由统一裁决决定：已拦截的攻击不会被标成“严重”，真正利用成功的不会被漏掉。
+- **检测准，告警可信**：87 条特征规则（部分改编自 OWASP CRS）、libinjection 语法分析加行为检测，用响应、会话证据和资产漏洞复核“表面成功”。等级由统一裁决决定：已拦截的攻击不会被标成“严重”，真正利用成功的不会被漏掉。
 - **认得国产 OA 和中间件**：内置 261 条漏洞接口签名，覆盖致远、泛微、用友、通达、蓝凌、万户 OA，帆软、亿赛通、若依、Nacos、APISIX、Nginx UI，以及深信服、锐捷、海康、大华等 43 个国产产品，告警直接注明产品与 CVE / CNVD 编号；正常业务在用的漏洞接口自动学习，不会一直刷告警。
 - **情报在准不在多**：IP 与域名情报（STIX / TAXII / MISP / 文本列表），按远控、恶意软件、钓鱼、矿池、攻击来源分类定级，自动过滤被滥用的公共平台；每个情报源的准确率按分析员结论自动统计，长期误报的自动降级。
 - **防火墙与 Web 日志联动**：Web 攻击之后内网主机连接攻击者、或连接攻击载荷里写着的回连地址，直接判为失陷迹象；载荷中的地址被连接即证明载荷已被执行。
@@ -158,6 +158,7 @@ go build -o bin/netsa ./cmd/netsa
 | [API](docs/api.md) | REST 接口一览 |
 | [对接外部系统](docs/integrations.md) | LDAP / OIDC 单点登录、SIEM 转发、联动封禁、工单与处置剧本、STIX / TAXII / MISP 与文本情报（IP、域名，情报类别）、Sigma 与签名规则包 |
 | [开发与发布](docs/development.md) | 本地测试、代码结构、镜像构建与发布 |
+| [能力评估与路线图](docs/roadmap.md) | 按攻击链路评估识别、定位、溯源能力，缺口与分步计划 |
 | [更新记录](docs/CHANGELOG.md) | 影响使用的变化 |
 
 ## 开发

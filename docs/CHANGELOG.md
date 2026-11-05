@@ -4,6 +4,26 @@
 
 只记录影响使用的变化。完整的改动见 [Git 提交记录](https://github.com/sreyun/netsa/commits/master)。
 
+## 1.7.11
+
+### 目录扫描与漏洞探测（来自生产环境的 nuclei 扫描）
+
+一次 nuclei 扫描 5 分钟内发出 1.4 万个请求，只有 22% 被规则识别：站点对不存在的路径返回首页（`200 477`），目录扫描拿不到 404；工具使用浏览器 UA；大量探测是各种产品的登录页、插件文件，单条请求与正常访问分不开。
+
+- **兜底页面上的目录扫描**：学习站点首页（`/`）的响应大小，其他路径返回同样大小的 200 按“未找到”计入目录扫描。此前这类站点上的目录爆破几乎识别不到。
+- **自动化漏洞扫描**（`bhv-vulnscan`）：同一来源 1 分钟内带攻击载荷的请求达到 10 次、涉及 3 类以上攻击时，按整段扫描识别，并从 UA、带外回连域名、工具留下的文件名中认出工具（nuclei、AWVS、Burp Suite、xray、Nessus 等）。
+- **扫描器特征**（`scan-artifact`）：OAST / DNSLog 回连域名（`oast.live`、`interact.sh`、`burpcollaborator.net`、`dnslog.cn` 等，出现在参数、路径、邮箱里都能识别）与 `/nuclei.svg` 这类工具文件名。
+- **备份与配置文件探测**补充：`.xz` / `.lz` / `.zst` / `.Z` 压缩包、SQLite 数据库文件，源码备份后缀（`.php.bak!`、`.php.2`、`.php.disabled`、`.php.rej`、`.php.txt`、`.php~`、`_bak`），以站点名命名的源码包（`/app.jar`、`/example.com.tar.gz`），CI 与凭证配置（`.gitlab-ci.yml`、`.drone.yml`、`sftp-config.json`、`google-api-private-key.json`），根目录日志。
+- **随机文件名脚本**（`webshell-random`）：上传漏洞利用后访问刚上传的随机串命名脚本（`/test/S1WpC8G9WjvkbIPWhWWM.jsp`）。
+- **非必要的百分号编码**（`proto-escape`）：把字母、数字编码成 `%XX` 躲避路径检测（`/%77eb%75i_%77sma_Http`）。
+- 回放这次扫描中漏掉的 300 个请求，新版本按单条请求识别出 124 个（41%）；其余多为各种产品的登录页与插件文件，由来源级的目录扫描、漏洞扫描识别归并到扫描源上。
+- 为了不拖慢检测，备份与配置文件探测拆成了几条规则（`sens-backup-name`、`sens-srcbak`、`sens-cicd` 等）：一条正则的分支太多时提取不出预过滤字面量，每个请求都要执行。
+
+### 文档
+
+- 新增[能力评估与路线图](roadmap.md)：按攻击链路逐段评估识别、定位、溯源能力，列出缺口与分步计划。
+
+
 ## 1.7.10
 
 ### CC 与 DDoS 检测

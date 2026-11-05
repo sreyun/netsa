@@ -130,15 +130,15 @@ func TestProductionFalsePositives(t *testing.T) {
 		t.Fatal(err)
 	}
 	web := func(method, uri string, status int) []model.Hit {
-		return e.Inspect(&model.Event{Kind: model.KindWeb, SrcIP: "203.0.113.90", Host: "mg.hc-yun.com", Method: method, URI: uri, Status: status, Bytes: 5000, UA: "Mozilla/5.0"})
+		return e.Inspect(&model.Event{Kind: model.KindWeb, SrcIP: "203.0.113.90", Host: "app.example.com", Method: method, URI: uri, Status: status, Bytes: 5000, UA: "Mozilla/5.0"})
 	}
-	if h := hitIDs(web("GET", "/static/pdf/web/viewer.html?file=https://mg.hc-yun.com:443/group1/M00/0B/53/a.pdf", 200)); h["rfi"].RuleID != "" {
+	if h := hitIDs(web("GET", "/static/pdf/web/viewer.html?file=https://app.example.com:443/group1/M00/0B/53/a.pdf", 200)); h["rfi"].RuleID != "" {
 		t.Errorf("本站的 pdf 预览地址不是远程文件包含: %+v", h["rfi"])
 	}
-	if h := hitIDs(web("GET", "/static/pdf/web/viewer.html?file=https://files.hc-yun.com/a.pdf", 200)); h["rfi"].RuleID != "" {
+	if h := hitIDs(web("GET", "/static/pdf/web/viewer.html?file=https://files.example.com/a.pdf", 200)); h["rfi"].RuleID != "" {
 		t.Errorf("同一主域名的地址不是远程文件包含: %+v", h["rfi"])
 	}
-	for _, uri := range []string{"/x.php?file=http://evil.example/shell.txt", "/x.php?file=http://mg.hc-yun.com@evil.example/s.txt", "/x.php?page=http://mg.hc-yun.com.evil.example/s.txt"} {
+	for _, uri := range []string{"/x.php?file=http://evil.example/shell.txt", "/x.php?file=http://app.example.com@evil.example/s.txt", "/x.php?page=http://app.example.com.evil.example/s.txt"} {
 		if _, ok := hitIDs(web("GET", uri, 200))["rfi"]; !ok {
 			t.Errorf("%s 应命中远程文件包含", uri)
 		}

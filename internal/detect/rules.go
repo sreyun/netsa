@@ -190,7 +190,7 @@ var builtinRules = []Rule{
 
 	// ---------------- 目录穿越 / 文件包含 ----------------
 	rule("trav-dotdot", "目录穿越", CatTraversal, "high", ex, "uri", `\.\.[/\\]`),
-	rule("lfi-sensitive", "读取系统敏感文件", CatTraversal, "high", ex, "uri", `/etc/(passwd|shadow|group|hosts|issue|crontab|sudoers|ssh/)|/proc/(self|\d+)/(environ|cmdline|fd|maps|status)|c:[/\\]+windows|\\windows\\|win\.ini|boot\.ini|system32[/\\]|/var/log/(auth|secure|apache|nginx|httpd)|/root/\.|/home/[^/]+/\.ssh`),
+	rule("lfi-sensitive", "读取系统敏感文件", CatTraversal, "high", ex, "uri", `/etc/(passwd|shadow|group|hosts|issue|crontab|sudoers|ssh/)|=etc/(passwd|shadow)\b|/proc/(self|\d+)/(environ|cmdline|fd|maps|status)|c:[/\\]+windows|\\windows\\|win\.ini|boot\.ini|system32[/\\]|/var/log/(auth|secure|apache|nginx|httpd)|/root/\.|/home/[^/]+/\.ssh`),
 	rule("lfi-wrapper", "伪协议文件包含", CatTraversal, "high", ex, "uri", `\b(php|zip|phar|expect|glob|compress\.zlib|ogg|rar|ssh2)://|\bdata://|\bfile://`),
 	rule("rfi", "远程文件包含", CatTraversal, "high", ex, "uri", `[?&](file|page|path|include|inc|template|tpl|dir|document|folder|root|lang|module)=\s*(https?|ftps?)://`),
 	rule("null-byte", "空字节截断", CatTraversal, "high", ex, "uri", `\x00`),
@@ -269,15 +269,28 @@ var builtinRules = []Rule{
 	// ---------------- 敏感文件 / 信息泄露探测 ----------------
 	rule("sens-vcs", "源码仓库泄露探测(.git/.svn)", CatSensitive, "medium", rec, "path", `/\.(git|svn|hg|bzr|cvs)(/|$)|/\.ds_store$|/cvs/(entries|root)$|/\.gitlab-ci\.yml$`),
 	rule("sens-secret", "密钥/凭证文件探测", CatSensitive, "high", rec, "path", `/\.(env(\.\w+)?|aws/credentials|npmrc|pypirc|dockercfg|docker/config\.json|kube/config|ssh/(id_rsa|id_dsa|id_ecdsa|id_ed25519|authorized_keys)|bash_history|zsh_history|mysql_history|git-credentials|netrc|htpasswd|vscode/sftp\.json)$|/(id_rsa|id_dsa)(\.pub)?$|/credentials(\.json|\.xml)?$|/secrets?\.(json|ya?ml)$`),
-	rule("sens-backup", "备份文件探测", CatSensitive, "medium", rec, "path", `/[^/]*(backup|bak|db|database|dump|site|www|wwwroot|web|htdocs|html|public_html|admin|sql|config|old)[^/]*\.(zip|rar|tar|tar\.gz|tgz|7z|bz2|sql|sql\.gz|bak|old|swp|dump|sqlite|mdb)$|\.(sql|bak|swp)$`),
+	// 备份文件分成几条规则：一条正则的分支过多时，预过滤提取不出足够长的必要字面量，每个请求都要执行正则
+	// （见 prefilter.go）。常见备份名的压缩包与数据库导出、各种压缩格式（.xz / .lz / .zst / .Z）、SQLite 数据库文件：
+	rule("sens-backup", "备份文件探测", CatSensitive, "medium", rec, "path", `/[^/]*(backup|bak|db|database|dump|site|www|wwwroot|web|htdocs|html|public_html|admin|sql|config|old)[^/]*\.(zip|rar|tar|tar\.gz|tar\.z|tgz|7z|bz2|gz|z|xz|lz|lzma|zst|jar|war|sql|sql\.gz|bak|bk|bkp|old|save|swp|dump|sqlite3?|sqlitedb|mdb)$|\.(sql|bak|bkp|swp)(\.(gz|xz|lz|lzma|zst|bz2|zip|7z|z))?$|\.(sqlite3?|sqlitedb|accdb)$`),
+	// 目录扫描字典里的常见文件名打包（/data.tar、/bin.gz、/uploads.bz2）：只认整个文件名，latest.zip、metadata.zip 不算
+	rule("sens-backup-name", "备份文件探测", CatSensitive, "medium", rec, "path", `/(data|bin|ftp|src|test|temp|tmp|upload|uploads|webapps|conf|code|source)\.(zip|rar|tar|tar\.gz|tar\.z|tgz|7z|bz2|gz|z|xz|lz|lzma|zst|jar|war|sql)$`),
+	// 源码与配置文件的备份后缀：config.php.bak、main-local.php_bak、conn.php.original、config.inc.php.2、
+	// database.php.disabled、config.php.txt、config.inc.php!、main.php~、wp-config.2
+	rule("sens-srcbak", "源码备份文件探测", CatSensitive, "medium", rec, "path", `\.(php\d?|asp|aspx|jsp|jspx|inc|conf|config|ini|yml|yaml|json|xml|py|rb|properties)[._-](bak!?|bk|bkp|backup|old|orig|original|save|sav|swp|swo|copy|tmp|temp|blank|new|disabled|rej|txt|\d)$`),
+	rule("sens-srcbak2", "源码备份文件探测", CatSensitive, "medium", rec, "path", `\.(php\d?|asp|aspx|jsp|inc|conf|ini)\.?[~!]$|/wp-config\.(\d|disabled|old|bak|save|txt)$`),
 	rule("sens-config", "配置文件探测", CatSensitive, "medium", rec, "path", `/(web\.config|wp-config\.php(\.\w+)?|configuration\.php\.\w+|config\.(php|inc|json|ya?ml|xml|ini)(\.bak|\.old|~)|settings\.py|application(-\w+)?\.(properties|ya?ml)|database\.yml|appsettings\.json|parameters\.yml|composer\.(json|lock)|\.htaccess|\.user\.ini)$|/web-inf/|/meta-inf/`),
+	// CI / 部署与凭证配置、服务器配置：.gitlab-ci.yml、.drone.yml、sftp-config.json、google-api-private-key.json、httpd.conf
+	rule("sens-cicd", "CI与凭证配置探测", CatSensitive, "medium", rec, "path", `/\.github/workflows/|/\.?(gitlab-ci|drone|travis|bitbucket-pipelines)\.ya?ml$|/(kibana|elasticsearch|filebeat|logstash)\.ya?ml$|/\.project$|/secret_token\.rb$|/id_rsa[_-]\d+$`),
+	rule("sens-cicd2", "CI与凭证配置探测", CatSensitive, "medium", rec, "path", `/(sftp-config|auth|credential|credentials|service-account|service_account|google-api-private-key|firebase|firebase-adminsdk|hawtconfig)\.json$|/(apache|apache2|httpd|nginx|php-fpm|lighttpd)\.conf$|/config/(prod|production|dev|development|local|default|secret|secrets)\.(json|yml|yaml)$`),
 	rule("sens-debug", "调试/信息泄露接口探测", CatSensitive, "medium", rec, "path", `/(phpinfo|php_info|info|test|pi)\.php$|/server-(status|info)$|/(nginx|ngx|basic)_status$|/(check|req|upstream)_status$|/status/format/(json|html|prometheus)$|/apisix/prometheus/metrics$|/_profiler|/elmah\.axd$|/trace\.axd$|/__debug__|/debug/(vars|pprof)|/actuator/(env|heapdump|threaddump|configprops|mappings|beans|trace|httptrace|logfile|loggers|sessions|shutdown|restart)$|/heapdump$|/druid/(index|websession|sql)\.html$`),
-	rule("sens-log", "日志文件探测", CatSensitive, "medium", rec, "path", `/(logs?|storage/logs)/[^/]*\.(log|txt)$|/(error|access|debug|laravel)[^/]*\.log$|/nohup\.out$`),
+	rule("sens-log", "日志文件探测", CatSensitive, "medium", rec, "path", `/(logs?|storage/logs)/[^/]*\.(log|txt)$|/(error|access|debug|laravel)[^/]*\.log$|^/[^/]+\.log$|/nohup\.out$`),
 	{ID: "admin-probe", Name: "管理后台/敏感入口探测", Category: CatAdminProbe, Severity: "low", Phase: rec, Target: "path", OnlyFailed: true,
 		Pattern: `/(wp-login\.php|wp-admin|administrator|phpmyadmin|pma|myadmin|mysqladmin|dbadmin|adminer(-[\d.]+)?\.php|admin\.php|admin/login|manager/html|console/login|webadmin|login\.action|zabbix|cacti|nagios|kibana|jenkins|axis2|jmx-console|web-console|hudson|nacos|xxl-job-admin|apisix/admin|actuator|swagger-ui(\.html)?|v2/api-docs|webui|cpanel|webmail|owa|ecp|remote/login|\+cscoe\+|dana-na|global-protect|sslvpn)(/|$)`},
 
 	// ---------------- 工具指纹 ----------------
 	rule("ua-scanner", "漏洞扫描器", CatScanner, "medium", rec, "ua", `sqlmap|nikto|nessus|openvas|acunetix|\bwvs\b|netsparker|appscan|w3af|nuclei|\bxray\b|goby|burp|dirbuster|dirsearch|gobuster|\bffuf\b|feroxbuster|wfuzz|wpscan|joomscan|droopescan|whatweb|masscan|zgrab|nmap|hydra|medusa|fscan|afrog|pocsuite|vulmap|jaeles|arachni|skipfish|commix|jorgee|zmeu|morfeus|havij|pangolin|webinspect|qualys|metasploit|naabu|katana|yakit|bbscan|w9scan|sqlninja|nimbostratus|webfuzz|vulnscan|hello,? ?world|l9explore|l9tcpid|tsunami|cansina`),
+	// 扫描器留下的特征：带外回连（OAST / DNSLog）平台的域名、工具探测时使用的固定文件名与参数
+	rule("scan-artifact", "漏洞扫描器特征", CatScanner, "medium", rec, "uri", `\b(oast\.(fun|live|site|me|pro|online)|interact\.sh|interactsh\.com|burpcollaborator\.net|oastify\.com|dnslog\.(cn|link)|ceye\.io|bxss\.me|requestrepo\.com)\b|/nuclei\.svg\b|nessus_is_probing_you|nessustest|acunetix[-_]wvs|wvstest|appscan_fingerprint|testasp\.vulnweb\.com`),
 	rule("ua-mapping", "网络空间测绘引擎", CatMapping, "low", rec, "ua", `censys|shodan|zoomeye|fofa|\bquake\b|360netlab|internet-measurement|netcraft|leakix|onyphe|criminalip|binaryedge|expanse|paloaltonetworks|stretchoid|researchscan|project sonar|shadowserver|securitytrails|natlas|modat|odin\.io|alphastrike|netsystemsresearch|bitsightbot|internetcensus|ipip\.net`),
 	{ID: "ua-automation", Name: "脚本/自动化客户端", Category: CatAutomation, Severity: "info", Phase: rec, Target: "ua", TagOnly: true,
 		Pattern: `^(python-requests|python-urllib|python-httpx|python/|aiohttp|go-http-client|curl/|wget/|libwww-perl|java/|okhttp|apache-httpclient|scrapy|axios|node-fetch|undici|ruby|php/|guzzlehttp|winhttp|powershell|mozilla/4\.0$|mozilla/5\.0$)`},

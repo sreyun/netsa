@@ -31,6 +31,7 @@ const (
 	bitFwBrute
 	bitFlood
 	bitBruteOK
+	bitVulnScan
 )
 
 // 每个 IP 的窗口状态都有容量上限：只需判断是否达到阈值，不必记录全部明细，
@@ -43,6 +44,7 @@ type webWin struct {
 	loginStatus             map[int]int    // 窗口内登录提交的响应码分布
 	loginPaths              map[string]int // 各登录接口的提交次数（疑似成功须出现在被反复提交的同一接口上）
 	fired                   int
+	scan                    scanSignals // 窗口内命中的攻击特征（判断自动化漏洞扫描）
 }
 
 type fwWin struct {
@@ -109,6 +111,7 @@ type Behavior struct {
 	attacked  map[string]time.Time   // 来源 → 最近一次命中攻击规则的时间
 	impact    map[string]*hostImpact // 站点 → 超时统计、业务路径可用性与可疑来源
 	sites     map[string]*siteWin    // 站点 → 请求量窗口与基线（分布式 CC）
+	homes     map[string]*homeSize   // 站点 → 首页的响应大小（识别对不存在的路径返回首页的兜底页面）
 	dsts      map[dstKey]*dstWin     // 目的地址:端口 → 事件量窗口与基线（多源 DDoS）
 	latest    time.Time              // 已处理事件的最新时间（排除未来时间的异常日志），作为窗口过期的基准
 	lastPrune time.Time              // 上次清理的系统时间
@@ -124,7 +127,7 @@ func NewBehavior(th config.Thresholds) *Behavior {
 	return &Behavior{th: th, web: map[string]*webWin{}, fw: map[string]*fwWin{}, logins: map[string]*loginWin{},
 		enum: map[string]*enumWin{}, beacons: map[string]*beacon{}, beaconDst: map[string]int{}, auth: map[string]*authWin{}, dns: map[string]*dnsWin{}, errs: map[string]*hostErr{},
 		slow: map[string]*slowWin{}, attacked: map[string]time.Time{}, impact: map[string]*hostImpact{},
-		sites: map[string]*siteWin{}, dsts: map[dstKey]*dstWin{}}
+		sites: map[string]*siteWin{}, dsts: map[dstKey]*dstWin{}, homes: map[string]*homeSize{}}
 }
 
 // Observe 处理一个事件并返回触发的行为告警。
@@ -167,16 +170,18 @@ func (b *Behavior) ObserveHits(ev *model.Event, ruleHits []model.Hit) []model.Hi
 		return b.observeBeacon(ev)
 	}
 	if ev.Kind == model.KindWeb {
-		attacked := false
+		var sig scanSignals
 		for _, h := range ruleHits {
-			attacked = attacked || h.Severity >= model.SevMedium
+			sig.attacked = sig.attacked || h.Severity >= model.SevMedium
+			sig.add(&h)
 		}
-		return b.observeWeb(ev, attacked)
+		return b.observeWeb(ev, sig)
 	}
 	return b.observeFw(ev)
 }
 
-func (b *Behavior) observeWeb(ev *model.Event, attacked bool) []model.Hit {
+func (b *Behavior) observeWeb(ev *model.Event, sig scanSignals) []model.Hit {
+	attacked := sig.attacked
 	w := b.web[ev.SrcIP]
 	if w == nil && len(b.web)+len(b.fw) >= maxWindows {
 		return nil
@@ -190,8 +195,14 @@ func (b *Behavior) observeWeb(ev *model.Event, attacked bool) []model.Hit {
 	if i := strings.IndexByte(path, '?'); i >= 0 {
 		path = path[:i]
 	}
+	host := ev.Host
+	if host == "" {
+		host = "-"
+	}
+	// 对不存在的路径返回首页（200）的站点（单页应用、统一兜底页），与首页大小相同的 200 等同于 404
+	miss := ev.Status == 404 || b.softMiss(ev, host, path)
 	switch {
-	case ev.Status == 404:
+	case miss:
 		w.n404++
 	case ev.Status == 401:
 		// 只统计登录接口与 HTTP Basic 认证（日志记录了 $remote_user）的 401：App、单页应用带着过期令牌
@@ -203,8 +214,8 @@ func (b *Behavior) observeWeb(ev *model.Event, attacked bool) []model.Hit {
 		w.n5xx++
 		b.noteErr(ev)
 	}
-	// 只在出现 404 时记录路径：正常访客不分配集合，扫描器的集合达到阈值后不再增长
-	if ev.Status == 404 && len(w.paths) < b.th.ScanPaths {
+	// 只在出现 404（或兜底页面）时记录路径：正常访客不分配集合，扫描器的集合达到阈值后不再增长
+	if miss && len(w.paths) < b.th.ScanPaths {
 		if w.paths == nil {
 			w.paths = map[string]struct{}{}
 		}
@@ -247,7 +258,11 @@ func (b *Behavior) observeWeb(ev *model.Event, attacked bool) []model.Hit {
 	})
 	fire(bitScan, w.n404 >= b.th.Scan404 && len(w.paths) >= b.th.ScanPaths, func() model.Hit {
 		return model.Hit{RuleID: "bhv-dirscan", Name: "目录/文件枚举扫描", Category: CatDirScan,
-			Severity: model.SevMedium, Phase: model.PhaseRecon, Evidence: fmt.Sprintf("%s内 404 响应 %d 次，访问 %d 个以上不同路径", win, w.n404, len(w.paths))}
+			Severity: model.SevMedium, Phase: model.PhaseRecon, Evidence: fmt.Sprintf("%s内 404（或与首页相同的兜底页面）响应 %d 次，访问 %d 个以上不同路径", win, w.n404, len(w.paths))}
+	})
+	w.scan.merge(sig)
+	fire(bitVulnScan, w.scan.scanning(), func() model.Hit {
+		return w.scan.hit(win, w.n404)
 	})
 	fire(bitBrute, w.login >= b.th.BruteLogin || w.n401 >= b.th.BruteLogin, func() model.Hit {
 		return model.Hit{RuleID: "bhv-webbrute", Name: "Web登录暴力破解", Category: CatBruteForce,

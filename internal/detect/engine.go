@@ -364,6 +364,113 @@ func sameSiteURL(rest, host string) bool {
 	return a == b && strings.Contains(a, ".")
 }
 
+// archiveExts 是源码包、备份常用的文件后缀。
+var archiveExts = []string{".tar.gz", ".tar.xz", ".tar.bz2", ".zip", ".rar", ".tar", ".tgz", ".7z", ".jar", ".war", ".xz", ".lz",
+	".zst", ".bz2", ".gz", ".z", ".sql", ".bak"}
+
+// siteArchive 判断请求是否在下载以站点名命名的源码包或备份（/app.zip、/example.com.tar.gz、/www.example.com.rar）：
+// 目录扫描工具会按目标域名生成这类文件名，固定的正则写不出来。返回请求的路径，不是时返回空。
+func siteArchive(host, uri string) string {
+	path, _, _ := strings.Cut(uri, "?")
+	if host == "" || len(path) < 4 || strings.IndexByte(path[1:], '/') >= 0 || isIPHost(host) {
+		return ""
+	}
+	name := strings.ToLower(path[1:])
+	for _, ext := range archiveExts {
+		base, ok := strings.CutSuffix(name, ext)
+		if !ok || base == "" {
+			continue
+		}
+		h := strings.ToLower(host)
+		reg, _ := splitDomain(h)
+		label, _, _ := strings.Cut(h, ".")
+		regLabel, _, _ := strings.Cut(reg, ".")
+		switch base {
+		case h, strings.TrimPrefix(h, "www."), reg, label, regLabel:
+			return path
+		}
+		return ""
+	}
+	return ""
+}
+
+// randomScript 判断请求的最后一段是否是随机串命名的服务端脚本（16~40 位字母数字混合，大小写或数字都较多），
+// 返回文件名。正常应用的脚本名是有意义的单词；构建工具生成的哈希文件名是 .js / .css，不是服务端脚本。
+func randomScript(uri string) string {
+	path, _, _ := strings.Cut(uri, "?")
+	name := path[strings.LastIndexByte(path, '/')+1:]
+	if i := strings.IndexByte(name, ';'); i >= 0 {
+		name = name[:i]
+	}
+	dot := strings.LastIndexByte(name, '.')
+	if dot < 16 || dot > 40 {
+		return ""
+	}
+	switch strings.ToLower(name[dot+1:]) {
+	case "php", "php5", "phtml", "jsp", "jspx", "asp", "aspx", "ashx", "cer":
+	default:
+		return ""
+	}
+	var upper, lower, digit int
+	for _, c := range name[:dot] {
+		switch {
+		case c >= 'A' && c <= 'Z':
+			upper++
+		case c >= 'a' && c <= 'z':
+			lower++
+		case c >= '0' && c <= '9':
+			digit++
+		default:
+			return "" // 有下划线、连字符的多是有意义的名字（user_profile_edit.php）
+		}
+	}
+	// 随机串：大写、小写、数字三类都有，且至少两类各占 4 个以上
+	if upper == 0 || lower == 0 || digit == 0 || (min(upper, lower) < 4 && min(upper, digit) < 4 && min(lower, digit) < 4) {
+		return ""
+	}
+	return name
+}
+
+// needlessEscapes 统计路径中把字母、数字编码为 %XX 的次数（查询串不计：部分客户端会整体编码参数）。
+func needlessEscapes(uri string) int {
+	path, _, _ := strings.Cut(uri, "?")
+	n := 0
+	for i := 0; i+2 < len(path); i++ {
+		if path[i] != '%' {
+			continue
+		}
+		v, ok1 := unhexByte(path[i+1])
+		w, ok2 := unhexByte(path[i+2])
+		if !ok1 || !ok2 {
+			continue
+		}
+		c := v<<4 | w
+		if c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' {
+			n++
+		}
+		i += 2
+	}
+	return n
+}
+
+func unhexByte(c byte) (byte, bool) {
+	switch {
+	case c >= '0' && c <= '9':
+		return c - '0', true
+	case c >= 'a' && c <= 'f':
+		return c - 'a' + 10, true
+	case c >= 'A' && c <= 'F':
+		return c - 'A' + 10, true
+	}
+	return 0, false
+}
+
+// isIPHost 判断站点名是否是 IP 地址（没有域名可用来生成文件名）。
+func isIPHost(h string) bool {
+	h = strings.Trim(h, "[]")
+	return strings.Count(h, ":") > 1 || strings.Trim(h, "0123456789.") == ""
+}
+
 // nonHTTPRequest 判断请求行是否根本不是 HTTP：TLS 握手、Oracle TNS、RDP 等二进制协议发往 HTTP 端口时，
 // nginx 记录的“请求行”是一串二进制，里面的 \x00 与符号不是 Web 攻击载荷。
 func nonHTTPRequest(ev *model.Event) bool {
@@ -478,6 +585,18 @@ func specialWebChecks(ev *model.Event, uri, result string) []model.Hit {
 		add("proto-trace", "HTTP TRACE方法探测", CatProtocol, model.SevLow, model.PhaseRecon, ev.Method+" "+Printable(raw, 80))
 	case ev.Method == "PROPFIND" || ev.Method == "MKCOL" || ev.Method == "MOVE" || ev.Method == "COPY" || ev.Method == "SEARCH":
 		add("proto-webdav", "WebDAV方法探测", CatProtocol, model.SevLow, model.PhaseRecon, ev.Method+" "+Printable(raw, 80))
+	}
+	if p := siteArchive(ev.Host, raw); p != "" {
+		add("sens-sitearchive", "站点源码包探测", CatSensitive, model.SevMedium, model.PhaseRecon, Printable(p, 120))
+	}
+	if name := randomScript(raw); name != "" {
+		// 上传漏洞利用后访问刚上传的脚本：工具生成的文件名是随机串（S1WpC8G9WjvkbIPWhWWM.jsp）
+		add("webshell-random", "随机文件名脚本访问（疑似上传的WebShell）", CatWebShell, model.SevMedium, model.PhaseExploit, Printable(raw, 120))
+	}
+	if n := needlessEscapes(raw); n >= 2 {
+		// 正常客户端不会把字母、数字编码成 %XX；%77eb%75i 这类写法是在躲避基于路径的检测
+		add("proto-escape", "非必要的百分号编码（绕过检测）", CatProtocol, model.SevMedium, model.PhaseExploit,
+			fmt.Sprintf("路径中 %d 处把字母或数字编码为 %%XX：%s", n, Printable(raw, 100)))
 	}
 	if len(raw) > 4096 {
 		add("proto-longurl", "超长URL(溢出/Fuzz)", CatProtocol, model.SevLow, model.PhaseRecon, Printable(raw, 120))
