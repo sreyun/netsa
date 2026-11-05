@@ -35,6 +35,7 @@ import (
 	"netsa/internal/assets"
 	"netsa/internal/audit"
 	"netsa/internal/auth"
+	"netsa/internal/authscan"
 	"netsa/internal/backup"
 	"netsa/internal/block"
 	"netsa/internal/config"
@@ -61,7 +62,7 @@ import (
 
 // version 是构建版本号。默认值用于本地构建；镜像构建通过
 // -ldflags "-X main.version=<tag>" 注入，`netsa version` 与 /api/meta 都会显示注入后的值。
-var version = "1.7.12"
+var version = "1.8.0"
 
 func usage() {
 	fmt.Fprintf(os.Stderr, `netsa %s —— 网络安全态势感知与攻击面分析系统
@@ -136,6 +137,7 @@ type app struct {
 	rdap      *geo.RDAPClient
 	archive   *archive.Archive  // 可选的 PostgreSQL 告警归档
 	suppress  *suppress.Manager // 误报抑制规则
+	authscan  *authscan.Manager // 授权扫描登记
 	raw       *rawlog.Store     // 原始日志留存
 	assets    *assets.Manager   // 资产与漏洞
 	exposure  *exposure.Manager // 对外发布服务清单（DNAT 映射）
@@ -227,9 +229,13 @@ func build(cfg *config.Config) (*app, error) {
 	if a.suppress, err = suppress.Load(dataFile(cfg, "", "suppressions.json")); err != nil {
 		return nil, err
 	}
+	if a.authscan, err = authscan.Load(dataFile(cfg, "", "authscans.json")); err != nil {
+		return nil, err
+	}
 	if a.assets, err = assets.Load(dataFile(cfg, "", "assets.json")); err != nil {
 		return nil, err
 	}
+	a.store.AssetOf = a.assets.Find // 资产攻击链路按台账合并同一资产的地址与域名
 	if a.exposure, err = exposure.Load(cfg.Exposure); err != nil {
 		return nil, err
 	}
@@ -241,6 +247,7 @@ func build(cfg *config.Config) (*app, error) {
 	}
 	a.learn.PriorAttacks = a.store.AttackCount // 业务接口学习只用此前没有攻击记录的访客
 	a.store.Calibrate = a.learn.Calibrate      // 状态库生成的情报命中同样按情报源的准确率校准
+	a.store.OASTLinks = a.learn.OASTLinks      // 同一 OAST 关联标识的来源归入同一攻击活动
 	if added := geo.AddInternalNetworks(a.learn.LearnedNets()); len(added) > 0 {
 		log.Printf("[learn] 载入自动识别的内网网段: %s", strings.Join(added, ", "))
 	}
@@ -252,7 +259,7 @@ func build(cfg *config.Config) (*app, error) {
 	a.pipe = &pipeline.Pipeline{
 		Engine: a.engine, Behavior: detect.NewBehavior(cfg.Detect.Thresholds), Store: a.store, Geo: a.geo, Intel: a.intel,
 		RealIP: pipeline.NewRealIP(cfg.RealIP), Notifier: a.notifier,
-		EnrichLevel: model.ParseSeverity(cfg.Geo.EnrichLevel), OnAlert: a.onAlert, Suppress: a.suppress, Assets: a.assets,
+		EnrichLevel: model.ParseSeverity(cfg.Geo.EnrichLevel), OnAlert: a.onAlert, Suppress: a.suppress, AuthScan: a.authscan, Assets: a.assets,
 		Exposure: a.exposure, Learn: a.learn,
 	}
 	// 自学习识别出新的内网网段：已有攻击源按新网段重新定位（不再显示为境外）
@@ -325,7 +332,7 @@ func (a *app) server(listen string) (*http.Server, error) {
 	s := &api.Server{
 		Cfg: a.cfg, Store: a.store, Ingest: a.ingest, Pipeline: a.pipe, Geo: a.geo, Engine: a.engine,
 		RDAP: a.rdap, Static: staticFS(a.cfg), Version: version, Broker: a.broker, Notifier: a.notifier,
-		Archive: a.archive, Suppress: a.suppress, RawLog: a.raw, Assets: a.assets, Exposure: a.exposure, Learn: a.learn, AI: ai.New(a.cfg.AI, os.Getenv),
+		Archive: a.archive, Suppress: a.suppress, AuthScan: a.authscan, RawLog: a.raw, Assets: a.assets, Exposure: a.exposure, Learn: a.learn, AI: ai.New(a.cfg.AI, os.Getenv),
 	}
 	// 外部模型在 Web 管理页面（自学习 → 外部模型）配置，保存在状态目录的 ai.json；
 	// 界面从未保存过时沿用配置文件 ai 段与环境变量中的密钥
@@ -550,6 +557,9 @@ func cmdServe(args []string) error {
 			if err := a.suppress.Flush(); err != nil {
 				log.Printf("[suppress] %v", err)
 			}
+			if err := a.authscan.Flush(); err != nil {
+				log.Printf("[authscan] %v", err)
+			}
 			if err := a.ingest.Senders.Flush(); err != nil {
 				log.Printf("[syslog] %v", err)
 			}
@@ -568,6 +578,7 @@ func cmdServe(args []string) error {
 			a.archive.Close(10 * time.Second) // 写完归档队列中剩余的告警
 			a.raw.Close(10 * time.Second)
 			a.suppress.Flush()
+			a.authscan.Flush()
 			if err := a.learn.Save(); err != nil {
 				log.Printf("[learn] 保存学习状态失败: %v", err)
 			}

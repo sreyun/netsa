@@ -39,14 +39,17 @@ func segOf(target string) int {
 
 // Engine 是无状态的特征检测引擎，可被多个 goroutine 并发调用。
 type Engine struct {
-	rules    []*Rule
-	minBytes int64
-	ac       *acMatcher // 全部预过滤字面量的多模式匹配自动机
-	words    int        // 每个文本段位图的字数
-	bitsPool sync.Pool
-	uaRules  []int    // 针对 UA 的规则在 rules 中的下标（结果按 UA 缓存，见 uacache.go）
-	uaSlot   []int    // rules 下标 → uaRules 中的位置，非 UA 规则为 -1
-	uac      *uaCache // UA 规则的匹配结果缓存
+	rules     []*Rule
+	minBytes  int64
+	ac        *acMatcher // 全部预过滤字面量的多模式匹配自动机
+	words     int        // 每个文本段位图的字数
+	bitsPool  sync.Pool
+	uaRules   []int    // 针对 UA 的规则在 rules 中的下标（结果按 UA 缓存，见 uacache.go）
+	uaSlot    []int    // rules 下标 → uaRules 中的位置，非 UA 规则为 -1
+	uac       *uaCache // UA 规则的匹配结果缓存
+	decRules  []int    // 对编码载荷的解码结果生效的规则（decode.go）
+	decLits   bitset   // 这些规则用到的全部预过滤字面量：解码结果中一个都没有时不必逐条匹配
+	decAlways bool
 }
 
 func NewEngine(rulesFile string, successMinBytes int64) (*Engine, error) {
@@ -107,6 +110,22 @@ func NewEngineWith(rulesFile string, extra []Rule, successMinBytes int64) (*Engi
 		if segOf(r.Target) == segUA {
 			e.uaSlot[i] = len(e.uaRules)
 			e.uaRules = append(e.uaRules, i)
+		}
+		if seg := segOf(r.Target); seg != segUA && seg != segRef && !r.TagOnly && decodedCats[r.Category] {
+			e.decRules = append(e.decRules, i) // 对编码载荷的解码结果生效的规则
+		}
+	}
+	if e.ac != nil {
+		e.decLits = make(bitset, e.words)
+		for _, i := range e.decRules {
+			if rules[i].needIDs == nil {
+				e.decAlways = true // 没有预过滤字面量的规则（规则文件、页面维护的规则）：解码结果都要逐条匹配
+			}
+			for _, clause := range rules[i].needIDs {
+				for _, id := range clause {
+					e.decLits.set(id)
+				}
+			}
 		}
 	}
 	e.uac = newUACache()
@@ -308,6 +327,10 @@ func (e *Engine) inspectWeb(ev *model.Event) []model.Hit {
 		hits = append(hits, h)
 	}
 	hits = reviewSyntax(ev, uri, result, hits, review)
+	// 编码载荷：Base64 / Hex 编码的片段、路径中用 + 代替空格的注入，解码后再匹配
+	if enc := e.decodedHits(ev, result, hits); len(enc) > 0 {
+		hits = append(hits, enc...)
+	}
 	if s := matchVuln(ev.Method, path, ev.URI); s != nil { // 国产 OA、中间件的已知漏洞接口
 		hits = append(hits, vulnHit(s, ev, path, result, hits))
 	}
@@ -754,18 +777,23 @@ var threatMap = []struct {
 	cat   string
 	phase string
 }{
-	{[]string{"log4j", "log4shell", "jndi", "ognl", "spel", "struts*", "ssti", "template injection"}, CatExpr, model.PhaseExploit},
-	{[]string{"sqli", "sql injection", "sql-injection", "sql_injection", "union select"}, CatSQLi, model.PhaseExploit},
-	{[]string{"xss", "cross-site", "cross site scripting"}, CatXSS, model.PhaseExploit},
-	{[]string{"traversal", "lfi", "rfi", "file inclusion", "file disclosure"}, CatTraversal, model.PhaseExploit},
-	{[]string{"rce", "command injection", "cmd injection", "os command", "remote code execution", "code execution", "code.execution", "shellshock"}, CatCmdExec, model.PhaseExploit},
-	{[]string{"webshell", "backdoor", "trojan*", "malware", "botnet", "c2", "cnc", "c&c", "command and control", "coinminer", "miner", "mining", "ransomware", "virus", "worm", "mirai", "gafgyt"}, "恶意软件/远控", model.PhasePersistence},
-	{[]string{"deserializ*", "fastjson", "jackson", "ysoserial"}, CatDeser, model.PhaseExploit},
-	{[]string{"brute*", "bruteforce", "password guess", "dictionary attack", "credential stuffing"}, CatBruteForce, model.PhaseCredential},
-	{[]string{"scan*", "probe", "sweep", "recon*", "nmap", "masscan", "zmap"}, CatPortScan, model.PhaseRecon},
-	{[]string{"rate limit", "cc attack", "cc_attack", "deny_cc"}, CatCC, model.PhaseImpact},
-	{[]string{"dos", "ddos", "flood*", "amplification"}, CatFlood, model.PhaseImpact},
-	{[]string{"cve-", "exploit*", "overflow", "vulnerab*"}, CatCVE, model.PhaseExploit},
+	{[]string{"log4j", "log4shell", "jndi", "ognl", "spel", "struts*", "ssti", "template injection", "表达式注入", "模板注入"}, CatExpr, model.PhaseExploit},
+	{[]string{"sqli", "sql injection", "sql-injection", "sql_injection", "union select", "sql注入"}, CatSQLi, model.PhaseExploit},
+	{[]string{"xss", "cross-site", "cross site scripting", "跨站"}, CatXSS, model.PhaseExploit},
+	{[]string{"traversal", "lfi", "rfi", "file inclusion", "file disclosure", "目录遍历", "目录穿越", "路径遍历", "文件包含", "任意文件读取"}, CatTraversal, model.PhaseExploit},
+	{[]string{"rce", "command injection", "cmd injection", "os command", "remote code execution", "code execution", "code.execution", "shellshock", "命令注入", "命令执行", "代码执行", "远程执行"}, CatCmdExec, model.PhaseExploit},
+	{[]string{"webshell", "backdoor", "trojan*", "malware", "botnet", "c2", "cnc", "c&c", "command and control", "coinminer", "miner", "mining", "ransomware", "virus", "worm", "mirai", "gafgyt", "后门", "木马", "僵尸网络", "挖矿", "病毒", "蠕虫", "勒索", "远控"}, "恶意软件/远控", model.PhasePersistence},
+	{[]string{"deserializ*", "fastjson", "jackson", "ysoserial", "反序列化"}, CatDeser, model.PhaseExploit},
+	{[]string{"brute*", "bruteforce", "password guess", "dictionary attack", "credential stuffing", "暴力破解", "口令猜测", "弱口令"}, CatBruteForce, model.PhaseCredential},
+	// 防火墙攻击防范（华为 ANTIATTACK、H3C ATK）的单包攻击：地址扫描、IP 欺骗、TCP 标志位与 IP 选项异常、畸形报文拒绝服务
+	{[]string{"ip sweep", "ipsweep", "ping sweep", "地址扫描", "主机扫描", "ip扫描"}, CatHostSweep, model.PhaseRecon},
+	{[]string{"spoof*", "ip欺骗", "地址欺骗"}, CatSpoof, model.PhaseRecon},
+	{[]string{"null flag", "all flags", "syn-fin", "fin only", "invalid flags", "traceroute", "tracert", "ip option", "icmp redirect", "icmp unreachable", "large icmp", "畸形报文", "异常报文"}, CatProtocol, model.PhaseRecon},
+	{[]string{"land", "smurf", "teardrop", "ping of death", "pingofdeath", "winnuke", "fraggle", "ip fragment", "死亡之ping"}, CatFlood, model.PhaseImpact},
+	{[]string{"scan*", "probe", "sweep", "recon*", "nmap", "masscan", "zmap", "端口扫描", "扫描", "探测"}, CatPortScan, model.PhaseRecon},
+	{[]string{"rate limit", "cc attack", "cc_attack", "deny_cc", "cc攻击"}, CatCC, model.PhaseImpact},
+	{[]string{"dos", "ddos", "flood*", "amplification", "洪水", "泛洪", "洪泛", "拒绝服务"}, CatFlood, model.PhaseImpact},
+	{[]string{"cve-", "exploit*", "overflow", "vulnerab*", "漏洞利用", "漏洞攻击", "溢出"}, CatCVE, model.PhaseExploit},
 }
 
 // matchThreat 判断威胁文本是否命中关键字列表。
@@ -779,7 +807,7 @@ func matchThreat(text string, tokens map[string]bool, keys []string) bool {
 					return true
 				}
 			}
-		case strings.ContainsAny(k, " -_.&"):
+		case strings.ContainsAny(k, " -_.&") || !isASCII(k): // 短语与中文关键字（中文不按词切分）按子串匹配
 			if strings.Contains(text, k) {
 				return true
 			}
@@ -790,6 +818,15 @@ func matchThreat(text string, tokens map[string]bool, keys []string) bool {
 		}
 	}
 	return false
+}
+
+func isASCII(s string) bool {
+	for i := 0; i < len(s); i++ {
+		if s[i] >= 0x80 {
+			return false
+		}
+	}
+	return true
 }
 
 func threatTokens(text string) map[string]bool {

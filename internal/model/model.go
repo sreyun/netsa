@@ -186,6 +186,9 @@ type Event struct {
 	Service     string
 	EventID     int
 	SubjectHost bool
+	// NoSource 表示设备只记录了被攻击的目的地址，没有来源（防火墙攻击防范的多源洪泛日志，来源多为伪造地址）：
+	// 不建立来源画像，只计入攻击统计、资产攻击链路，并与多源 DDoS 检测相互印证
+	NoSource bool
 	// DNS 日志：Host 为查询的域名，QType 为查询类型，RCode 为响应码（NOERROR / NXDOMAIN …）
 	QType string
 	RCode string
@@ -193,6 +196,9 @@ type Event struct {
 	// Asset 为攻击目标对应的资产（登记了资产台账时由流水线填写，仅攻击事件）
 	Asset   *AssetRef
 	ReqTime float64
+	// PayloadAddrs 是利用载荷中写明的公网地址（反弹 Shell、下载执行、JNDI 的回连地址），由流水线的联动检测提取。
+	// 资产攻击链路据此把之后连接这些地址的服务器与被攻击的站点串起来
+	PayloadAddrs []string
 
 	Raw string
 }
@@ -276,6 +282,9 @@ type AssetRef struct {
 	Name  string
 	Level string // core / important / normal
 	Owner string
+	// Group 表示资产按网段或通配域名登记、事件只是落在其范围内（一个网段内有多台主机、多个站点）：
+	// 资产攻击链路仍按主机地址或站点区分，不把整个网段合并成一个资产
+	Group bool
 }
 
 // Alert 是对外展示的告警记录。

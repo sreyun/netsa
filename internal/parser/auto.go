@@ -17,7 +17,7 @@ func WebParsers() []Parser {
 
 // FirewallParsers 返回内置的防火墙/安全设备日志解析器，顺序即识别优先级。
 func FirewallParsers() []Parser {
-	return []Parser{Netfilter{}, PFSense{}, WindowsFirewall{}, CiscoASA{}, PaloAlto{}, SnortFast{}, JSONFirewall{}, KVFirewall{}}
+	return []Parser{Netfilter{}, PFSense{}, WindowsFirewall{}, CiscoASA{}, PaloAlto{}, SnortFast{}, JSONFirewall{}, AttackDefense{}, KVFirewall{}}
 }
 
 // AllParsers 返回全部内置解析器。
@@ -254,12 +254,20 @@ func parseWith(p Parser, line, msg string, hdr SyslogHeader, sys bool) (*model.E
 	if ev.SrcIP == "" && ev.SubjectHost {
 		ev.SrcIP = "127.0.0.1" // 本机事件；经 syslog 接收时由采集层替换为发送端地址
 	}
-	// 统一规范化地址：IPv4 映射地址、方括号、区域标识，保证同一来源只对应一个画像
-	src, valid := NormIP(ev.SrcIP)
-	if !valid {
-		return nil, false
+	// 统一规范化地址：IPv4 映射地址、方括号、区域标识，保证同一来源只对应一个画像。
+	// 设备只记录了目的地址的多源洪泛日志（NoSource）没有来源，必须有合法的目的地址
+	if ev.NoSource && ev.SrcIP == "" {
+		if _, ok := NormIP(ev.DstIP); !ok {
+			return nil, false
+		}
+	} else {
+		src, valid := NormIP(ev.SrcIP)
+		if !valid {
+			return nil, false
+		}
+		ev.SrcIP = src
+		ev.NoSource = false
 	}
-	ev.SrcIP = src
 	if ev.DstIP != "" {
 		ev.DstIP, _ = NormIP(ev.DstIP)
 	}

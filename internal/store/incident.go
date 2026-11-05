@@ -124,6 +124,15 @@ func (i *Incident) ensureMaps() {
 	}
 }
 
+// touch 记录事件的更新时间，保证同一事件的更新时间严格递增：Windows 的系统时钟精度较粗，同一时刻的两次改动
+// 时间相同，重放处置记录日志时会把分析员的改动当成“不比快照新”而丢弃。
+func (i *Incident) touch(now time.Time) {
+	if !now.After(i.Updated) {
+		now = i.Updated.Add(time.Nanosecond)
+	}
+	i.Updated = now
+}
+
 // active 判断事件是否仍需处置。
 func (i *Incident) active() bool { return i.Status == IncOpen || i.Status == IncInvestigating }
 
@@ -265,7 +274,7 @@ func (s *Store) attachIncidentLocked(a *model.Alert, p *IPProfile) uint64 {
 			inc.Status, inc.Closed, inc.Due, inc.Reminded = IncOpen, time.Time{}, now.Add(slaFor(a.Severity, inc.AssetLevel)), false
 		}
 	}
-	inc.Updated = now
+	inc.touch(now)
 	return inc.ID
 }
 
@@ -325,7 +334,7 @@ func (s *Store) muteIncidentLocked(ip string, h incidentHit) {
 	if h.at.After(inc.LastSeen) {
 		inc.LastSeen = h.at
 	}
-	inc.Updated = time.Now()
+	inc.touch(time.Now())
 }
 
 func appendNote(notes []IncidentNote, n IncidentNote) []IncidentNote {
@@ -622,7 +631,7 @@ func (s *Store) UpdateIncidents(ids []uint64, user string, u IncidentUpdate) ([]
 			actions = append([]string{u.Mark}, actions...)
 		}
 		i.Notes = appendNote(i.Notes, IncidentNote{Time: now, User: user, Action: strings.Join(actions, "；"), Text: u.Note})
-		i.Updated = now
+		i.touch(now)
 		out = append(out, i.view(now))
 		touched = append(touched, i)
 	}
@@ -737,7 +746,7 @@ func (i *Incident) restoreAI(now time.Time, user, why string) {
 		}
 	}
 	i.Notes = appendNote(i.Notes, IncidentNote{Time: now, User: user, Action: "撤销模型的等级下调，恢复为" + from.Label() + "（" + why + "）"})
-	i.Updated = now
+	i.touch(now)
 }
 
 // AIDowngrade 在外部模型把事件判为误报时把等级下调一级，处置时限随之放宽，事件仍保留待分析员确认。
@@ -761,7 +770,7 @@ func (s *Store) AIDowngrade(id uint64, reason string) (model.Severity, bool) {
 	i.Due, i.Reminded = i.Created.Add(slaFor(i.Severity, i.AssetLevel)), false
 	defer s.journalLocked(i)
 	i.Notes = appendNote(i.Notes, IncidentNote{Time: now, User: "系统", Action: "等级由" + from.Label() + "下调为" + i.Severity.Label() + "：" + reason + "；出现成功利用或更高等级的告警时自动恢复，也可人工撤销"})
-	i.Updated = now
+	i.touch(now)
 	return from, true
 }
 
@@ -786,5 +795,5 @@ func (i *Incident) migrateGrade(now time.Time) {
 	i.Severity = model.SevHigh
 	i.Due, i.Reminded = i.Created.Add(slaFor(i.Severity, i.AssetLevel)), false
 	i.Notes = appendNote(i.Notes, IncidentNote{Time: now, User: "系统", Action: "定级规则升级：严重需要响应码之外的证据，等级由严重调整为高危；出现有证据的告警时自动升回"})
-	i.Updated = now
+	i.touch(now)
 }

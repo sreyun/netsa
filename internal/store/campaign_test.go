@@ -85,6 +85,38 @@ func TestCampaigns(t *testing.T) {
 	}
 }
 
+// 同一次 nuclei 扫描的多个出口地址：网段、运营商、手法都不同，只有载荷中的 interactsh 关联 ID 相同，归为一个活动；
+// 单个地址的同源关联中也列为强关联。
+func TestCampaignsOAST(t *testing.T) {
+	s := New(10000, 1000, 5, time.Hour)
+	s.GeoLookup = func(ip string) *geo.Info { return &geo.Info{IP: ip, Country: "美国", ASN: uint(len(ip)) * 1000} }
+	links := map[string][]string{"c59e3crp82ke7bcnedq0.oast": {"198.51.100.10", "203.0.113.200", "192.0.2.55"}, "only-one.dnslog.cn": {"192.0.2.99"}}
+	s.OASTLinks = func() map[string][]string { return links }
+	now := time.Now()
+	for i, ip := range []string{"198.51.100.10", "203.0.113.200", "192.0.2.55", "192.0.2.99"} {
+		s.Record(&model.Event{Kind: model.KindWeb, SrcIP: ip, Host: fmt.Sprintf("s%d.example.com", i), URI: "/x", Status: 404, UA: fmt.Sprintf("ua-%d", i), Time: now.Add(time.Duration(i) * time.Hour)},
+			[]model.Hit{attackHit(fmt.Sprintf("r%d", i), fmt.Sprintf("类型%d", i), model.SevMedium, model.ResultFailed)})
+	}
+	r := s.buildCampaigns()
+	if r.Total != 1 || r.Campaigns[0].Size != 3 {
+		t.Fatalf("共用 interactsh 关联 ID 的 3 个地址应归为一个活动: %+v", r.Campaigns)
+	}
+	c := r.Campaigns[0]
+	if len(c.OAST) != 1 || c.OAST[0] != "c59e3crp82ke7bcnedq0.oast" || !strings.Contains(strings.Join(c.Reasons, "；"), "OAST") {
+		t.Fatalf("应注明关联标识与依据: %+v", c)
+	}
+	d := s.IPDetail("203.0.113.200")
+	n := 0
+	for _, x := range d.Related.Related {
+		if (x.IP == "198.51.100.10" || x.IP == "192.0.2.55") && x.Score == 100 && strings.Contains(x.Reasons[0], "OAST") {
+			n++
+		}
+	}
+	if n != 2 || d.Related.Strong < 2 {
+		t.Fatalf("同源关联应列出同一扫描任务的其他出口: %+v", d.Related)
+	}
+}
+
 // 5000 个攻击源（其中 2000 个属于同一云厂商 ASN，形成上限大小的分桶）的归并耗时。
 func BenchmarkCampaigns(b *testing.B) {
 	s := New(20000, 1000, 5, time.Hour)

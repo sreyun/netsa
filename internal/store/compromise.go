@@ -122,6 +122,7 @@ type Compromised struct {
 	FirstSeen  time.Time      `json:"first_seen"`
 	LastSeen   time.Time      `json:"last_seen"`
 	Advice     string         `json:"advice"`
+	Chain      string         `json:"chain,omitempty"` // 资产攻击链路的查询标识（站点域名或主机地址）
 	evidenced  bool           // 至少有一条带证据的迹象（主机外连、或有证据的攻击成功）
 }
 
@@ -150,6 +151,12 @@ func (s *Store) compromisedLocked() []*Compromised {
 		c := byAsset[kind+"|"+f.Asset]
 		if c == nil {
 			c = &Compromised{Asset: f.Asset, Kind: kind, Confidence: "medium", FirstSeen: f.FirstSeen}
+			c.Chain = f.Asset
+			if kind == "web" {
+				if c.Chain = f.Host; c.Chain == "" || c.Chain == "-" {
+					c.Chain, _, _ = strings.Cut(f.Asset, "/")
+				}
+			}
 			byAsset[kind+"|"+f.Asset] = c
 			out = append(out, c)
 		}

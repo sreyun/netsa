@@ -102,7 +102,7 @@ func priorityWord(p string) string {
 // ---------------- 键值对 / JSON 设备日志中的威胁字段 ----------------
 
 var (
-	kvThreat    = []string{"attack", "attackname", "threatname", "threat", "signature", "signame", "virusname", "virus", "sigdesc"}
+	kvThreat    = []string{"attack", "attackname", "threatname", "threat", "signature", "signame", "signname", "virusname", "virus", "sigdesc"}
 	kvThreatCat = []string{"category", "threattype", "attacktype", "attackcategory", "threatcategory", "subtype"}
 	kvThreatSev = []string{"severity", "crlevel", "threatlevel", "threatseverity", "risk", "priority"}
 )

@@ -45,6 +45,7 @@ type snapshotHead struct {
 	Incidents  map[uint64]*Incident `json:"incidents,omitempty"`
 	NextInc    uint64               `json:"next_incident,omitempty"`
 	Days       map[string]*DayStat  `json:"days,omitempty"`
+	Chains     chainList            `json:"asset_chains,omitempty"` // 资产攻击链路
 }
 
 type snapshot struct {
@@ -102,7 +103,7 @@ func (s *Store) writeSnapshot(f io.Writer, compress bool) error {
 	head := snapshotHead{
 		Version: snapshotVersion, SavedAt: time.Now(), NextID: s.nextID, Buckets: s.buckets, Totals: s.totals,
 		Categories: s.categories, Rules: s.rules, RuleNames: s.ruleNames, SevCount: s.sevCount, Phases: s.phases,
-		Results: s.results, MinTime: s.minTime, MaxTime: s.maxTime, Surface: s.surf, Scores: s.scores, Incidents: s.incidents, NextInc: s.nextInc, Days: s.days,
+		Results: s.results, MinTime: s.minTime, MaxTime: s.maxTime, Surface: s.surf, Scores: s.scores, Incidents: s.incidents, NextInc: s.nextInc, Days: s.days, Chains: s.chainTracks(),
 	}
 	n := len(s.alerts)
 	head.Alerts = make([]*model.Alert, 0, n)
@@ -338,6 +339,14 @@ func (s *Store) Load(path string) error {
 		s.days = snap.Days
 		s.curDay, s.dayEnd = nil, 0
 	}
+	s.chains = map[chainKey]*chainTrack{}
+	for _, tr := range snap.Chains {
+		if tr == nil || tr.Key == "" || tr.Kind == "" {
+			continue
+		}
+		tr.reindex()
+		s.chains[chainKey{tr.Kind, tr.Key}] = tr
+	}
 	s.incByKey = map[string]uint64{}
 	for id, inc := range s.incidents {
 		if inc == nil {
@@ -354,5 +363,20 @@ func (s *Store) Load(path string) error {
 			s.incByKey[inc.Key] = id
 		}
 	}
+	return nil
+}
+
+// chainList 是快照中的资产攻击链路。解析失败（格式变化、内容损坏）时只丢弃这一部分并记录日志，
+// 不让整个快照（事件处置记录、画像）因此无法恢复。
+type chainList []*chainTrack
+
+func (c *chainList) UnmarshalJSON(b []byte) error {
+	var list []*chainTrack
+	if err := json.Unmarshal(b, &list); err != nil {
+		log.Printf("[store] 快照中的资产攻击链路无法解析，已忽略: %v", err)
+		*c = nil
+		return nil
+	}
+	*c = list
 	return nil
 }

@@ -376,6 +376,30 @@ func (l *Learner) observeCampaign(ip, key, sample string, at time.Time) {
 	}
 }
 
+const (
+	oastLinkMaxIPs  = 30                 // 使用同一标识的来源超过这么多，多半是公开利用脚本中写死的标识
+	oastLinkMaxSpan = 7 * 24 * time.Hour // 同一次扫描任务的标识不会长期使用
+)
+
+// OASTLinks 返回被多个来源使用过的带外回连标识（interactsh 关联 ID、dnslog 子域名）→ 来源，供攻击活动归并：
+// interactsh 的关联 ID 在一次扫描任务中不变，多个出口地址的载荷里出现同一个 ID 说明是同一个操作者。
+// 被大量来源、长期使用的标识可能写死在公开的利用脚本里，不能说明是同一个人，不返回。
+func (l *Learner) OASTLinks() map[string][]string {
+	if l == nil {
+		return nil
+	}
+	st := &l.atk
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	out := map[string][]string{}
+	for k, c := range st.campaigns {
+		if len(c.IPs) >= 2 && len(c.IPs) <= oastLinkMaxIPs && c.Last.Sub(c.First) <= oastLinkMaxSpan {
+			out[k] = append([]string(nil), c.IPs...)
+		}
+	}
+	return out
+}
+
 // SetLearnedRule 停用 / 启用一条自学习发现的观察规则。
 func (l *Learner) SetLearnedRule(id, user string, enabled bool) bool {
 	if l == nil || !strings.HasPrefix(id, "learn-") {

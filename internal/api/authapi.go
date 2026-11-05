@@ -80,7 +80,7 @@ func requiredRole(r *http.Request) string {
 	if selfService[p] {
 		return ""
 	}
-	if strings.HasPrefix(p, "/api/incidents") || strings.HasPrefix(p, "/api/suppressions") || strings.HasPrefix(p, "/api/learn/suggestions") || r.Method == http.MethodPut && strings.HasPrefix(p, "/api/vulns/") {
+	if strings.HasPrefix(p, "/api/incidents") || strings.HasPrefix(p, "/api/suppressions") || strings.HasPrefix(p, "/api/authscans") || strings.HasPrefix(p, "/api/learn/suggestions") || r.Method == http.MethodPut && strings.HasPrefix(p, "/api/vulns/") {
 		return auth.RoleAnalyst
 	}
 	return auth.RoleAdmin

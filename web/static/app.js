@@ -133,7 +133,8 @@ const fmtShort = (t) => (zero(t) ? '-' : fmtTime(t).slice(5));
 const badge = (lv) => `<span class="badge lv-${esc(lv)} bg-${esc(lv)}">${esc(LV[lv] || lv)}</span>`;
 const resTag = (r, proven) => `<span class="res-${esc(r)} nowrap"${proven ? ' title="有响应码之外的证据，如响应明显大于接口基线、目标确有该漏洞"' : ''}>${esc(proven ? '成功（有证据）' : RESULT[r] || r)}</span>`;
 const scoreBar = (s, lv) => `<span class="scorebar"><i style="width:${Math.min(100, s)}%;background:${LV_COLOR[lv] || '#888'}"></i></span><b>${Math.round(s)}</b>`;
-const ipLink = (ip) => `<span class="ip clickable" data-ip="${esc(ip)}">${esc(ip)}</span>`;
+// 没有来源地址时（防火墙只记录了目的地址的多源洪泛）显示占位，不生成可点击的链接
+const ipLink = (ip) => (ip ? `<span class="ip clickable" data-ip="${esc(ip)}">${esc(ip)}</span>` : '<span class="muted">—</span>');
 const empty = (cols, text = '暂无数据') => `<tr><td colspan="${cols}" class="empty">${esc(text)}</td></tr>`;
 const sortedEntries = (obj, n) => Object.entries(obj || {}).sort((a, b) => b[1] - a[1]).slice(0, n);
 // fmtDur 把 Go 的时长字符串（如 10m0s）转为中文
@@ -330,7 +331,9 @@ function drillTo(tab, { params = {}, label = '', native = {} } = {}) {
     fillAlertFilters();
     $('#alSearch').value = native.q || '';
     $('#alSev').value = native.severity || '';
-    $('#alCat').value = native.category || '';
+    const cat = $('#alCat');
+    if (native.category && ![...cat.options].some((o) => o.value === native.category)) cat.add(new Option(native.category, native.category)); // 不在常见分类中的攻击类型
+    cat.value = native.category || '';
     $('#alResult').value = native.result || '';
     $('#alKind').value = native.kind || '';
     drillState.alerts = label ? { params, label } : null;
@@ -375,8 +378,10 @@ const fmtHM = (sec) => { const p = timeParts(new Date(sec * 1000)); return `${p.
 
 // IP 点击统一打开溯源详情
 document.addEventListener('click', (e) => {
+  const ch = e.target.closest('[data-chain-open]');
+  if (ch) { openChain(ch.dataset.chainOpen); return; } // 资产攻击链路（失陷研判、IP 详情、事件中的资产）
   const el = e.target.closest('[data-ip]');
-  if (el) openIP(el.dataset.ip);
+  if (el && el.dataset.ip) openIP(el.dataset.ip);
 });
 
 // ---------------- 态势总览 ----------------
@@ -810,7 +815,7 @@ const feedGroups = new WeakMap(); // li → { n, ips }
 const feedKey = (a) => (a.severity === 'low' ? `low|${a.name}` : '');
 function feedItem(a, g) {
   const n = g ? g.n : 1, srcs = g ? g.ips.size : 1;
-  return `<li data-ip="${esc(a.src_ip)}" data-key="${esc(feedKey(a))}" title="${esc(a.name)}：${esc(a.target)}"><span class="lv">${badge(a.severity)}</span>`
+  return `<li ${a.src_ip ? `data-ip="${esc(a.src_ip)}"` : ''} data-key="${esc(feedKey(a))}" title="${esc(a.name)}：${esc(a.target)}"><span class="lv">${badge(a.severity)}</span>`
     + `<span class="title">${esc(a.name)}${n > 1 ? `<em class="cnt">×${num(n)}</em>` : ''}</span><span class="time">${esc(fmtShort(a.time).slice(6))}</span>`
     + `<div class="row2"><span class="ip">${esc(a.src_ip)}</span> ${esc(a.location || '')} → ${esc(a.target)}${srcs > 1 ? `<span class="srcs"> · ${num(srcs)} 个来源</span>` : ''}</div></li>`;
 }
@@ -1328,7 +1333,8 @@ async function openIP(ip) {
   const intel = (p.intel || []).map((t) => `<span class="chip warn">情报: ${esc(t)}</span>`).join('');
   // 失陷迹象：外连恶意地址、安全设备报出的恶意软件、周期性外连（该地址是本方主机，不是外部攻击者）
   const comp = ['恶意外连', '恶意软件/远控', '可疑外连', 'DNS隧道', '带外探测回连', 'DGA域名', '挖矿'].filter((c) => (p.categories || {})[c]);
-  const compBanner = comp.length ? `<div class="comp-banner">⚠ 该主机疑似已失陷（${comp.map(esc).join('、')}）：请立即隔离排查，详见“安全评估 → 失陷研判”</div>` : '';
+  const compBanner = comp.length ? `<div class="comp-banner">⚠ 该主机疑似已失陷（${comp.map(esc).join('、')}）：请立即隔离排查，详见“安全评估 → 失陷研判”
+    <button type="button" class="btn sm" data-chain-open="${esc(ip)}">查看资产攻击链路 ›</button></div>` : '';
   $('#drawerTitle').innerHTML = `<div class="ipbig">${esc(ip)} ${badge(s.level)} <span style="font-size:14px">威胁评分 <b style="color:${LV_COLOR[s.level]}">${Math.round(s.score)}</b></span></div><div>${intel}${tags}</div>${compBanner}`;
 
   const loc = [g.country, g.province, g.city, g.district].filter(Boolean).filter((v, i, a) => a.indexOf(v) === i).join(' / ') || '未知';
@@ -1540,7 +1546,8 @@ async function loadAssess() {
   $('#asCompCount').textContent = compTotal ? `${num(compTotal)} 个资产，高置信 ${num(high)} 个${compTotal > comp.length ? `，显示前 ${comp.length} 个` : ''}` : '';
   $('#asComp').innerHTML = `<colgroup><col style="width:21%"><col style="width:64px"><col style="width:31%"><col style="width:17%"><col style="width:96px"><col></colgroup>
     <thead><tr><th>资产</th><th>置信度</th><th>失陷迹象</th><th>相关地址</th><th>时间</th><th>处置建议</th></tr></thead><tbody>${comp.map((x, i) => `
-    <tr class="clickable" data-comp="${i}" title="点击查看相关明细"><td class="mono"><span class="chip ${x.kind === 'host' ? 'warn' : ''}">${x.kind === 'host' ? '主机' : 'Web 资产'}</span> ${esc(x.asset)}</td>
+    <tr class="clickable" data-comp="${i}" title="点击查看相关明细"><td class="mono"><span class="chip ${x.kind === 'host' ? 'warn' : ''}">${x.kind === 'host' ? '主机' : 'Web 资产'}</span> ${esc(x.asset)}
+      ${x.chain ? `<div><button type="button" class="btn sm" data-chain-open="${esc(x.chain)}" title="以该资产为中心查看侦察、利用、突破、控制、横向的完整链路">攻击链路 ›</button></div>` : ''}</td>
       <td>${x.confidence === 'high' ? '<span class="badge lv-critical bg-critical">高</span>' : '<span class="badge lv-medium bg-medium">中</span>'}</td>
       <td><div class="as-ind">${x.indicators.slice(0, 3).map((s) => `<div title="${esc(s)}">${esc(s)}</div>`).join('')}${x.indicators.length > 3 ? `<div class="muted">另有 ${x.indicators.length - 3} 条</div>` : ''}</div></td>
       <td><div class="cell-chips">${x.ips.map((ip) => `<span class="chip ip clickable" data-ip="${esc(ip)}">${esc(ip)}</span>`).join('')}</div></td>
@@ -1596,7 +1603,7 @@ $('#asActions').addEventListener('click', (e) => {
   openDrill(x.drill, x.title);
 });
 $('#asComp').addEventListener('click', (e) => {
-  if (e.target.closest('[data-ip]')) return; // 地址交给全局的 IP 详情处理
+  if (e.target.closest('[data-ip],[data-chain-open]')) return; // 地址、攻击链路交给全局处理
   const tr = e.target.closest('[data-comp]');
   if (!tr || !lastAssess) return;
   const x = lastAssess.compromised[+tr.dataset.comp];
@@ -2022,6 +2029,7 @@ async function loadCampaigns() {
         ${row('来源网段', (c.nets || []).map((n) => `${esc(n.net)}（${num(n.count)}）`).join('、'))}
         ${row('自治系统', (c.asns || []).map(esc).join('、'))}
         ${row('工具指纹', (c.tools || []).map(esc).join('、'))}
+        ${row('OAST 关联标识', (c.oast || []).map((k) => `<span class="mono" title="interactsh 关联 ID / dnslog 子域名：同一次扫描任务的载荷中不变">${esc(k)}</span>`).join('、'))}
         ${row('主要目标', (c.targets || []).map((t) => `<span title="${esc(t)}">${esc(t.length > 60 ? t.slice(0, 60) + '…' : t)}</span>`).join('、'))}
         ${row('建议封禁网段', c.block_nets?.length ? `<span class="mono">${c.block_nets.map(esc).join('、')}</span>` : '')}
       </div>
@@ -2034,10 +2042,147 @@ $('#campList').addEventListener('click', (e) => {
 });
 $('#campRefresh').addEventListener('click', () => loadCampaigns().catch(console.error));
 
+// ---------------- 资产攻击链路 ----------------
+// 以被攻击的资产为中心，把侦察、利用、突破、植入、控制、横向、窃取、影响按时间串起来；
+// 站点与它背后的服务器（Web 日志记录的服务器地址、服务器回连了攻击该站点的地址）合并为同一资产
+const CH_KIND = { asset: '台账资产', site: '站点', host: '主机' };
+const CH_CONF = {
+  high: '<span class="badge lv-critical bg-critical nowrap">已失陷 · 高置信</span>',
+  medium: '<span class="badge lv-medium bg-medium nowrap">疑似失陷</span>',
+};
+let chainDefs = [];
+let chainCur = null;
+const chStrip = (reached, big) => `<span class="ch-strip${big ? ' big' : ''}">${chainDefs.map((d) => {
+  const on = reached.includes(d.id);
+  return `<i class="${on ? 'on st-' + d.id : ''}" title="${esc(d.name)}：${esc(d.desc)}${on ? '（已出现）' : '（未出现）'}">${esc(d.name)}</i>`;
+}).join('')}</span>`;
+const chKind = (k) => `<span class="chip">${esc(CH_KIND[k] || k)}</span>`;
+
+async function loadChains() {
+  const p = new URLSearchParams({ limit: '200' });
+  const q = $('#chSearch').value.trim();
+  if (q) p.set('q', q);
+  if ($('#chStage').value) p.set('stage', $('#chStage').value);
+  if ($('#chComp').checked) p.set('compromised', '1');
+  const r = await api('/api/chains?' + p);
+  chainDefs = r.stage_defs || [];
+  const comp = r.compromised || {};
+  $('#chSummary').textContent = `${num(r.total)} 个资产${r.total > r.chains.length ? `，显示前 ${r.chains.length} 个` : ''} · 研判失陷：高置信 ${num(comp.high || 0)}、疑似 ${num(comp.medium || 0)}`;
+  // 各阶段的资产数（全部资产）：点击按“推进到该阶段及之后”筛选
+  $('#chFunnel').innerHTML = chainDefs.map((d) => `<button type="button" class="ch-fn st-${d.id}${r.counts[d.id] ? '' : ' zero'}" data-stage="${esc(d.id)}" title="${esc(d.desc)}">
+      <b>${num(r.counts[d.id] || 0)}</b><span>${esc(d.name)}</span></button>`).join('<span class="ch-arrow" aria-hidden="true">›</span>');
+  $('#chTable').innerHTML = `<colgroup><col style="width:22%"><col style="width:300px"><col style="width:112px"><col style="width:64px"><col style="width:60px"><col style="width:96px"><col></colgroup>
+    <thead><tr><th>资产</th><th>攻击链路</th><th>失陷研判</th><th>等级</th><th>来源</th><th>时间</th><th>结论</th></tr></thead><tbody>${r.chains.map((c) => {
+      const others = c.members.filter((m) => m !== c.name);
+      return `<tr class="clickable" data-chain="${esc(c.key)}" title="点击查看完整攻击链路">
+        <td><b class="mono">${esc(c.name)}</b> ${chKind(c.kind)}${typeof IMPC === 'function' ? IMPC(c.level) : ''}
+          ${others.length ? `<div class="muted mono ch-members" title="${esc(others.join('、'))}">＋ ${esc(others.slice(0, 3).join('、'))}${others.length > 3 ? ` 等 ${others.length} 个` : ''}</div>` : ''}
+          ${c.asset ? `<div class="muted">属于 ${esc(c.asset)}</div>` : ''}</td>
+        <td>${chStrip(c.reached)}</td><td>${CH_CONF[c.confidence] || '<span class="muted">未见失陷迹象</span>'}</td><td>${badge(c.severity)}</td>
+        <td class="num">${num(c.sources)}</td><td class="nowrap muted">${esc(fmtShort(c.first_seen))}<br>${esc(fmtShort(c.last_seen))}</td>
+        <td class="ch-verdict">${esc(c.verdict)}</td></tr>`;
+    }).join('') || empty(7, $('#chStage').value ? '没有越过该阶段的资产，可在筛选中选择“全部”查看只被扫描的资产' : '暂无被攻击的资产')}</tbody>`;
+}
+$('#chTable').addEventListener('click', (e) => {
+  const tr = e.target.closest('[data-chain]');
+  if (tr) openChain(tr.dataset.chain);
+});
+$('#chFunnel').addEventListener('click', (e) => {
+  const b = e.target.closest('[data-stage]');
+  if (!b) return;
+  // 侦察是第一个阶段：“推进到侦察及之后”即全部资产
+  $('#chStage').value = b.dataset.stage === 'recon' ? '' : b.dataset.stage;
+  if (!$('#chStage').value && b.dataset.stage !== 'recon') { // 下拉框里没有的阶段临时加上
+    $('#chStage').insertAdjacentHTML('beforeend', `<option value="${esc(b.dataset.stage)}">${esc(b.textContent.replace(/[\d,]+/, '').trim())}及之后</option>`);
+    $('#chStage').value = b.dataset.stage;
+  }
+  loadChains().catch(console.error);
+});
+let chTimer = 0;
+$('#chSearch').addEventListener('input', () => { clearTimeout(chTimer); chTimer = setTimeout(() => loadChains().catch(console.error), 300); });
+$('#chStage').addEventListener('change', () => loadChains().catch(console.error));
+$('#chComp').addEventListener('change', () => loadChains().catch(console.error));
+$('#chRefresh').addEventListener('click', () => loadChains().catch(console.error));
+
+// 一步的展示：时间、阶段、等级、名称、来源 → 目标、证据、ATT&CK 技术，以及跳转到告警 / 事件
+function chStepHTML(v, i) {
+  const span = v.count > 1 && fmtShort(v.first) !== fmtShort(v.last) ? `${esc(fmtShort(v.first))} ~ ${esc(fmtShort(v.last))}` : esc(fmtShort(v.first));
+  const who = v.self
+    ? `<span class="mono">${esc(v.src)}</span>${v.peer ? ` → <span class="mono">${esc(v.peer)}</span>` : ''}<span class="muted">（资产自身发起）</span>`
+    : `来源 ${ipLink(v.src)}${v.src_label ? ` <span class="muted">${esc(v.src_label)}</span>` : ''} → <span class="mono">${esc(v.target || v.asset)}</span>`;
+  const techs = (v.techniques || []).map((t) => `<span class="chip" title="MITRE ATT&CK ${esc(t.id)}">${esc(t.id)} ${esc(t.name)}</span>`).join('');
+  return `<li class="ch-step st-${esc(v.stage)}${v.dismissed ? ' dismissed' : ''}" data-k="${i}">
+    <div class="ch-step-head"><span class="ch-stage st-${esc(v.stage)}">${esc(v.stage_name)}</span>${badge(v.severity)} <b>${esc(v.name || v.category)}</b>
+      ${v.result ? resTag(v.result, v.proven) : ''}${v.dismissed ? ' <span class="chip">来源事件已标为误报，不计入研判</span>' : ''}
+      <span class="spacer"></span><span class="muted nowrap">${span}${v.count > 1 ? ` · ${num(v.count)} 次` : ''}</span></div>
+    <div class="ch-who">${who}${v.asset && v.self ? '' : ''}</div>
+    ${v.evidence ? `<div class="ch-ev">${esc(v.evidence)}</div>` : ''}
+    <div class="ch-foot">${techs}<span class="spacer"></span>
+      ${v.incident ? `<button type="button" class="btn sm" data-inc="${v.incident}">事件 #${v.incident}</button>` : ''}
+      <button type="button" class="btn sm" data-alerts="${i}">相关告警</button></div></li>`;
+}
+
+async function openChain(id) {
+  let c;
+  try { c = await api('/api/chains/detail?asset=' + encodeURIComponent(id)); } catch (e) { alert(e.message || '没有该资产的攻击记录'); return; }
+  chainCur = c;
+  if (!chainDefs.length) chainDefs = c.stages.map((s) => ({ id: s.id, name: s.name, desc: s.desc }));
+  if (miniChart) { miniChart.dispose(); miniChart = null; }
+  drawer.classList.add('open');
+  mask.classList.add('open');
+  const others = c.members.filter((m) => m !== c.name);
+  $('#drawerTitle').innerHTML = `<div class="ipbig">${esc(c.name)}</div><div class="muted">${esc(CH_KIND[c.kind] || c.kind)}${c.level ? ` · ${esc(IMP[c.level] || c.level)}资产` : ''}${c.owner ? ` · 负责人 ${esc(c.owner)}` : ''}${others.length ? ` · 合并 ${esc(others.join('、'))}` : ''}</div>`;
+  const stages = c.stages.map((s) => `<div class="ch-st${s.reached ? ' on st-' + esc(s.id) : ''}" title="${esc(s.desc)}">
+      <div class="ch-st-name">${esc(s.name)}</div>
+      ${s.reached ? `<div class="ch-st-n">${num(s.hits)}<small> 次</small></div><div class="ch-st-t">${esc(fmtShort(s.first))}</div>${s.sources ? `<div class="ch-st-t">${num(s.sources)} 个来源</div>` : ''}` : '<div class="ch-st-t">未出现</div>'}
+      ${s.reached && s.techniques ? `<div class="ch-st-tech">${s.techniques.slice(0, 2).map((t) => `<span title="${esc(t.name)}">${esc(t.id)}</span>`).join(' ')}</div>` : ''}</div>`).join('');
+  const path = c.path.map((v) => `<li class="st-${esc(v.stage)}"><span class="ch-stage st-${esc(v.stage)}">${esc(v.stage_name)}</span>
+      <span class="muted nowrap">${esc(fmtShort(v.first))}</span> <b>${esc(v.name || v.category)}</b>
+      <span class="muted">${v.self ? `${esc(v.src)}${v.peer ? ' → ' + esc(v.peer) : ''}` : `${esc(v.src)} → ${esc(v.target || v.asset)}`}</span></li>`).join('');
+  const sources = (c.source_list || []).map((x) => `<tr><td>${ipLink(x.ip)}${x.internal ? ' <span class="chip warn">内网主机</span>' : ''}</td><td class="muted">${esc(x.internal ? '' : x.location || '')}</td>
+      <td>${chStrip(x.stages)}</td><td>${badge(x.severity)}</td><td class="num">${num(x.hits)}</td><td class="nowrap muted">${esc(fmtShort(x.first))} ~ ${esc(fmtShort(x.last))}</td></tr>`).join('');
+  const members = (c.member_info || []).map((m) => `<tr><td class="mono">${esc(m.key)}</td><td>${esc(CH_KIND[m.kind] || m.kind)}${m.asset ? `（属于 ${esc(m.asset)}）` : ''}</td><td class="num">${num(m.hits)}</td>
+      <td class="nowrap muted">${esc(fmtShort(m.first_seen))} ~ ${esc(fmtShort(m.last_seen))}</td></tr>`).join('');
+  const links = (c.links || []).map((l) => `<li><span class="mono">${esc(l.a)}</span> ⇄ <span class="mono">${esc(l.b)}</span>：${esc(l.reason)}</li>`).join('');
+  // 按阶段筛选时间线：只列出出现过的阶段，按攻击推进的顺序
+  const present = new Set(c.steps.map((v) => v.stage));
+  const stageBtns = ['', ...chainDefs.map((d) => d.id).filter((id) => present.has(id))].map((s) => `<button type="button" data-f="${esc(s)}" class="${s ? '' : 'active'}">${s ? esc((chainDefs.find((d) => d.id === s) || {}).name || s) : '全部'}</button>`).join('');
+  $('#drawerBody').innerHTML = `
+    <div class="ch-verdict-box conf-${esc(c.confidence || 'none')}">${CH_CONF[c.confidence] || '<span class="badge lv-low bg-low">未见失陷迹象</span>'} ${esc(c.verdict)}</div>
+    <div class="ch-stages">${stages}</div>
+    ${path ? `<h4>关键路径 <small class="muted">每个阶段最有代表性的一步，突破成功的攻击者优先</small></h4><ol class="ch-path">${path}</ol>` : ''}
+    <h4>处置建议</h4><ol class="as-steps">${c.advice.map((s) => `<li>${esc(s)}</li>`).join('')}</ol>
+    <h4>时间线 <small class="muted">${num(c.steps_total)} 步${c.steps_total > c.steps.length ? `，显示更深阶段优先的 ${c.steps.length} 步` : ''}${c.dropped ? `；另有 ${num(c.dropped)} 次侦察命中只计入阶段统计` : ''}</small></h4>
+    <div class="seg ch-filter" id="chFilter">${stageBtns}</div>
+    <ul class="ch-steps" id="chSteps">${c.steps.map(chStepHTML).join('') || '<li class="empty">暂无</li>'}</ul>
+    ${sources ? `<h4>攻击来源 <small class="muted">${num(c.source_list.length)} 个，按推进到的阶段排序</small></h4>
+      <div class="table-wrap"><table class="table"><thead><tr><th>来源</th><th>归属地</th><th>推进到的阶段</th><th>等级</th><th>命中</th><th>时间</th></tr></thead><tbody>${sources}</tbody></table></div>` : ''}
+    <h4>资产标识</h4>
+    <div class="table-wrap"><table class="table"><thead><tr><th>标识</th><th>类型</th><th>命中</th><th>时间</th></tr></thead><tbody>${members}</tbody></table></div>
+    ${links ? `<h4>合并依据</h4><ul class="ch-links">${links}</ul>` : ''}`;
+}
+$('#drawerBody').addEventListener('click', (e) => {
+  if (!chainCur || !$('#chSteps')) return;
+  const f = e.target.closest('#chFilter [data-f]');
+  if (f) {
+    $$('#chFilter button').forEach((b) => b.classList.toggle('active', b === f));
+    $$('#chSteps .ch-step').forEach((li) => { li.hidden = !!f.dataset.f && !li.classList.contains('st-' + f.dataset.f); });
+    return;
+  }
+  const inc = e.target.closest('[data-inc]');
+  if (inc && typeof openIncident === 'function') { openIncident(+inc.dataset.inc); return; }
+  const al = e.target.closest('[data-alerts]');
+  if (al) {
+    const v = chainCur.steps[+al.dataset.alerts];
+    drillTo('alerts', { params: { ip: v.src }, native: { category: v.category }, label: `${chainCur.name} · ${v.stage_name} · ${v.src} · ${v.category}` });
+  }
+});
+
 const loaders = {
   overview: () => Promise.all([loadOverview(), loadTrend(), loadMap(), loadTopAttackers(), loadSituationAssess()]).catch(console.error),
   attackers: () => loadAttackers().catch(console.error),
   campaigns: () => loadCampaigns().catch(console.error),
+  chains: () => loadChains().catch(console.error),
   alerts: () => (alMode === 'history' ? loadHistory(false) : loadAlerts()).catch(console.error),
   surface: () => loadSurface().catch(console.error),
   assess: () => loadAssess().catch(console.error),

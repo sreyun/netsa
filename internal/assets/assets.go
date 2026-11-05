@@ -469,6 +469,46 @@ func (idx *index) byHost(h string) *Asset {
 type Match struct {
 	Asset *Asset
 	Vulns []*Vuln // 目标上未修复的漏洞
+	// Group 表示资产按网段或通配域名登记、事件目标只是落在其范围内，而不是精确登记的那一台主机或那一个站点
+	Group bool
+}
+
+// Ref 返回事件中使用的资产摘要。
+func (mt *Match) Ref() *model.AssetRef {
+	if mt == nil || mt.Asset == nil {
+		return nil
+	}
+	a := mt.Asset
+	return &model.AssetRef{Name: a.Name, Level: a.Importance, Owner: a.Owner, Group: mt.Group}
+}
+
+// exactly 判断资产是不是精确登记的这台主机或这个站点（而不是按网段 / 通配域名覆盖到的）。
+func (a *Asset) exactly(ip, host string) bool {
+	if ip != "" && a.prefix.IsValid() && a.prefix.IsSingleIP() {
+		if addr, err := netip.ParseAddr(ip); err == nil && addr.Unmap() == a.prefix.Addr() {
+			return true
+		}
+	}
+	return host != "" && contains(a.Hosts, normHost(host))
+}
+
+// Find 返回地址或站点域名对应的资产（资产攻击链路识别外连、横向的内网主机时使用），未登记时返回 nil。
+func (m *Manager) Find(ip, host string) *model.AssetRef {
+	if m == nil {
+		return nil
+	}
+	idx := m.idx.Load()
+	if len(idx.exact) == 0 && len(idx.nets) == 0 && len(idx.hosts) == 0 && len(idx.suffix) == 0 {
+		return nil
+	}
+	a := idx.byIP(ip)
+	if a == nil {
+		a = idx.byHost(host)
+	}
+	if a == nil {
+		return nil
+	}
+	return (&Match{Asset: a, Group: !a.exactly(ip, host)}).Ref()
 }
 
 // Lookup 返回事件目标（目的 IP、站点域名）对应的资产与未修复漏洞。未登记资产且没有漏洞时返回 nil。
@@ -482,7 +522,7 @@ func (m *Manager) Lookup(ev *model.Event) *Match {
 	}
 	if ev.Outbound { // 出站流量（外连）：内网发起方是资产，不关联漏洞
 		if a := idx.byIP(ev.SrcIP); a != nil {
-			return &Match{Asset: a}
+			return &Match{Asset: a, Group: !a.exactly(ev.SrcIP, "")}
 		}
 		return nil
 	}
@@ -507,7 +547,7 @@ func (m *Manager) Lookup(ev *model.Event) *Match {
 	if a == nil && len(vulns) == 0 {
 		return nil
 	}
-	return &Match{Asset: a, Vulns: vulns}
+	return &Match{Asset: a, Vulns: vulns, Group: a != nil && !a.exactly(ev.DstIP, host)}
 }
 
 // Correlate 判断命中与漏洞的关系：返回最相关的漏洞，exact 表示 CVE 精确一致。

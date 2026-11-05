@@ -113,6 +113,7 @@ type Behavior struct {
 	sites     map[string]*siteWin    // 站点 → 请求量窗口与基线（分布式 CC）
 	homes     map[string]*homeSize   // 站点 → 首页的响应大小（识别对不存在的路径返回首页的兜底页面）
 	dsts      map[dstKey]*dstWin     // 目的地址:端口 → 事件量窗口与基线（多源 DDoS）
+	devFloods map[string]devFlood    // 目的地址 → 设备最近报告的洪泛（behavior_devflood.go）
 	latest    time.Time              // 已处理事件的最新时间（排除未来时间的异常日志），作为窗口过期的基准
 	lastPrune time.Time              // 上次清理的系统时间
 }
@@ -165,6 +166,12 @@ func (b *Behavior) ObserveHits(ev *model.Event, ruleHits []model.Hit) []model.Hi
 	if now.Sub(b.lastPrune) > 30*time.Second || len(b.web)+len(b.fw) >= maxWindows || len(b.beacons) >= 200000 {
 		b.prune(b.latest)
 		b.lastPrune = now
+	}
+	if ev.Kind == model.KindFirewall {
+		b.noteDeviceFlood(ev, ruleHits)
+	}
+	if ev.SrcIP == "" { // 设备只记录了目的地址的多源洪泛：没有来源可统计，只用于印证
+		return nil
 	}
 	if egress {
 		return b.observeBeacon(ev)
@@ -712,6 +719,7 @@ func (b *Behavior) Size() int {
 
 func (b *Behavior) prune(now time.Time) {
 	b.pruneSurge(now)
+	b.pruneDevFloods(now)
 	for k, w := range b.logins {
 		if now.Sub(w.start) > 2*b.th.DistWindow || w.start.Sub(now) > 2*b.th.DistWindow {
 			delete(b.logins, k)

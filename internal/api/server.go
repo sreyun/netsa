@@ -24,6 +24,7 @@ import (
 	"netsa/internal/assets"
 	"netsa/internal/audit"
 	"netsa/internal/auth"
+	"netsa/internal/authscan"
 	"netsa/internal/block"
 	"netsa/internal/config"
 	"netsa/internal/detect"
@@ -77,6 +78,7 @@ type Server struct {
 	Auth      *auth.Manager      // 为 nil 表示未开启登录
 	Archive   *archive.Archive   // 为 nil 表示未启用告警归档
 	Suppress  *suppress.Manager  // 误报抑制规则
+	AuthScan  *authscan.Manager  // 授权扫描登记
 	RawLog    *rawlog.Store      // 原始日志留存，为 nil 表示未启用
 	Assets    *assets.Manager    // 资产与漏洞
 	Exposure  *exposure.Manager  // 对外发布服务清单（DNAT 映射），为 nil 表示未启用
@@ -135,6 +137,8 @@ func (s *Server) Handler() http.Handler {
 	}))
 	mux.HandleFunc("GET /api/attackers", cached(time.Second, s.attackers))
 	mux.HandleFunc("GET /api/campaigns", func(w http.ResponseWriter, r *http.Request) { writeJSON(w, s.Store.Campaigns()) })
+	mux.HandleFunc("GET /api/chains", cached(2*time.Second, s.chainList))
+	mux.HandleFunc("GET /api/chains/detail", cached(2*time.Second, s.chainDetail))
 	mux.HandleFunc("GET /api/ip/{ip}", cached(2*time.Second, s.ipDetail)) // 含同源关联分析，短时缓存避免重复全量比对
 	mux.HandleFunc("GET /api/ip/{ip}/rdap", s.rdap)
 	mux.HandleFunc("GET /api/alerts", cached(time.Second, s.alerts))
@@ -244,6 +248,10 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/suppressions", s.suppressions)
 	mux.HandleFunc("POST /api/suppressions", s.suppressionCreate)
 	mux.HandleFunc("DELETE /api/suppressions/{id}", s.suppressionDelete)
+	mux.HandleFunc("GET /api/authscans", s.authScans)
+	mux.HandleFunc("POST /api/authscans", s.authScanCreate)
+	mux.HandleFunc("POST /api/authscans/{id}/end", s.authScanEnd)
+	mux.HandleFunc("DELETE /api/authscans/{id}", s.authScanDelete)
 
 	mux.HandleFunc("GET /api/alert/robots", s.alertInfo)
 	mux.HandleFunc("POST /api/alert/robots", s.robotCreate)
@@ -386,7 +394,7 @@ func (s *Server) meta(w http.ResponseWriter, r *http.Request) {
 		"proxies":             s.proxyPeers(),
 		"exposure_reach":      s.Exposure.ReachCheck(), "exposure_unreached": s.Exposure.Unreached(), "exposure_learned": s.Exposure.LearnedCount(), "learn": s.Learn != nil, "ai": s.AI.Status(), "exposure_policies": topPolicies(s.Exposure.Policies(), 5),
 		"require_2fa": s.Cfg.Server.Require2FA, "rawlog": s.RawLog != nil, "assets": s.Assets != nil, "audit": s.Trail != nil,
-		"syslog": s.Cfg.Syslog.Enabled, "suppress": s.Suppress != nil, "auth": s.Auth != nil, "block": s.Block != nil,
+		"syslog": s.Cfg.Syslog.Enabled, "suppress": s.Suppress != nil, "authscan_active": s.AuthScan.Active(), "auth": s.Auth != nil, "block": s.Block != nil,
 	})
 }
 

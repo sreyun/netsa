@@ -74,3 +74,13 @@ func (b bitset) clear() {
 		b[i] = 0
 	}
 }
+
+// intersects 判断两个位图是否有共同的位。
+func (b bitset) intersects(o bitset) bool {
+	for i := range min(len(b), len(o)) {
+		if b[i]&o[i] != 0 {
+			return true
+		}
+	}
+	return false
+}
