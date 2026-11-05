@@ -1050,8 +1050,8 @@ async function loadLearn() {
     // 不需要人工结论、直接从原始日志与 AI 研判学到的内容
     ['日志自动学习', num(nets.length + atk.auto_total + atk.campaigns.length + atk.learned_rules.length + prof.mature + products),
       `内网网段 ${num(nets.length)} · 攻击源 ${num(atk.auto_total)} · 攻击活动 ${num(atk.campaigns.length)} · 观察规则 ${num(atk.learned_rules.length)} · 参数 ${num(prof.mature)} · 站点产品 ${num(products)}`],
-    ['自动生效', num(r.applied.rule + r.applied.target + r.applied.escalated),
-      enabled ? `下调 ${num(r.applied.rule + r.applied.target)} · 升级 ${num(r.applied.escalated)} 次（${esc(fmtShort(r.applied.since))} 启动以来）` : '未启用自学习'],
+    ['自动生效', num(r.applied.rule + r.applied.target + (r.applied.feed || 0) + r.applied.escalated),
+      enabled ? `下调 ${num(r.applied.rule + r.applied.target + (r.applied.feed || 0))} · 升级 ${num(r.applied.escalated)} 次（${esc(fmtShort(r.applied.since))} 启动以来）` : '未启用自学习'],
     ['待确认建议', num(r.suggestions.length), '采纳后创建误报抑制'],
     ['平台安全异常', num(r.anomalies.length), r.options.sentinel ? '最近 100 条' : '已关闭'],
     ['合规符合率', lastComp ? Math.round(lastComp.rate * 100) + '%' : '-', lastComp ? `不符合 ${num(lastComp.fail)} 项 · ${esc(fmtShort(lastComp.time))}` : (r.options.compliance ? '启动后约 2 分钟首次自检' : '已关闭')],
@@ -1089,7 +1089,8 @@ async function loadLearn() {
   // 从正常流量学到的参数取值与站点产品
   const SHAPE = { text: '普通文字', strict: '数字 / 编号 / 单个词' };
   $('#lnProfile').innerHTML = `<div class="ln-policy">正在统计 ${num(prof.params)} 个参数，已生效 ${num(prof.mature)} 个（普通文字 ${num(prof.free_text)} · 数字 / 编号 ${num(prof.strict)}）`
-      + ` · 本次启动以来：按普通文字降为低危 ${num(prof.weak)} 次 · 取值异常 ${num(prof.anomaly)} 次 · 产品不存在判为不适用 ${num(prof.inapplicable)} 次</div>`
+      + ` · 本次启动以来：按普通文字降为低危 ${num(prof.weak)} 次 · 取值异常 ${num(prof.anomaly)} 次 · 产品不存在判为不适用 ${num(prof.inapplicable)} 次 · 业务接口降为低危 ${num(prof.business || 0)} 次`
+      + ` · 内置国产 OA / 中间件漏洞接口签名 ${num(prof.vuln_sigs || 0)} 条</div>`
     + `<h4>站点与识别出的产品 <small class="muted">共 ${num(prof.site_total)} 个站点；正常访问满 300 次、来自 20 个以上网段后参与判断</small></h4>`
     + (prof.sites.length
       ? `<div class="scroll"><table class="table"><thead><tr><th>站点</th><th>正常访问</th><th>来源网段</th><th>识别出的产品 / 开发语言 / 前端框架</th><th>状态</th></tr></thead><tbody>${prof.sites.map((s) => `<tr>
@@ -1101,7 +1102,13 @@ async function loadLearn() {
     + (prof.samples.length
       ? `<div class="scroll"><table class="table"><thead><tr><th>站点 路径?参数</th><th>平时的取值</th><th>正常访问</th><th>来源网段</th></tr></thead><tbody>${prof.samples.map((p) => `<tr>
           <td class="mono">${esc(p.key)}</td><td class="nowrap">${esc(SHAPE[p.shape] || p.shape)}</td><td class="num">${num(p.n)}</td><td class="num">${num(p.nets)}${p.nets >= 32 ? '+' : ''}</td></tr>`).join('')}</tbody></table></div>`
-      : atkEmpty('暂无。同一个参数有 200 次以上正常取值、来自 20 个以上网段后生效。'));
+      : atkEmpty('暂无。同一个参数有 200 次以上正常取值、来自 20 个以上网段后生效。'))
+    + `<h4>已认定的业务接口 <small class="muted">存在已知漏洞、但站点正常业务在用的接口，共 ${num(prof.endpoint_total || 0)} 个；只访问接口、没有攻击载荷的请求降为低危</small></h4>`
+    + ((prof.endpoints || []).length
+      ? `<div class="scroll"><table class="table"><thead><tr><th>站点</th><th>接口</th><th>来源网段</th><th>访问</th><th>最近</th></tr></thead><tbody>${prof.endpoints.map((u) => `<tr>
+          <td class="mono nowrap">${esc(u.host)}</td><td>${esc(u.name)}<div class="mono muted">${esc(u.rule)}</div></td>
+          <td class="num">${num(u.nets)}${u.nets >= 16 ? '+' : ''}</td><td class="num">${num(u.hits)}</td><td class="nowrap muted">${esc(fmtShort(u.last))}</td></tr>`).join('')}</tbody></table></div>`
+      : atkEmpty('暂无。同一个漏洞接口被 8 个以上网段、此前没有攻击记录的访客访问过，且请求中没有攻击载荷时认定。'));
   $('#lnAnoms').innerHTML = r.anomalies.length
     ? `<table class="table"><tbody>${r.anomalies.map((a) => `<tr><td class="nowrap muted">${esc(fmtShort(a.time))}</td><td class="nowrap">${badge(a.severity)} ${esc(LN_ANOM[a.kind] || a.kind)}</td>
         <td><b>${esc(a.title)}</b><div class="muted">${esc(a.detail)}</div></td></tr>`).join('')}</tbody></table>`
@@ -1119,6 +1126,10 @@ async function loadLearn() {
       <td class="mono">${esc(s.rule)}</td><td>${num(s.tp)}</td><td>${num(s.fp)}</td><td>${pct(s)}</td>
       <td>${s.pinned ? '<span class="chip">已锁定</span>' : s.calibrated ? '<span class="lv-medium">已自动下调一级</span>' : '<span class="muted">正常</span>'}</td>
       <td>${isAdmin() ? `<button type="button" class="btn" data-ln="${s.pinned ? 'unpin' : 'pin'}" data-rule="${esc(s.rule)}">${s.pinned ? '解锁' : '锁定'}</button>` : ''}</td></tr>`).join('') || empty(6, '暂无研判样本：在“事件处置”中把事件处置为已处置或误报后开始学习')}</tbody>`;
+  $('#lnFeeds').innerHTML = `<thead><tr><th>情报源</th><th>确认攻击</th><th>误报</th><th>准确率</th><th>状态</th><th></th></tr></thead><tbody>${(r.feeds || []).map((f) => `<tr>
+      <td>${esc(f.feed)}</td><td>${num(f.tp)}</td><td>${num(f.fp)}</td><td>${pct(f)}</td>
+      <td>${f.pinned ? '<span class="chip">已锁定</span>' : f.calibrated ? '<span class="lv-medium">已自动下调一级</span>' : '<span class="muted">正常</span>'}</td>
+      <td>${isAdmin() ? `<button type="button" class="btn" data-ln="${f.pinned ? 'unpin' : 'pin'}" data-rule="${esc('feed:' + f.feed)}">${f.pinned ? '解锁' : '锁定'}</button>` : ''}</td></tr>`).join('') || empty(6, '暂无：命中威胁情报的事件被处置为已处置或误报后，按情报源统计')}</tbody>`;
   $('#lnCtxIntro').textContent = r.options.calibrate
     ? `规则整体准确率正常、只在个别目标上被研判为误报 ≥ ${r.options.ctx_min_fp} 次且从未确认为攻击时，只下调该目标上的命中一级（最多低于攻击分类底线一级，利用成功仍为严重）；该目标出现确认的攻击或锁定规则后自动恢复`
     : '已关闭（learn.calibrate: false）';
@@ -1161,7 +1172,7 @@ $('#tab-learn').addEventListener('click', (e) => {
   if (!b) return;
   const act = b.dataset.ln;
   if (act === 'apply' && !confirm('采纳后将创建一条误报抑制规则，之后符合条件的命中不再告警。确定采纳？')) return;
-  if (act === 'pin' && !confirm('锁定后该规则不参与自动校准（已下调的立即恢复原等级）。确定锁定？')) return;
+  if (act === 'pin' && !confirm(`锁定后${(b.dataset.rule || '').startsWith('feed:') ? '该情报源' : '该规则'}不参与自动校准（已下调的立即恢复原等级）。确定锁定？`)) return;
   const url = b.dataset.id ? `/api/learn/suggestions/${encodeURIComponent(b.dataset.id)}/${act}` : `/api/learn/rules/${encodeURIComponent(b.dataset.rule)}/${act}`;
   ntBusy(b, async () => {
     try { await api(url, 'POST', {}); } catch (err) { alert(err.message); }
@@ -1361,7 +1372,8 @@ async function loadRuleOps() {
     row('处置剧本', s.playbooks.enabled ? `${num(s.playbooks.count)} 个` : '未配置', s.playbooks.enabled ? `已执行 ${num(s.playbooks.runs)} 次，工单系统 ${num(s.playbooks.tickets)} 个` : ''),
   ];
   for (const f of s.forward || []) items.push(row(`SIEM 转发：${f.name}`, f.connected ? '已连接' : '未连接', `${f.protocol} ${f.address} ${f.format}，已发送 ${num(f.sent)}，丢弃 ${num(f.dropped)}${f.last_error ? `；最近错误：${f.last_error}` : ''}`));
-  for (const f of s.intel || []) items.push(row(`情报源：${f.name}`, f.last_error ? '更新失败' : (f.updated && !zero(f.updated) ? '正常' : '等待更新'), `${f.type}，${num(f.addrs)} 个 IP、${num(f.nets)} 个网段${f.last_error ? `；最近错误：${f.last_error}` : ''}`));
+  const KIND = { c2: '远控', malware: '恶意软件投递', phishing: '钓鱼', mining: '矿池', attacker: '攻击来源' };
+  for (const f of s.intel || []) items.push(row(`情报源：${f.name}`, f.last_error ? '更新失败' : (f.updated && !zero(f.updated) ? '正常' : '等待更新'), `${f.type}${f.kind ? ` · ${KIND[f.kind] || f.kind}` : ''}，${num(f.addrs)} 个 IP、${num(f.nets)} 个网段、${num(f.domains || 0)} 个域名${f.skipped ? `（丢弃 ${num(f.skipped)} 条不安全的条目）` : ''}${f.last_error ? `；最近错误：${f.last_error}` : ''}`));
   $('#intTable').innerHTML = `<thead><tr><th>对接项</th><th>状态</th><th>详情</th></tr></thead><tbody>${items.join('')}</tbody>`;
 }
 const ruleOps = { rules: [] };

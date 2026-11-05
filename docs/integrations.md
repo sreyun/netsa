@@ -160,9 +160,11 @@ playbooks:
 
 ```yaml
 intel:
+  domain_allowlist: ["example.com"]   # 本单位的域名：域名情报中等于或位于其下的条目不生效
   feeds:
     - name: 行业情报
       type: taxii      # stix / taxii / misp / text
+      kind: c2         # 情报类别，见下表；留空为通用黑名单
       url: https://taxii.example.com/api/collections/abc/objects/
       token_env: NETSA_TAXII_TOKEN
       interval: 1h
@@ -171,10 +173,39 @@ intel:
       type: misp
       url: https://misp.example.com
       token_env: NETSA_MISP_KEY
+    - name: 恶意域名
+      type: text
+      kind: malware
+      url: https://feeds.example.com/domains.txt
+      token_env: NETSA_FEED_KEY
+      token_header: Auth-Key   # 密钥放在哪个请求头；不填为 Authorization: Bearer
 ```
 
-- **支持的内容**：STIX 2.x 指标模式和 `ipv4-addr` / `ipv6-addr` 对象中的 IP；MISP 中 `to_ids` 的 `ip-src`、`ip-dst`；`text` 是每行一个 IP 或网段。域名和哈希类指标目前不使用。
-- **防投毒**：内网和保留地址、短于 /8（IPv6 /32）的网段都丢弃，页面显示丢弃数量。一条错误的 `0.0.0.0/0` 不会把所有流量都标记为恶意。
+`configs/docker.yaml` 默认启用两份免费、无需注册、持续更新的名单：Feodo Tracker 远控地址（`kind: c2`）与 Spamhaus DROP 被犯罪团伙控制的网段（`kind: attacker`），另有 blocklist.de 的示例。隔离网络把 `feeds` 改为 `[]`。abuse.ch 的 URLhaus、ThreatFox 已停止匿名下载，需要申请密钥，并设置 `token_header: Auth-Key`；AbuseIPDB 为 `token_header: Key`。
+
+- **支持的内容**：
+  - STIX 2.x：指标模式中的 IP、域名、URL，以及 `ipv4-addr`、`ipv6-addr`、`domain-name`、`url` 对象；
+  - MISP：`to_ids` 的 `ip-src`、`ip-dst`、`domain`、`hostname`、`domain|ip`、`url`；
+  - `text` 与本地的 `blocklists` 文件：每行一个 IP、网段、域名或 URL，也支持 hosts 文件格式（`0.0.0.0 evil.example`），`#` 与 `;` 之后为注释。
+  - 哈希类指标不使用：日志里没有文件哈希。
+- **情报类别**（`kind`）决定命中的等级。同时命中多个情报时，按最严重的类别：
+
+  | 类别 | 外部来源访问 | 内网主机连接该地址 | 内网主机解析该域名 |
+  |---|---|---|---|
+  | `c2` 远控 / 僵尸网络控制端 | 高危 | 失陷迹象，连接已建立为严重 | 失陷迹象，高危 |
+  | 留空（通用黑名单） | 高危 | 同上 | 中危 |
+  | `malware` 恶意软件投递 | 高危 | 高危（被拦截中危） | 中危 |
+  | `mining` 矿池 | 低危 | 挖矿，高危 | 挖矿，高危 |
+  | `phishing` 钓鱼 | 低危 | 中危（被拦截低危） | 中危 |
+  | `attacker` 扫描、暴力破解来源 | 中危（被拦截、未到达服务为低危） | 中危（被拦截低危） | 低危 |
+
+  外部来源访问被防火墙拦截、或会话证据表明没有到达服务时降一级；域名没有解析成功（NXDOMAIN）时降一级。只命中 Tor 出口节点时最高中危。
+- **域名情报**：与 DNS 日志中内网主机的查询比对，情报标记了 `evil.example` 时 `a.evil.example` 同样命中。情报源常把被滥用的公共平台本身列进来，这类条目一律丢弃，页面显示丢弃数量：
+  - 平台本身与其基础设施子域名（`raw.githubusercontent.com`、网盘、CDN）；平台上属于个人的子域名（`xxx.github.io`、`xxx.workers.dev`）照常生效；
+  - 只有一级的名称、内网后缀（`.local`、`.lan`、`.internal`）、公共后缀本身（`com.cn`）；
+  - `domain_allowlist` 中本单位的域名。
+- **防投毒**：在线情报中的内网和保留地址、短于 /8（IPv6 /32）的网段都丢弃，页面显示丢弃数量。一条错误的 `0.0.0.0/0` 不会把所有流量都标记为恶意。本地 `blocklists` 文件由管理员维护，IP 按原样生效。
+- **准确率**：每个情报源的准确率按分析员的处置结论自动统计，长期误报的情报源自动下调，见[自学习](self-learning.md)。
 - **可用性**：拉取失败时继续使用旧数据；结果缓存在状态目录，重启后立即可用。STIX 中已撤销、已过期的指标不生效。
 
 ## 规则运营

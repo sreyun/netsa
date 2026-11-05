@@ -9,6 +9,7 @@ import (
 
 	"netsa/internal/geo"
 	"netsa/internal/model"
+	"netsa/internal/risk"
 )
 
 // c2Hit 检测内网主机（或本机出站流量）连接威胁情报地址的行为。放行的连接为严重，被拦截的连接为高危
@@ -34,6 +35,20 @@ func (s *Store) c2Hit(ev *model.Event) *model.Hit {
 	if len(names) == 1 && names[0] == "Tor出口节点" {
 		sev = min(sev, model.SevMedium)
 	}
+	// 按情报类别定级：远控与通用黑名单维持原样；矿池按挖矿处置；恶意软件投递、钓鱼、攻击来源不足以判定失陷
+	name, cat := "外连威胁情报地址（疑似失陷）", CatC2
+	blocked := res != model.ResultAllowed
+	switch s.intelKind(names) {
+	case "mining":
+		name, cat, sev = "外连情报标记的矿池地址（疑似挖矿）", CatMining, model.SevHigh
+	case "malware":
+		name, cat, sev = "外连情报标记的恶意软件投递地址", CatMalDomain, pick(blocked, model.SevMedium, model.SevHigh)
+	case "phishing":
+		name, cat, sev = "外连情报标记的钓鱼网站", CatPhishing, pick(blocked, model.SevLow, model.SevMedium)
+	case "attacker":
+		// 不归入恶意外连：攻击来源名单不说明主机失陷（恶意外连的分类底线为中危，被拦截时也会被抬回中危）
+		name, cat, sev = "外连已知的攻击来源地址", "威胁情报", pick(blocked, model.SevLow, model.SevMedium)
+	}
 	dst := ev.DstIP
 	if ev.DstPort > 0 {
 		dst += fmt.Sprintf(":%d", ev.DstPort)
@@ -41,8 +56,58 @@ func (s *Store) c2Hit(ev *model.Event) *model.Hit {
 	if ev.Proto != "" {
 		dst += "/" + ev.Proto
 	}
-	return &model.Hit{RuleID: "c2-egress", Name: "外连威胁情报地址（疑似失陷）", Category: CatC2, Severity: sev, Phase: model.PhasePersistence,
-		Result: res, Evidence: ev.SrcIP + " → " + dst + "（" + act + "），命中 " + strings.Join(names, "、")}
+	return &model.Hit{RuleID: "c2-egress", Name: name, Category: cat, Severity: sev, Phase: model.PhasePersistence,
+		Result: res, Evidence: ev.SrcIP + " → " + dst + "（" + act + "），命中 " + strings.Join(names, "、"), Feeds: feedNames(names)}
+}
+
+// calibrated 让状态库生成的情报命中经过自学习校准与统一定级（与流水线中的命中一致）。
+func (s *Store) calibrated(ev *model.Event, h model.Hit) model.Hit {
+	if s.Calibrate != nil {
+		if out := s.Calibrate(ev, []model.Hit{h}); len(out) == 1 {
+			h = out[0]
+		}
+	}
+	risk.Finalize(&h)
+	return h
+}
+
+func pick(cond bool, a, b model.Severity) model.Severity {
+	if cond {
+		return a
+	}
+	return b
+}
+
+// intelRank 是情报类别的严重程度：同时命中多个情报时按最严重的类别处理。
+var intelRank = map[string]int{"c2": 5, "mining": 4, "malware": 3, "": 2, "phishing": 1, "attacker": 0}
+
+// intelKind 返回命中的情报中最严重的类别（Tor 出口节点不参与，单独处理）。
+func (s *Store) intelKind(names []string) string {
+	best, rank := "", -1
+	for _, n := range names {
+		if n == "Tor出口节点" {
+			continue
+		}
+		k := ""
+		if s.IntelKind != nil {
+			k = s.IntelKind(n)
+		}
+		if r, ok := intelRank[k]; ok && r > rank {
+			best, rank = k, r
+		}
+	}
+	return best
+}
+
+// feedNames 是参与准确率统计的情报源：Tor 出口列表是事实性的名单，不按研判结论统计。
+func feedNames(names []string) []string {
+	var out []string
+	for _, n := range names {
+		if n != "Tor出口节点" {
+			out = append(out, n)
+		}
+	}
+	return out
 }
 
 // Compromised 是一个疑似失陷的资产。
@@ -255,6 +320,12 @@ func (s *Store) hostFinding(ev *model.Event, hits []model.Hit) {
 			s.surf.finding("dns-oob:"+ev.SrcIP, "内网主机解析带外探测平台域名（漏洞可能已被利用）", "失陷迹象", h.Severity, ev.SrcIP, h.Evidence,
 				"盲打类漏洞（RCE、SSRF、Log4j、反序列化）被触发时，目标会解析攻击者的 DNSLog 域名：排查该主机近期受到的攻击与对外服务的中间件版本，"+
 					"检查是否有新增进程、文件与外连；在出口 DNS 拦截该类域名", ev.Host, ev.Time)
+		case "intel-dns":
+			// 远控、矿池域名是失陷迹象；恶意软件投递、钓鱼域名说明有人访问过，只告警不列为失陷
+			if h.Severity >= model.SevHigh {
+				s.surf.finding("intel-dns:"+ev.SrcIP, "内网主机解析情报标记的远控 / 矿池域名", "失陷迹象", h.Severity, ev.SrcIP, h.Evidence,
+					"排查该主机上发起这些查询的进程、计划任务与自启动项，使用终端安全软件查杀；在出口 DNS 与防火墙拦截该域名", ev.Host, ev.Time)
+			}
 		case "dns-mining":
 			s.surf.finding("dns-mining:"+ev.SrcIP, "内网主机解析矿池域名（疑似挖矿木马）", "失陷迹象", h.Severity, ev.SrcIP, h.Evidence,
 				"排查 CPU 占用异常的进程、计划任务与自启动项，清除挖矿程序；在出口 DNS 与防火墙封禁矿池域名与端口", ev.Host, ev.Time)

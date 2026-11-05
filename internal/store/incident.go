@@ -84,6 +84,7 @@ type Incident struct {
 	RuleAlerts map[string]int `json:"rule_alerts"` // 规则 → 告警条数
 	Targets    map[string]int `json:"targets"`
 	Assets     map[string]int `json:"assets,omitempty"`      // 涉及的资产
+	Feeds      map[string]int `json:"feeds,omitempty"`       // 命中的威胁情报源 → 次数（自学习据此统计情报源的准确率）
 	AssetLevel string         `json:"asset_level,omitempty"` // 涉及资产的最高重要性
 	FirstSeen  time.Time      `json:"first_seen"`            // 首条告警的日志时间
 	LastSeen   time.Time      `json:"last_seen"`
@@ -274,6 +275,14 @@ type incidentHit struct {
 	proven                                bool
 	asset                                 *model.AssetRef
 	at                                    time.Time
+	feeds                                 []string
+}
+
+// addFeeds 累计事件命中的情报源。
+func (i *Incident) addFeeds(feeds []string) {
+	for _, f := range feeds {
+		incBounded(&i.Feeds, f, 20)
+	}
 }
 
 // muteIncidentLocked 记录一次「命中但未生成告警」的重复命中（调用方持写锁）。
@@ -289,6 +298,7 @@ func (s *Store) muteIncidentLocked(ip string, h incidentHit) {
 	}
 	inc.Hits++
 	inc.Muted++
+	inc.addFeeds(h.feeds)
 	incBounded(&inc.Rules, h.rule, maxIncRules)
 	incBounded(&inc.Targets, h.target, maxIncTargets)
 	incBounded(&inc.Categories, h.category, 50)
@@ -464,7 +474,8 @@ type IncidentDetail struct {
 	Notes     []IncidentNote `json:"notes_list"`
 	Rules     []KV           `json:"rules"`
 	Targets   []KV           `json:"targets"`
-	AlertList []*model.Alert `json:"alert_list"` // 事件中仍保留在内存中的告警（最近 200 条）
+	Feeds     []string       `json:"feeds,omitempty"` // 命中的威胁情报源
+	AlertList []*model.Alert `json:"alert_list"`      // 事件中仍保留在内存中的告警（最近 200 条）
 	SLA       string         `json:"sla"`
 }
 
@@ -492,6 +503,10 @@ func (s *Store) Incident(id uint64) *IncidentDetail {
 	}
 	sort.Slice(d.Rules, func(a, b int) bool { return d.Rules[a].Value > d.Rules[b].Value })
 	d.Targets = topN(intMap(i.Targets), 10, ident)
+	for f := range i.Feeds {
+		d.Feeds = append(d.Feeds, f)
+	}
+	sort.Strings(d.Feeds)
 	n := len(s.alerts)
 	for k := 0; k < n && len(d.AlertList) < 200; k++ {
 		idx := (s.alertHead - 1 - k + 2*n) % n

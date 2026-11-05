@@ -25,6 +25,8 @@
 - **零依赖，一键部署**：Go 单二进制，前端、世界与中国省市地图、离线定位库全部内置，不需要 Elasticsearch、Kafka 或数据库。Docker 镜像同时提供 amd64 与 arm64，关闭在线溯源后可在隔离网络中完全离线运行。
 - **日志不用先适配**：自动识别 40 余种格式，覆盖 nginx / Apache / IIS / Caddy、iptables、华为、H3C、FortiGate、Palo Alto、Suricata、Linux 与 Windows 认证、主流 DNS，以及 Docker、Filebeat 等采集器的包装格式。
 - **检测准，告警可信**：79 条特征规则（部分改编自 OWASP CRS）、libinjection 语法分析加行为检测，用响应、会话证据和资产漏洞复核“表面成功”。等级由统一裁决决定：已拦截的攻击不会被标成“严重”，真正利用成功的不会被漏掉。
+- **认得国产 OA 和中间件**：内置 254 条漏洞接口签名，覆盖致远、泛微、用友、通达、蓝凌、万户 OA，帆软、亿赛通、若依、Nacos，以及深信服、锐捷、海康、大华等 41 个国产产品，告警直接注明产品与 CVE / CNVD 编号；正常业务在用的漏洞接口自动学习，不会一直刷告警。
+- **情报在准不在多**：IP 与域名情报（STIX / TAXII / MISP / 文本列表），按远控、恶意软件、钓鱼、矿池、攻击来源分类定级，自动过滤被滥用的公共平台；每个情报源的准确率按分析员结论自动统计，长期误报的自动降级。
 - **防火墙与 Web 日志联动**：Web 攻击之后内网主机连接攻击者、或连接攻击载荷里写着的回连地址，直接判为失陷迹象；载荷中的地址被连接即证明载荷已被执行。
 - **能溯源到城市，能关联到团伙**：还原 CDN 与代理背后的真实 IP，识别 XFF 伪造和绕过 CDN 直连；多源定位交叉比对并给出置信度；同源关联分析找出疑似同一攻击者的其他 IP。
 - **越用越准**：从分析员的处置结论中学习，反复误报的规则和接口自动降级，已确认的攻击者再次出现自动升级；不需要人工整理白名单，自动从正常流量学习每个参数平时的取值、被动识别每个站点使用的产品与前端框架，搜索框里的普通文字、站点上根本不存在的产品的漏洞探测不再刷出高危。AI 研判同时支持 OpenAI 与 Anthropic 接口，内网 vLLM、云端模型都能接入，自动适配模型差异，并用分析员的结论评估模型可信度。
@@ -82,14 +84,14 @@ go build -o bin/netsa ./cmd/netsa
 | 模块 | 能力 |
 |---|---|
 | [日志采集](docs/log-sources.md) | 实时跟踪文件（通配符、logrotate 轮转）、批量分析（含 `.gz`）、Syslog UDP / TCP / TLS（可双向认证）；发送端识别、白名单、限速与断流告警 |
-| [攻击检测](docs/detection.md) | SQL 注入、XSS、命令执行、Log4Shell、SSRF、XXE、反序列化、WebShell、已知漏洞利用等特征规则，部分命令、代码、Java 类规则改编自 OWASP CRS；[libinjection 语法分析](docs/detection.md#语法分析libinjection)复核注入命中并补上正则漏掉的变形；CC、暴力破解、撞库、接口遍历、端口扫描等行为检测；多轮解码对抗常见绕过 |
+| [攻击检测](docs/detection.md) | SQL 注入、XSS、命令执行、Log4Shell、SSRF、XXE、反序列化、WebShell、已知漏洞利用等特征规则，部分命令、代码、Java 类规则改编自 OWASP CRS；[libinjection 语法分析](docs/detection.md#语法分析libinjection)复核注入命中并补上正则漏掉的变形；[国产 OA、中间件漏洞接口签名](docs/detection.md#国产-oa中间件漏洞接口签名)（254 条，41 个产品）；CC、暴力破解、撞库、接口遍历、端口扫描等行为检测；多轮解码对抗常见绕过 |
 | [结果研判](docs/detection.md#研判复核用证据排除表面成功) | 按响应与会话证据区分已拦截、失败、未拦截、疑似成功；排除单页应用兜底页、统一错误页、未到达服务的“放行”等表面现象 |
-| [主机与 DNS 检测](docs/log-sources.md#主机认证日志与-dns-日志) | SSH / RDP / VPN 暴力破解与破解成功、密码喷洒、日志被清除、新建账号与提权；DNSLog 带外回连、DNS 隧道、DGA、矿池域名 |
+| [主机与 DNS 检测](docs/log-sources.md#主机认证日志与-dns-日志) | SSH / RDP / VPN 暴力破解与破解成功、密码喷洒、日志被清除、新建账号与提权；DNSLog 带外回连、DNS 隧道、DGA、矿池域名，以及情报标记的远控、恶意软件、钓鱼域名 |
 | [攻击源溯源](docs/traceability.md) | 融合 ip2region、MaxMind、ip-api、rDNS、RDAP / WHOIS，支持内网自定义网段定位；同源关联按网段、工具指纹、攻击手法找出疑似同一团伙 |
 | [态势大屏](docs/deployment.md#演示环境) | 世界 / 中国双视图攻击地图，可下钻到省和地市；实时飞线与告警推送；KPI、趋势、分布图均可点击下钻到攻击源或告警 |
 | [攻击面分析](docs/log-sources.md#未做-dnat-映射的端口探测) | 梳理对外服务，发现源码、密钥、备份泄露与管理接口暴露；结合 DNAT 映射与防火墙会话证据，过滤打不到任何服务的背景扫描 |
 | [安全评估与失陷研判](docs/detection.md#安全评估与失陷研判) | 七个维度打分并给出 A~E 总评与 P0~P3 处置建议；内网主机外连情报地址、C2 心跳检测；[防火墙与 Web 日志联动](docs/detection.md#防火墙与-web-日志联动被攻击后回连)发现被攻击后回连攻击者的主机；MITRE ATT&CK 矩阵 |
-| [自学习与 AI 研判](docs/self-learning.md) | 规则级与目标级自动校准、确认攻击源复现升级、学习窗口，策略可在页面调整；从日志自动学习内网网段、攻击源、攻击活动、[参数正常取值与站点产品](docs/self-learning.md#参数的正常取值与站点产品)；AI 研判支持 OpenAI / Anthropic 接口与 vLLM，自动适配模型差异，附带本单位相似案例，并统计模型与分析员结论的一致率 |
+| [自学习与 AI 研判](docs/self-learning.md) | 规则级、目标级与威胁情报源准确率自动校准、确认攻击源复现升级、学习窗口，策略可在页面调整；从日志自动学习内网网段、攻击源、攻击活动、[参数正常取值与站点产品](docs/self-learning.md#参数的正常取值与站点产品)；AI 研判支持 OpenAI / Anthropic 接口与 vLLM，自动适配模型差异，附带本单位相似案例，并统计模型与分析员结论的一致率 |
 | [事件处置与推送](docs/operations.md#事件处置与误报抑制) | 告警自动聚合为事件，支持指派、处置时限与超时提醒；误报抑制；[钉钉 / 企业微信 / 飞书推送](docs/operations.md#告警推送钉钉--企业微信--飞书)，去重、合并、限速；导出 nginx、iptables、ipset 等封禁列表 |
 | [留存、合规与审计](docs/operations.md#原始日志留存与检索) | 原始日志按小时压缩留存，哈希链防篡改；[PostgreSQL 长期归档](docs/operations.md#告警归档可选postgresql)（可选）；周报月报、等保 2.0 自查；[三种角色、双因素认证与防篡改审计链](docs/operations.md#登录账号与审计)；Prometheus 指标 |
 
@@ -153,7 +155,7 @@ go build -o bin/netsa ./cmd/netsa
 | [安全运营](docs/operations.md) | 事件处置、告警推送、原始日志、资产漏洞、报表合规、账号审计、监控指标、告警归档 |
 | [配置参考](docs/configuration.md) | 常用配置项与运行注意事项 |
 | [API](docs/api.md) | REST 接口一览 |
-| [对接外部系统](docs/integrations.md) | LDAP / OIDC 单点登录、SIEM 转发、联动封禁、工单与处置剧本、STIX / TAXII / MISP 情报、Sigma 与签名规则包 |
+| [对接外部系统](docs/integrations.md) | LDAP / OIDC 单点登录、SIEM 转发、联动封禁、工单与处置剧本、STIX / TAXII / MISP 与文本情报（IP、域名，情报类别）、Sigma 与签名规则包 |
 | [开发与发布](docs/development.md) | 本地测试、代码结构、镜像构建与发布 |
 | [更新记录](docs/CHANGELOG.md) | 影响使用的变化 |
 
@@ -194,6 +196,6 @@ docker run --rm -v "$PWD":/src -w /src golang:1.27-alpine sh -c 'apk add --no-ca
 
 - 软件按「现状」提供，不附带任何明示或暗示的担保；
 - 许可不授予商标使用权，`netsa` 名称与标识不包含在授权范围内；
-- 第三方依赖遵循各自许可，完整列表见 `go.mod` 与 `go.sum`；部分检测规则改编自 [OWASP Core Rule Set](https://coreruleset.org)（Apache-2.0），见 [NOTICE](NOTICE)。
+- 第三方依赖遵循各自许可，完整列表见 `go.mod` 与 `go.sum`；部分检测规则改编自 [OWASP Core Rule Set](https://coreruleset.org)（Apache-2.0），国产 OA、中间件漏洞接口签名提取自 [nuclei-templates](https://github.com/projectdiscovery/nuclei-templates)（MIT），见 [NOTICE](NOTICE)。
 
 规则与情报订阅、部署交付、等保测评支撑等商业服务由维护方另行提供，不影响开源版依据 Apache-2.0 的使用权利。

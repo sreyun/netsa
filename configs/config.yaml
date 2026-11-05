@@ -171,8 +171,11 @@ geo:
 intel:
   blocklists: []
   #  - name: 本地黑名单
-  #    path: data/blacklist.txt   # 每行一个 IP 或 CIDR
+  #    path: data/blacklist.txt   # 每行一个 IP、网段、域名或 URL，也支持 hosts 文件格式（0.0.0.0 evil.example）
+  #    kind: c2                   # c2 远控 / malware 恶意软件投递 / phishing 钓鱼 / mining 矿池 / attacker 攻击来源 / 留空为通用黑名单
   tor_exit_url: ""               # 例如 https://check.torproject.org/torbulkexitlist
+  domain_allowlist: []           # 本单位的域名：域名情报中等于或位于其下的条目不生效
+  feeds: []                      # 在线情报源，示例见 configs/docker.yaml 与 docs/integrations.md「在线情报」
 
 detect:
   # 等级判定：规则里的 severity 只是建议值，最终等级由分类底线 + 响应结果统一裁决

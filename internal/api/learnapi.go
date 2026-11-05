@@ -54,6 +54,7 @@ func (s *Server) learnFeedback(list []store.IncidentView, user string) {
 				}
 				c.Targets = append(c.Targets, kv.Name)
 			}
+			c.Feeds = d.Feeds // 命中的威胁情报源：按研判结论统计每个情报源的准确率
 		}
 		cases = append(cases, c)
 	}

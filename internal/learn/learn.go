@@ -92,12 +92,13 @@ type Applied struct {
 	Rule      int64     `json:"rule"`      // 按规则整体校准下调的命中
 	Target    int64     `json:"target"`    // 按「规则 + 目标」精细校准下调的命中
 	Escalated int64     `json:"escalated"` // 已确认攻击来源复现、升级的命中
+	Feed      int64     `json:"feed"`      // 按情报源准确率下调的情报命中
 	Since     time.Time `json:"since"`
 }
 
 type appliedCounters struct {
-	rule, target, escalated atomic.Int64
-	since                   time.Time
+	rule, target, escalated, feed atomic.Int64
+	since                         time.Time
 }
 
 // Verdict 是分析员对一个安全事件的结论。
@@ -119,6 +120,17 @@ type Case struct {
 	User     string         `json:"user"`
 	Note     string         `json:"note,omitempty"` // 分析员的处置说明，作为相似案例提供给外部模型
 	Time     time.Time      `json:"time"`
+	Feeds    []string       `json:"feeds,omitempty"` // 事件命中的威胁情报源，用于统计情报源的准确率
+}
+
+// FeedStat 是一个威胁情报源的研判统计：命中过该情报源的事件被分析员确认 / 判为误报的次数。
+type FeedStat struct {
+	Feed       string  `json:"feed"`
+	TP         int     `json:"tp"`
+	FP         int     `json:"fp"`
+	Precision  float64 `json:"precision"`  // 样本不足时为 -1
+	Calibrated bool    `json:"calibrated"` // 准确率持续偏低，命中自动下调一级
+	Pinned     bool    `json:"pinned"`
 }
 
 // focused 判断样本是否只涉及少数规则：误报结论只有在规则很少时才能归因到规则本身；
@@ -156,6 +168,7 @@ type snapshot struct {
 	// cleared 是最近一次人工结论为「误报」的来源及其时间：此后的自动确认不再生效（以人的结论为准）
 	cleared  map[string]time.Time
 	escalate bool
+	feeds    map[string]FeedStat // 准确率持续偏低、已下调的威胁情报源
 }
 
 // confirmed 是来源最近一次被确认为攻击的事件。
@@ -201,6 +214,7 @@ type Learner struct {
 	handled    map[string]string // 已采纳 / 已忽略的建议 ID → 处理结果
 	changes    []Change
 	stats      []RuleStat
+	feedStats  []FeedStat    // 威胁情报源的研判统计
 	ctxStats   []ContextStat // 已精细校准的「规则 + 目标」
 	sugs       []Suggestion
 	ai         map[uint64]*AIRecord // 外部模型的研判结论（见 aitrust.go），只用于评估模型，不作为样本
@@ -227,6 +241,8 @@ type Learner struct {
 
 	// OnChange 在产生进化日志时调用（写入审计链），调用时不持锁。
 	OnChange func(Change)
+	// PriorAttacks 返回来源此前的攻击次数（业务接口学习只用此前没有攻击记录的访客），为空时视为 0。
+	PriorAttacks func(ip string) int64
 }
 
 // state 是持久化的学习状态。
@@ -503,9 +519,20 @@ func (l *Learner) recomputeLocked(now time.Time, user string) []Change {
 	tp, fp := map[string]int{}, map[string]int{}
 	ctx := map[[2]string]*ctxStat{}
 	src := map[string]*ctxStat{}
+	ftp, ffp := map[string]int{}, map[string]int{}
 	for _, c := range l.cases {
 		if l.expiredLocked(c, now) {
 			continue
+		}
+		// 情报源：确认攻击说明情报准确；误报说明情报把正常来源（授权扫描、合作方、公共服务）标记成了恶意，
+		// 不要求事件只涉及少数规则——判的就是这个来源
+		for _, f := range c.Feeds {
+			switch c.Verdict {
+			case VerdictTP:
+				ftp[f]++
+			case VerdictFP:
+				ffp[f]++
+			}
 		}
 		s := src[c.Source]
 		if s == nil {
@@ -606,8 +633,10 @@ func (l *Learner) recomputeLocked(now time.Time, user string) []Change {
 	l.stats = stats
 	ctxCal, ctxChanges := l.calibrateContextsLocked(ctx, old, now, user)
 	changes = append(changes, ctxChanges...)
+	feedCal, feedChanges := l.calibrateFeedsLocked(ftp, ffp, old, now, user)
+	changes = append(changes, feedChanges...)
 	l.calib.Store(&snapshot{rules: calib, ctx: ctxCal, sources: l.confirmedSourcesLocked(), cleared: l.clearedSourcesLocked(),
-		days: l.opt.EscalateDays, escalate: l.opt.Escalate})
+		days: l.opt.EscalateDays, escalate: l.opt.Escalate, feeds: feedCal})
 	for _, c := range changes {
 		l.logLocked(c)
 	}
@@ -650,6 +679,78 @@ func (l *Learner) recomputeLocked(now time.Time, user string) []Change {
 	}
 	l.sugs = sugs
 	return changes
+}
+
+// lowFeeds 判断命中的情报源是否全部是准确率持续偏低的情报源（有一个准确的情报源同时标记就不下调），
+// 返回其中误报最多的一个用于说明。
+func lowFeeds(cal map[string]FeedStat, feeds []string) (FeedStat, bool) {
+	var worst FeedStat
+	for _, f := range feeds {
+		st, ok := cal[f]
+		if !ok {
+			return FeedStat{}, false
+		}
+		if st.FP > worst.FP {
+			worst = st
+		}
+	}
+	return worst, len(feeds) > 0
+}
+
+// calibrateFeedsLocked 计算威胁情报源的准确率：样本不少于 MinVerdicts、准确率不高于 MaxPrecision 的情报源，
+// 之后只由它产生的命中（其他情报源没有同时标记）下调一级。情报“不在多而在准”：长期误报的情报源
+// 不再把正常来源顶成高危，但仍然生成告警；准确率回升、样本过期、锁定后自动恢复。
+func (l *Learner) calibrateFeedsLocked(tp, fp map[string]int, old *snapshot, now time.Time, user string) (map[string]FeedStat, []Change) {
+	cal := map[string]FeedStat{}
+	var stats []FeedStat
+	var changes []Change
+	seen := map[string]bool{}
+	for _, m := range []map[string]int{tp, fp} {
+		for f := range m {
+			if seen[f] {
+				continue
+			}
+			seen[f] = true
+			st := FeedStat{Feed: f, TP: tp[f], FP: fp[f], Precision: -1, Pinned: l.pinned["feed:"+f]}
+			n := st.TP + st.FP
+			if n > 0 {
+				st.Precision = float64(st.TP) / float64(n)
+			}
+			st.Calibrated = l.opt.Calibrate && !st.Pinned && n >= l.opt.MinVerdicts && st.FP >= l.opt.MinVerdicts-1 && st.Precision <= l.opt.MaxPrecision
+			if st.Calibrated {
+				cal[f] = st
+			}
+			switch was := old.feeds[f].Calibrated; {
+			case st.Calibrated && !was:
+				changes = append(changes, Change{Time: now, Kind: "calibrate_feed", Rule: "feed:" + f, User: "自学习",
+					Detail: fmt.Sprintf("情报源 %s 命中的事件研判 %d 次中 %d 次为误报（准确率 %.0f%%），只由它产生的情报命中等级自动下调一级", f, n, st.FP, st.Precision*100)})
+			case !st.Calibrated && was:
+				why := "准确率已回升"
+				if st.Pinned {
+					why = "情报源已被锁定"
+				}
+				if user == "" {
+					user = "自学习"
+				}
+				changes = append(changes, Change{Time: now, Kind: "restore_feed", Rule: "feed:" + f, User: user,
+					Detail: fmt.Sprintf("情报源 %s 恢复原等级（%s：研判 %d 次，误报 %d 次）", f, why, n, st.FP)})
+			}
+			stats = append(stats, st)
+		}
+	}
+	for _, f := range sortedKeys(old.feeds) {
+		if !seen[f] {
+			changes = append(changes, Change{Time: now, Kind: "restore_feed", Rule: "feed:" + f, User: "自学习", Detail: "情报源 " + f + " 恢复原等级（研判样本已撤回或超过学习窗口）"})
+		}
+	}
+	sort.Slice(stats, func(i, j int) bool {
+		if stats[i].FP != stats[j].FP {
+			return stats[i].FP > stats[j].FP
+		}
+		return stats[i].Feed < stats[j].Feed
+	})
+	l.feedStats = stats
+	return cal, changes
 }
 
 // calibrateContextsLocked 计算「规则 + 目标」精细校准：同一规则在同一目标上被研判为误报不少于 CtxMinFP 次、
@@ -732,7 +833,7 @@ func (l *Learner) Calibrate(ev *model.Event, hits []model.Hit) []model.Hit {
 	m := l.calib.Load()
 	autoP := l.autoSnap.Load()
 	hasAuto := autoP != nil && len(*autoP) > 0
-	if m == nil || len(m.rules)+len(m.ctx)+len(m.sources) == 0 && !hasAuto {
+	if m == nil || len(m.rules)+len(m.ctx)+len(m.sources)+len(m.feeds) == 0 && !hasAuto {
 		return hits
 	}
 	// 已确认的攻击来源（分析员确认或自动确认）在有效期内复现（按事件时间判断，离线回放历史日志时同样准确）
@@ -762,6 +863,12 @@ func (l *Learner) Calibrate(ev *model.Event, hits []model.Hit) []model.Hit {
 				if cs, ok := m.ctx[[2]string{hits[i].RuleID, target}]; ok {
 					note, delta = "；自学习校准：该规则在此目标上 "+strconv.Itoa(cs.FP)+" 次被研判为误报、从未确认为攻击，等级下调一级", -1
 					l.applied.target.Add(1)
+				}
+			}
+			if delta == 0 && len(m.feeds) > 0 {
+				if fs, ok := lowFeeds(m.feeds, hits[i].Feeds); ok {
+					note, delta = fmt.Sprintf("；自学习校准：情报源 %s 命中的事件研判 %d 次中 %d 次为误报，等级下调一级", fs.Feed, fs.TP+fs.FP, fs.FP), -1
+					l.applied.feed.Add(1)
 				}
 			}
 		}
@@ -884,6 +991,7 @@ type Report struct {
 	Intranet    []LearnedNet  `json:"intranet"`  // 从防火墙日志自动学习的内网网段
 	Attack      AttackReport  `json:"attack"`    // 从日志与 AI 研判中自动学习的攻击行为
 	Profile     ProfileReport `json:"profile"`   // 从正常流量学习的参数取值与站点产品
+	Feeds       []FeedStat    `json:"feeds"`     // 威胁情报源的研判统计与自动校准
 }
 
 // Report 返回自学习状态概览。
@@ -909,6 +1017,7 @@ func (l *Learner) Report() Report {
 	r.Intranet = l.learnedNetsLocked()
 	r.Attack = l.attackReportLocked()
 	r.Profile = l.profileReportLocked()
+	r.Feeds = append([]FeedStat{}, l.feedStats...)
 	r.Cases = len(l.cases)
 	now := time.Now()
 	r.Trend = weekTrend(l.cases, now)

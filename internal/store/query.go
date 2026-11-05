@@ -913,6 +913,16 @@ func (s *Store) Summary(ip string) (AttackerSummary, bool) {
 	return summarize(p), true
 }
 
+// AttackCount 返回来源已记录的攻击次数（不含只打标签的观察），没有记录时为 0。
+func (s *Store) AttackCount(ip string) int64 {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if p := s.ips[ip]; p != nil {
+		return p.Attacks
+	}
+	return 0
+}
+
 // Blocklist 返回达到指定等级的攻击者（不含内网地址），按评分降序。
 func (s *Store) Blocklist(min model.Severity) []AttackerSummary {
 	list, _ := s.Attackers(AttackerQuery{MinLevel: min, Sort: "score"})

@@ -307,6 +307,8 @@
     <div class="panel"><h3>规则准确率与自动校准 <small>只从分析员的处置结论学习：已处置 = 确认攻击，误报 = 误报；准确率持续偏低的规则自动下调一级，可锁定恢复</small><button type="button" class="more need-admin" id="lnPolicyEdit">策略 ›</button></h3>
       <div class="ln-policy" id="lnPolicy"></div>
       <div class="scroll"><table class="table" id="lnRules"></table></div></div>
+    <div class="panel"><h3>威胁情报源准确率 <small>情报不在多而在准：命中某个情报源的事件被分析员确认或判为误报时计入；准确率持续偏低的情报源，只由它产生的情报命中自动下调一级（有准确的情报源同时标记时不下调），可锁定恢复</small></h3>
+      <div class="scroll"><table class="table" id="lnFeeds"></table></div></div>
     <div class="panel"><h3>精细校准（规则 + 目标） <small id="lnCtxIntro">规则整体准确率正常、只在个别目标上反复误报时，只下调该目标上的命中一级，其他目标不受影响</small></h3>
       <div class="scroll"><table class="table" id="lnCtx"></table></div></div>
     <div class="grid-2">

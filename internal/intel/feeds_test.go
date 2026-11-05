@@ -16,7 +16,7 @@ import (
 )
 
 func TestEntrySetRejectsUnsafe(t *testing.T) {
-	s := newEntrySet("x")
+	s := newEntrySet("x", nil)
 	for _, v := range []string{"0.0.0.0/0", "1.0.0.0/4", "::/0", "2001::/16", "10.0.0.1", "192.168.0.0/16", "127.0.0.1", "169.254.169.254", "224.0.0.1", "fe80::1", "fc00::/7", "not-ip", "0.0.0.0"} {
 		s.add(v)
 	}
@@ -43,7 +43,7 @@ func TestParseSTIX(t *testing.T) {
 	 {"type":"indicator","pattern":"[domain-name:value = 'evil.example']"},
 	 {"type":"ipv4-addr","value":"203.0.113.7"},
 	 {"type":"malware","name":"x"}]}`
-	s := newEntrySet("x")
+	s := newEntrySet("x", nil)
 	if err := parseSTIX(s, []byte(bundle), 0, now); err != nil {
 		t.Fatal(err)
 	}
@@ -51,21 +51,21 @@ func TestParseSTIX(t *testing.T) {
 		t.Fatalf("addrs=%v nets=%d", s.l.addrs, s.l.count)
 	}
 	// 最低可信度：没有声明可信度的指标也不算
-	s2 := newEntrySet("x")
+	s2 := newEntrySet("x", nil)
 	parseSTIX(s2, []byte(bundle), 80, now)
 	if len(s2.l.addrs) != 2 { // 203.0.113.1 与 ipv4-addr 对象
 		t.Fatalf("可信度过滤: %v", s2.l.addrs)
 	}
-	if err := parseSTIX(newEntrySet("x"), []byte("{"), 0, now); err == nil {
+	if err := parseSTIX(newEntrySet("x", nil), []byte("{"), 0, now); err == nil {
 		t.Fatal("无效 JSON 应报错")
 	}
-	if err := parseSTIX(newEntrySet("x"), []byte(`{"type":"indicator"}`), 0, now); err == nil {
+	if err := parseSTIX(newEntrySet("x", nil), []byte(`{"type":"indicator"}`), 0, now); err == nil {
 		t.Fatal("不是 bundle 应报错")
 	}
 }
 
 func TestParseMISP(t *testing.T) {
-	s := newEntrySet("x")
+	s := newEntrySet("x", nil)
 	err := parseMISP(s, []byte(`{"response":{"Attribute":[
 	 {"type":"ip-src","value":"203.0.113.1","to_ids":true},
 	 {"type":"ip-dst|port","value":"203.0.113.2|443","to_ids":true},
@@ -122,17 +122,25 @@ func TestFeedsEndToEnd(t *testing.T) {
 			w.Write([]byte("# 注释\n203.0.113.4 # 说明\n198.51.100.0/24\n0.0.0.0/0\n"))
 		case r.URL.Path == "/bundle":
 			w.Write([]byte(`{"type":"bundle","objects":[{"type":"ipv4-addr","value":"203.0.113.5"}]}`))
+		case r.URL.Path == "/domains.txt":
+			if r.Header.Get("Auth-Key") != "abuse-key" || r.Header.Get("Authorization") != "" {
+				w.WriteHeader(401)
+				return
+			}
+			w.Write([]byte("0.0.0.0 c2.example.net\nhttps://dl.example.org/x.bin\ngithub.com\n"))
 		}
 	}))
 	defer srv.Close()
 	t.Setenv("T_TAXII", "tok")
 	t.Setenv("T_MISP", "misp-key")
+	t.Setenv("T_ABUSE", "abuse-key")
 	dir := filepath.Join(t.TempDir(), "feeds")
 	cfgs := []config.IntelFeedConfig{
 		{Name: "taxii", Type: "taxii", URL: srv.URL + "/taxii/collections/1/objects/", TokenEnv: "T_TAXII", Interval: 20 * time.Millisecond},
 		{Name: "misp", Type: "misp", URL: srv.URL, TokenEnv: "T_MISP"},
 		{Name: "text", Type: "text", URL: srv.URL + "/list.txt"},
 		{Name: "stix", Type: "stix", URL: srv.URL + "/bundle"},
+		{Name: "domains", Type: "text", Kind: "c2", URL: srv.URL + "/domains.txt", TokenEnv: "T_ABUSE", TokenHeader: "Auth-Key"},
 	}
 	db, _ := Load(config.IntelConfig{})
 	ctx, cancel := context.WithCancel(context.Background())
@@ -145,6 +153,13 @@ func TestFeedsEndToEnd(t *testing.T) {
 		t.Fatalf("text: %+v", st)
 	}
 	waitFeed(t, db, "stix", func(s FeedStatus) bool { return s.Addrs == 1 })
+	// 自定义认证请求头的域名情报：hosts 文件格式、URL；公共平台丢弃
+	if st := waitFeed(t, db, "domains", func(s FeedStatus) bool { return s.Domains == 2 }); st.Skipped != 1 || st.Kind != "c2" || st.LastError != "" {
+		t.Fatalf("domains: %+v", st)
+	}
+	if got := db.MatchDomain("a.c2.example.net"); len(got) != 1 || got[0] != "domains" || db.KindOf("domains") != "c2" {
+		t.Fatalf("域名情报: %v %q", got, db.KindOf("domains"))
+	}
 	mu.Lock()
 	gotAuth, gotAccept := auth, accept
 	mu.Unlock()

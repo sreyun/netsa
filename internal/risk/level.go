@@ -38,6 +38,9 @@ var catFloor = map[string]model.Severity{
 	"XSS跨站脚本":    model.SevMedium,
 	"敏感文件探测":     model.SevMedium,
 	"管理后台探测":     model.SevLow, // 后台路径探测是常见背景扫描；是否可访问由暴露面评估单独统计
+	"漏洞接口探测":     model.SevLow, // 访问存在已知漏洞的接口、日志里看不到载荷：最高中危，由签名给出
+	"恶意域名":       model.SevLow, // 情报标记的恶意软件投递域名 / 地址：等级由情报类别给出
+	"钓鱼网站":       model.SevLow,
 	"暴力破解":       model.SevMedium,
 	"账号与权限":      model.SevMedium,
 	"账号异常":       model.SevMedium, // 主机日志：新建账号、加入管理员组、公网直接登录特权账号

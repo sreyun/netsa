@@ -185,12 +185,26 @@ type PlaybookWhen struct {
 type IntelFeedConfig struct {
 	Name string `yaml:"name"`
 	// Type：stix 拉取 STIX 2.x bundle；taxii 拉取 TAXII 2.1 集合的 objects；misp 调用 attributes/restSearch；text 每行一个 IP 或网段
-	Type     string        `yaml:"type"`
-	URL      string        `yaml:"url"`
-	TokenEnv string        `yaml:"token_env"` // 只从环境变量读取
-	Interval time.Duration `yaml:"interval"`  // 默认 1h
+	Type     string `yaml:"type"`
+	URL      string `yaml:"url"`
+	TokenEnv string `yaml:"token_env"` // 只从环境变量读取
+	// TokenHeader 密钥放在哪个请求头：为空时为 Authorization: Bearer <密钥>（MISP 为 Authorization: <密钥>）；
+	// abuse.ch 等服务填 Auth-Key，AbuseIPDB 填 Key
+	TokenHeader string        `yaml:"token_header"`
+	Interval    time.Duration `yaml:"interval"` // 默认 1h
 	// MinConfidence STIX 指标的最低可信度（0 表示不限），MISP 只取 to_ids 属性
 	MinConfidence int `yaml:"min_confidence"`
+	// Kind 情报类别：c2 / malware / phishing / mining / attacker，为空表示通用黑名单。决定命中时的分类与等级
+	Kind string `yaml:"kind"`
+}
+
+// validIntelKind 与 intel 包的情报类别一致（config 不依赖 intel 包）。
+func validIntelKind(k string) bool {
+	switch k {
+	case "", "c2", "malware", "phishing", "mining", "attacker":
+		return true
+	}
+	return false
 }
 
 func (c IntelFeedConfig) validate(i int) error {
@@ -199,12 +213,21 @@ func (c IntelFeedConfig) validate(i int) error {
 	default:
 		return fmt.Errorf("intel.feeds[%d].type 只能是 stix、taxii、misp 或 text", i)
 	}
+	if !validIntelKind(c.Kind) {
+		return fmt.Errorf("intel.feeds[%d].kind 只能是 c2、malware、phishing、mining、attacker 或留空", i)
+	}
 	if c.Name == "" {
 		return fmt.Errorf("intel.feeds[%d].name 不能为空", i)
 	}
 	u, err := url.Parse(c.URL)
 	if err != nil || u.Host == "" || (u.Scheme != "https" && u.Scheme != "http") {
 		return fmt.Errorf("intel.feeds[%d].url 应为 http(s) 地址", i)
+	}
+	for _, r := range c.TokenHeader {
+		// 请求头名只能是 token 字符：防止配置中混入换行等把密钥注入到其他请求头
+		if !(r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '-' || r == '_') {
+			return fmt.Errorf("intel.feeds[%d].token_header 只能包含字母、数字、- 和 _", i)
+		}
 	}
 	return nil
 }
@@ -224,6 +247,11 @@ func (c *Config) validateIntegrations() error {
 	for i, f := range c.Intel.Feeds {
 		if err := f.validate(i); err != nil {
 			return err
+		}
+	}
+	for i, b := range c.Intel.Blocklists {
+		if !validIntelKind(b.Kind) {
+			return fmt.Errorf("intel.blocklists[%d].kind 只能是 c2、malware、phishing、mining、attacker 或留空", i)
 		}
 	}
 	tickets := map[string]bool{}

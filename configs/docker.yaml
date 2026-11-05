@@ -111,6 +111,38 @@ detect:
   rules_file: ""
   whitelist: []
 
+# 威胁情报：默认拉取两份免费、无需注册、持续更新的名单：Feodo Tracker 的远控地址（内网主机连接即为失陷迹象），
+# Spamhaus DROP 被犯罪团伙控制的网段（只作信誉提示，不单独构成高危）。隔离网络、或不希望访问外部地址时，把 feeds 改为 []。
+# kind 决定命中的等级：c2 远控 / malware 恶意软件投递 / phishing 钓鱼 / mining 矿池 / attacker 扫描与暴力破解来源 / 留空为通用黑名单。
+# 每个情报源的准确率会按分析员的处置结论自动统计，长期误报的自动下调（“自学习”页面可锁定）。
+intel:
+  tor_exit_url: ""                 # 例如 https://check.torproject.org/torbulkexitlist
+  domain_allowlist: []             # 本单位的域名：域名情报中等于或位于其下的条目不生效，例如 ["example.com"]
+  feeds:
+    - name: Feodo Tracker 远控
+      type: text
+      kind: c2
+      url: https://feodotracker.abuse.ch/downloads/ipblocklist_recommended.txt
+      interval: 1h
+    - name: Spamhaus DROP
+      type: text
+      kind: attacker
+      url: https://www.spamhaus.org/drop/drop.txt
+      interval: 12h
+    # 更多可选的免费情报（按需取消注释）：
+    # - name: blocklist.de 攻击来源   # 扫描、暴力破解来源，只说明信誉，不单独构成高危
+    #   type: text
+    #   kind: attacker
+    #   url: https://lists.blocklist.de/lists/all.txt
+    #   interval: 6h
+    # 需要密钥的情报源：密钥放在环境变量中，token_header 指定请求头（abuse.ch 的 URLhaus / ThreatFox 为 Auth-Key）
+    # - name: 恶意域名
+    #   type: text                  # 每行一个 IP、网段、域名或 URL，也支持 hosts 文件格式（0.0.0.0 evil.example）
+    #   kind: malware
+    #   url: https://...
+    #   token_env: NETSA_INTEL_KEY
+    #   token_header: Auth-Key
+
 # 告警推送：钉钉 / 企业微信 / 飞书群机器人，推荐直接在大屏“告警推送”页面添加（可测试、可分别选择推送等级）。
 # 下列配置文件方式适合批量部署或私有化部署的机器人地址。
 alert:

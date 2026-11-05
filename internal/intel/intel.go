@@ -1,4 +1,4 @@
-// Package intel 提供本地威胁情报匹配（IP/网段黑名单、Tor 出口节点）与 rDNS 身份识别。
+// Package intel 提供本地威胁情报匹配（IP / 网段 / 域名黑名单、Tor 出口节点）与 rDNS 身份识别。
 package intel
 
 import (
@@ -18,9 +18,30 @@ import (
 	"netsa/internal/config"
 )
 
+// 情报类别：决定命中时的分类与等级（见 store 的情报命中与 pipeline 的域名情报）。
+const (
+	KindDefault  = ""         // 通用黑名单：按原有方式处理
+	KindC2       = "c2"       // 远控 / 僵尸网络控制端：内网主机连接、解析即为失陷迹象
+	KindMalware  = "malware"  // 恶意软件投递：连接、解析说明主机可能下载了恶意文件
+	KindPhishing = "phishing" // 钓鱼网站
+	KindMining   = "mining"   // 矿池
+	KindAttacker = "attacker" // 扫描、暴力破解来源：只说明信誉，不单独构成高危
+)
+
+// ValidKind 判断情报类别是否有效。
+func ValidKind(k string) bool {
+	switch k {
+	case KindDefault, KindC2, KindMalware, KindPhishing, KindMining, KindAttacker:
+		return true
+	}
+	return false
+}
+
 type list struct {
-	name  string
-	addrs map[netip.Addr]bool
+	name    string
+	kind    string
+	domains map[string]struct{}
+	addrs   map[netip.Addr]bool
 	// 网段按前缀长度分组：查询时只需对出现过的每种长度做一次掩码与哈希查找（IPv4 最多 32 次），
 	// 与网段数量无关。出站流量逐条比对情报时，数千条网段的情报库也不会成为瓶颈。
 	nets  map[int]map[netip.Prefix]struct{}
@@ -67,54 +88,56 @@ type DB struct {
 	lists []*list
 	tor   map[netip.Addr]bool
 	feeds feeds
+	allow map[string]bool // 本单位域名：域名情报中等于或位于其下的条目丢弃
 }
 
-// Load 加载配置中的黑名单文件（每行一个 IP 或 CIDR，# 开头为注释）。
+// Load 加载配置中的黑名单文件（每行一个 IP、网段或域名，# 开头为注释）。
 func Load(cfg config.IntelConfig) (*DB, error) {
-	db := &DB{tor: map[netip.Addr]bool{}}
+	db := &DB{tor: map[netip.Addr]bool{}, allow: map[string]bool{}}
+	for _, d := range cfg.DomainAllowlist {
+		if d = strings.TrimPrefix(strings.ToLower(strings.TrimSpace(d)), "*."); d != "" {
+			db.allow[strings.TrimSuffix(d, ".")] = true
+		}
+	}
 	for _, bl := range cfg.Blocklists {
 		f, err := os.Open(bl.Path)
 		if err != nil {
 			log.Printf("[intel] 跳过情报文件 %s: %v", bl.Path, err)
 			continue
 		}
-		l := parseList(bl.Name, f)
+		l, _ := readList(bl.Name, f, db.allow, true)
 		f.Close()
-		log.Printf("[intel] 已加载 %s: %d 个IP, %d 个网段", bl.Name, len(l.addrs), l.count)
+		l.kind = bl.Kind
+		log.Printf("[intel] 已加载 %s: %d 个IP, %d 个网段, %d 个域名", bl.Name, len(l.addrs), l.count, len(l.domains))
 		db.lists = append(db.lists, l)
 	}
 	return db, nil
 }
 
-func parseList(name string, r io.Reader) *list {
-	l, _ := readList(name, r)
-	return l
+// readList 逐行解析情报列表（IP、网段、域名、URL、hosts 文件格式）；读取中断（网络断开、超长行）时返回已解析的部分与错误。
+// local 为管理员维护的本地文件：IP 按原样生效；在线情报的缓存与 Tor 列表丢弃内网、保留地址与过宽的网段。
+// 域名一律过滤公共平台与内网后缀。
+func readList(name string, r io.Reader, allow map[string]bool, local bool) (*list, error) {
+	s := newEntrySet(name, allow)
+	s.local = local
+	sc := bufio.NewScanner(r)
+	sc.Buffer(make([]byte, 64<<10), 1<<20)
+	for sc.Scan() {
+		s.addLine(sc.Text())
+	}
+	return s.l, sc.Err()
 }
 
-// readList 逐行解析情报列表；读取中断（网络断开、超长行）时返回已解析的部分与错误。
-func readList(name string, r io.Reader) (*list, error) {
-	l := &list{name: name, addrs: map[netip.Addr]bool{}}
-	sc := bufio.NewScanner(r)
-	for sc.Scan() {
-		line := sc.Text()
-		if i := strings.IndexAny(line, "#;"); i >= 0 {
-			line = line[:i]
-		}
-		f := strings.Fields(line)
-		if len(f) == 0 {
-			continue
-		}
-		if p, err := netip.ParsePrefix(f[0]); err == nil {
-			if p.IsSingleIP() {
-				l.addrs[p.Addr()] = true
-			} else {
-				l.addPrefix(p.Masked())
-			}
-		} else if a, err := netip.ParseAddr(f[0]); err == nil {
-			l.addrs[a.Unmap()] = true
+// KindOf 返回情报的类别，未知时为通用黑名单。
+func (db *DB) KindOf(name string) string {
+	db.mu.RLock()
+	defer db.mu.RUnlock()
+	for _, l := range db.lists {
+		if l.name == name {
+			return l.kind
 		}
 	}
-	return l, sc.Err()
+	return KindDefault
 }
 
 // Match 返回命中的情报名称列表。
@@ -173,7 +196,7 @@ func (db *DB) fetchTor(ctx context.Context, client *http.Client, url string) err
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("HTTP %d，保留上次的列表", resp.StatusCode)
 	}
-	l, err := readList("tor", io.LimitReader(resp.Body, 32<<20))
+	l, err := readList("tor", io.LimitReader(resp.Body, 32<<20), nil, false)
 	if err != nil {
 		return fmt.Errorf("读取中断（%v），保留上次的列表", err)
 	}

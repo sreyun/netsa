@@ -241,8 +241,8 @@ attack	expr	app	GET	200	1000	>=high	/a?class.module.classLoader.resources.contex
 attack	expr	app	GET	200	1000	>=medium	/a?tpl={{''.__class__.__mro__[1].__subclasses__()}}
 attack	cve	app	POST	200	700	>=high	/wls-wsat/CoordinatorPortType
 attack	cve	app	POST	200	700	>=high	/api/v1/convert?@type=com.sun.rowset.JdbcRowSetImpl
-attack	cve	app	GET	200	700	>=high	/seeyon/htmlofficeservlet
-attack	cve	app	GET	200	700	>=high	/weaver/bsh.servlet.BshServlet
+attack	cve	app	GET	200	700	=medium	/seeyon/htmlofficeservlet
+attack	cve	app	GET	200	700	=medium	/weaver/bsh.servlet.BshServlet
 attack	cve	app	GET	200	700	>=medium	/.%2e/.%2e/etc/passwd
 attack	webshell	app	POST	200	1500	>=high	/upload/1.jsp
 attack	webshell	app	POST	200	1600	>=high	/images/logo.php
@@ -282,3 +282,15 @@ benign	normal	app	GET	200	5000	none	/files?name=photo+copy+(2).jpg
 benign	normal	app	GET	200	5000	none	/odata/Products?$top=10&$select=Name,Price
 benign	normal	app	GET	200	5000	none	/api/version?v=127.0.1
 benign	normal	app	GET	200	5000	none	/docs/java/lang/Runtime.html
+# 国产 OA / 中间件漏洞接口签名（nuclei-templates 生成，v1.7.8）：带载荷的为已知漏洞利用，只访问接口的为漏洞接口探测（中危）
+attack	cve	app	GET	200	700	>=high	/seeyon/webmail.do?method=doDownloadAtt&filename=index.jsp&filePath=../conf/datasourceCtp.properties
+attack	cve	app	GET	200	700	>=high	/yyoa/ext/trafaxserver/ExtnoManage/setextno.jsp?user_ids=(99999)+union+all+select+1,2,(md5(1)),4%23
+attack	cve	app	POST	200	700	=medium	/servlet/~ic/bsh.servlet.BshServlet
+attack	cve	app	POST	200	700	=medium	/ispirit/im/upload.php
+attack	cve	app	POST	200	700	=medium	/seeyon/thirdpartyController.do
+attack	cve	app	GET	200	700	>=high	/defaultroot/download_ftp.jsp?path=/../WEB-INF/&name=x&FileName=web.xml
+benign	normal	app	GET	200	5000	none	/seeyon/main.do?method=index
+benign	normal	app	GET	200	5000	none	/seeyon/webmail.do?method=list
+benign	normal	app	GET	200	5000	none	/defaultroot/login.jsp
+benign	normal	app	GET	200	5000	none	/yyoa/index.jsp
+benign	normal	app	GET	200	5000	none	/general/login_code.php

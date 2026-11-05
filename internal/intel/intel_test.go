@@ -12,7 +12,7 @@ import (
 )
 
 func TestMatchPrefixes(t *testing.T) {
-	l := parseList("演示情报", strings.NewReader(`# 注释
+	l := mustList("演示情报", strings.NewReader(`# 注释
 203.0.113.66
 198.51.100.0/24   ; 行尾注释
 10.8.0.0/16
@@ -68,9 +68,14 @@ func BenchmarkMatchLargeList(b *testing.B) {
 	for i := 0; i < 5000; i++ {
 		fmt.Fprintf(&sb, "%d.%d.%d.0/%d\n", 1+i%200, i/200, i%250, 16+i%9)
 	}
-	db := &DB{lists: []*list{parseList("大型情报", strings.NewReader(sb.String()))}, tor: map[netip.Addr]bool{}}
+	db := &DB{lists: []*list{mustList("大型情报", strings.NewReader(sb.String()))}, tor: map[netip.Addr]bool{}}
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		db.Match("223.5.5.5")
 	}
+}
+
+func mustList(name string, r io.Reader) *list {
+	l, _ := readList(name, r, nil, true)
+	return l
 }

@@ -77,7 +77,7 @@ real_ip:
 | 类型 | 支持的格式 | 检测 |
 | --- | --- | --- |
 | 主机 / VPN 认证（`type: auth`） | Linux `auth.log` / `secure`（sshd、PAM、useradd、usermod）、Windows 安全事件（NXLog / Winlogbeat JSON、Snare 及中英文事件文本，4624 / 4625 / 4740 / 4720 / 4728 / 4732 / 4756 / 1102 / 4697 / 7045 / 4698 / 4771 / 4776）、FortiGate SSL VPN 与管理登录、Cisco ASA AAA / AnyConnect、OpenVPN、SQL Server 登录 | 暴力破解（`auth_failures`）、密码喷洒 / 账号枚举（`auth_users` 个不同账号）、**多次失败后登录成功（账号疑似失陷）**、公网 IP 直接登录特权账号、安全日志被清除、新建账号、加入管理员组、新安装服务 / 计划任务 |
-| DNS（`type: dns`） | BIND querylog、dnsmasq、CoreDNS、Windows DNS 调试日志、Zeek `dns.log`、Suricata eve.json（`event_type: dns`）及 JSON DNS 日志 | **DNSLog 带外回连**（内网主机解析 dnslog.cn、ceye.io、oast.* 等，说明盲打的 RCE / SSRF / Log4j 已被触发）、矿池域名（挖矿木马）、DNS 隧道（超长高熵子域名、同一主域名下大量不同子域名）、DGA 随机域名与 NXDOMAIN 风暴、动态域名 / 内网穿透服务 |
+| DNS（`type: dns`） | BIND querylog、dnsmasq、CoreDNS、Windows DNS 调试日志、Zeek `dns.log`、Suricata eve.json（`event_type: dns`）及 JSON DNS 日志 | **DNSLog 带外回连**（内网主机解析 dnslog.cn、ceye.io、oast.* 等，说明盲打的 RCE / SSRF / Log4j 已被触发）、矿池域名（挖矿木马）、DNS 隧道（超长高熵子域名、同一主域名下大量不同子域名）、DGA 随机域名与 NXDOMAIN 风暴、动态域名 / 内网穿透服务；配置了域名情报时，解析情报标记的远控、恶意软件、钓鱼、矿池域名（见[在线情报](integrations.md#在线情报)） |
 
 DNS 与主机事件的主体是**内网主机本身**（判断其是否失陷），不受 `detect.whitelist` 影响；命中后计入“失陷研判”与 ATT&CK 矩阵（T1071.004、T1568.002、T1496、T1070.001、T1136、T1098 等）。认证日志也可经 syslog 接收，没有远程来源的主机事件（如日志被清除）以发送日志的设备为主体。
 

@@ -51,6 +51,7 @@ type Pipeline struct {
 	Assets            *assets.Manager   // 资产与漏洞（可为空）
 	Exposure          *exposure.Manager // 对外发布服务清单（DNAT 映射，可为空）
 	Learn             *learn.Learner    // 自学习：按研判准确率校准规则等级（可为空）
+	Intel             *intel.DB         // 威胁情报：DNS 查询与域名情报比对（可为空）
 
 	whitelist []netip.Prefix
 	processed atomic.Int64
@@ -185,6 +186,9 @@ func (p *Pipeline) inspect(ev *model.Event) item {
 		return it
 	}
 	it.hits = append(it.hits, p.CurrentEngine().Inspect(ev)...)
+	if h, ok := p.domainIntelHit(ev); ok { // 内网主机解析情报标记的域名
+		it.hits = append(it.hits, h)
+	}
 	return it
 }
 

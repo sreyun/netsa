@@ -52,7 +52,7 @@ go test -race -short ./...     # 需要 CGO 与 C 编译器（gcc）
 ```
 cmd/netsa/            命令行入口（serve / analyze / simulate / rules / passwd / hash-password / version）
 internal/parser/      日志解析与格式自动识别（nginx、log_format 编译、各类防火墙、IDS、认证、DNS、syslog 头）
-internal/detect/      URL 归一化、特征规则、结果研判、行为检测
+internal/detect/      URL 归一化、特征规则、libinjection 语法分析、国产 OA 漏洞接口签名、结果研判、行为检测
 internal/risk/        威胁等级统一裁决（攻击分类底线、拦截与成功的等级上限）
 internal/pipeline/    处理流水线、真实 IP 还原（含反向代理自动识别）、DNAT 暴露面过滤、资产关联
 internal/exposure/    对外发布服务清单、会话证据研判（是否到达服务）、候选映射与可疑放行策略
@@ -63,7 +63,7 @@ internal/ingest/      文件跟踪、批量读取、syslog 接收（UDP / TCP / 
 internal/rawlog/      原始日志留存（按小时压缩、哈希链防篡改、检索与导出）
 internal/suppress/    误报抑制规则
 internal/assets/      资产台账与漏洞导入、攻击与漏洞关联
-internal/learn/       自学习：研判反馈校准（规则级 / 目标级）、模型一致率评估、平台账号行为基线、持续合规自检
+internal/learn/       自学习：研判反馈校准（规则级 / 目标级）、攻击行为、参数正常取值、站点产品、业务接口、模型一致率评估、平台账号行为基线、持续合规自检
 internal/ai/          可选的外部大模型研判（Web 页面配置、OpenAI 兼容接口、发送前脱敏、调用限额）
 internal/api/         REST API、SSE、封禁列表导出、报表与等保合规、安全响应头
 internal/auth/        登录账号、PBKDF2 密码哈希、签名会话、双因素认证、API 令牌、登录失败锁定
@@ -78,6 +78,7 @@ internal/backup/      状态目录的备份与恢复
 internal/sso/         LDAP 与 OpenID Connect 登录
 internal/forward/     SIEM 转发（CEF / JSON / RFC 5424）
 internal/block/       联动封禁（申请、审批、到期解除）
+tools/vulnpaths/      从 nuclei-templates 生成国产 OA、中间件漏洞接口签名（见检测说明）
 internal/playbook/    处置剧本与工单对接
 internal/rulemgr/     页面维护的规则、签名规则包、Sigma 转换
 internal/config/      配置加载、默认值与校验
@@ -95,16 +96,16 @@ docs/                 使用与开发文档（images/ 为 README 截图，i18n/ 
 
 | 触发 | 行为 |
 |---|---|
-| 创建 tag `v1.7.7` | 构建 + 启动自检 + 推送：`1.7.7`、`1.7`、`1`、`latest`、`sha-xxxxxxx` |
-| 创建预发布 tag `v1.7.7-rc1` | 只推 `1.7.7-rc1`、`sha-xxxxxxx`，不动 `latest` / `1.7` / `1` |
+| 创建 tag `v1.7.8` | 构建 + 启动自检 + 推送：`1.7.8`、`1.7`、`1`、`latest`、`sha-xxxxxxx` |
+| 创建预发布 tag `v1.7.8-rc1` | 只推 `1.7.8-rc1`、`sha-xxxxxxx`，不动 `latest` / `1.7` / `1` |
 | 推送 `master` / Pull Request | 不构建镜像（质量门禁由 `ci` 工作流负责） |
 | 手动触发（workflow_dispatch） | 填写要发布的 tag 与是否更新 `latest`；按该 tag 检出源码，版本与内容严格对应 |
 
 发布流程：
 
 ```bash
-git tag v1.7.7
-git push origin v1.7.7
+git tag v1.7.8
+git push origin v1.7.8
 ```
 
 需要在仓库 **Settings → Secrets and variables → Actions** 配置两个 Secret：
@@ -130,9 +131,9 @@ printf '%s' "$AK" | openssl dgst -binary -sha256 -hmac "$SK" | od -An -vtx1 | tr
 | `GOPROXY` | `https://goproxy.cn,direct` | 构建时的 Go 模块代理 |
 
 ```bash
-docker pull swr.cn-east-3.myhuaweicloud.com/sreyun/netsa:1.7.7
+docker pull swr.cn-east-3.myhuaweicloud.com/sreyun/netsa:1.7.8
 docker run -d --name netsa -p 8080:8080 -p 5514:5514/udp -v netsa-state:/app/state \
-  swr.cn-east-3.myhuaweicloud.com/sreyun/netsa:1.7.7
+  swr.cn-east-3.myhuaweicloud.com/sreyun/netsa:1.7.8
 ```
 
 - **版本随 tag 注入**：构建时通过 `-ldflags "-X main.version=<tag>"` 写入二进制，`netsa version` 与 `/api/meta` 显示的就是发布版本；本地 `docker build` 不传该参数，仍使用源码中的默认版本。

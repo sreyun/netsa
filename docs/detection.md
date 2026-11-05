@@ -125,6 +125,30 @@ CRS 依赖完整的请求头与请求体，只看日志时误报偏高，且每�
 
 加上这些规则后，CRS 回归样本中本引擎的检出从 410 条提高到 585 条；CRS 的 536 条反例上新增的 8 条告警都是 `;vim -c:!pwd` 这类真实的命令执行载荷（反例只表示由另一条 CRS 规则负责）。用真实环境一天的 1.7 万条 nginx 日志核对，新规则没有任何命中。
 
+## 国产 OA、中间件漏洞接口签名
+
+内置 254 条签名，覆盖致远、泛微、用友、通达、蓝凌、万户、金和、宏景、红帆 OA，帆软、Smartbi、亿赛通、畅捷通 T+、若依、JeecgBoot、Nacos、XXL-JOB、ThinkPHP、织梦、骑士等 CMS，以及深信服、天融信、奇安信、锐捷、H3C、海康威视、大华等设备，共 41 个国产产品。签名由 `tools/vulnpaths` 从 [nuclei-templates](https://github.com/projectdiscovery/nuclei-templates)（MIT 许可，见 [NOTICE](../NOTICE)）中提取，另有少量人工补充。
+
+签名只有路径与查询参数名（以及 `method=`、`action=` 这类选择功能的参数值），不含载荷：日志看不到请求体，攻击者换载荷也能认出。
+
+| 情况 | 分类 | 等级 |
+|---|---|---|
+| 请求是某个产品的漏洞接口，且带有注入、穿越、命令执行等载荷 | 已知漏洞利用，名称注明产品与 CVE / CNVD 编号（如“万户OA 任意文件读取漏洞利用”） | 按漏洞等级，高危为主 |
+| 只访问了漏洞接口（上传、反序列化的载荷在请求体里，或用 GET 确认接口是否存在） | 漏洞接口探测 | 中危（中危漏洞为低危） |
+| 站点上从未出现过该产品、请求也没有成功 | 同上 | 最高低危（产品不适用） |
+| 接口是站点正常业务在用的（自动学习） | 漏洞接口探测 | 最高低危，见[业务接口学习](self-learning.md#参数的正常取值与站点产品) |
+
+- 签名在生成时排除了会被正常访问撞上的请求：产品首页（`/seeyon/main.do`）、登录接口、上传后验证文件的请求，以及 `/download.do`、`/search.php` 这类其他系统也常用的接口名。
+- 原有 `cve-middleware` 规则中按整个产品目录（`/yyoa/`、`/defaultroot/`）、正常业务接口（`/seeyon/webmail.do`、`/ispirit/interface`、`/general/login_code.php`）判为高危的部分已移除，由签名库更精确地判断：跑着这些 OA 的站点，正常访问不再一律高危。
+- 生成时同时输出每条签名对应的原始模板请求（保留大小写与编码），测试保证它们都能被认出；在演示日志（2.76 万条）与 CRS 回归样本（2333 条）上没有命中。
+- 匹配按路径中的每一段查表，不命中时每条请求约 100ns。
+
+更新签名（需要 nuclei-templates 的本地副本，只读取其中的 YAML）：
+
+```bash
+go run ./tools/vulnpaths -src /path/to/nuclei-templates -samples internal/detect/testdata/vulnpaths_samples.tsv > internal/detect/vulnpaths.tsv
+```
+
 ## 防火墙与 Web 日志联动：被攻击后回连
 
 Web 日志只能看到请求，看不到服务器之后做了什么；防火墙日志能看到内网主机的出站连接。两者关联可以发现攻击已经得手：

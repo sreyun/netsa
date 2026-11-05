@@ -33,8 +33,10 @@ const (
 type FeedStatus struct {
 	Name      string    `json:"name"`
 	Type      string    `json:"type"`
+	Kind      string    `json:"kind,omitempty"`
 	Addrs     int       `json:"addrs"`
 	Nets      int       `json:"nets"`
+	Domains   int       `json:"domains"`
 	Skipped   int       `json:"skipped"` // 因不安全而丢弃的条目（内网地址、过宽的网段）
 	Updated   time.Time `json:"updated,omitzero"`
 	LastError string    `json:"last_error,omitempty"`
@@ -57,17 +59,69 @@ func (db *DB) FeedStatuses() []FeedStatus {
 }
 
 // entrySet 累积情报条目。外部情报可能出错或被投毒，一条 0.0.0.0/0 或内网网段就会把所有流量标记为恶意：
-// 内网和保留地址、短于 /8（IPv6 /32）的网段都丢弃。
+// 内网和保留地址、短于 /8（IPv6 /32）的网段都丢弃；域名的过滤见 domain.go。
 type entrySet struct {
 	l       *list
+	allow   map[string]bool
 	skipped int
+	// local 表示管理员维护的本地文件：IP 按原样生效（可以有意写内网地址），域名仍做公共平台过滤
+	local bool
 }
 
-func newEntrySet(name string) *entrySet {
-	return &entrySet{l: &list{name: name, addrs: map[netip.Addr]bool{}}}
+func newEntrySet(name string, allow map[string]bool) *entrySet {
+	return &entrySet{l: &list{name: name, addrs: map[netip.Addr]bool{}, domains: map[string]struct{}{}}, allow: allow}
 }
 
-func (s *entrySet) size() int { return len(s.l.addrs) + s.l.count }
+func (s *entrySet) size() int { return len(s.l.addrs) + s.l.count + len(s.l.domains) }
+
+// hostsSink 是 hosts 文件中把恶意域名指向的“黑洞”地址：0.0.0.0 evil.example。
+var hostsSink = map[string]bool{"0.0.0.0": true, "127.0.0.1": true, "::": true, "::1": true}
+
+// addLine 解析文本情报的一行：IP、网段、域名、URL，或 hosts 文件格式。# 与 ; 之后为注释。
+func (s *entrySet) addLine(line string) {
+	if i := strings.IndexAny(line, "#;"); i >= 0 {
+		line = line[:i]
+	}
+	f := strings.Fields(line)
+	switch {
+	case len(f) == 0:
+	case len(f) >= 2 && hostsSink[f[0]]:
+		s.addDomain(f[1])
+	default:
+		s.addIndicator(f[0])
+	}
+}
+
+// addIndicator 按内容判断条目是 IP / 网段、URL 还是域名。
+func (s *entrySet) addIndicator(v string) {
+	v = strings.Trim(strings.TrimSpace(v), `"'`)
+	if v == "" {
+		return
+	}
+	if h := urlHost(v); h != "" {
+		v = strings.Trim(h, "[]")
+	}
+	if _, err := netip.ParsePrefix(v); err == nil {
+		s.add(v)
+		return
+	}
+	if _, err := netip.ParseAddr(v); err == nil {
+		s.add(v)
+		return
+	}
+	s.addDomain(v)
+}
+
+func (s *entrySet) addDomain(v string) {
+	if s.size() >= maxFeedEntries {
+		return
+	}
+	if d := normDomain(v, s.allow); d != "" {
+		s.l.domains[d] = struct{}{}
+		return
+	}
+	s.skipped++
+}
 
 func (s *entrySet) add(v string) {
 	v = strings.TrimSpace(v)
@@ -88,7 +142,7 @@ func (s *entrySet) add(v string) {
 	if a.Is6() {
 		min = 32
 	}
-	if a.IsLoopback() || a.IsPrivate() || a.IsLinkLocalUnicast() || a.IsLinkLocalMulticast() || a.IsMulticast() || a.IsUnspecified() || p.Bits() < min {
+	if !s.local && (a.IsLoopback() || a.IsPrivate() || a.IsLinkLocalUnicast() || a.IsLinkLocalMulticast() || a.IsMulticast() || a.IsUnspecified() || p.Bits() < min) {
 		s.skipped++
 		return
 	}
@@ -99,8 +153,8 @@ func (s *entrySet) add(v string) {
 	s.l.addPrefix(netip.PrefixFrom(a, p.Bits()).Masked())
 }
 
-// STIX 指标的模式中取出 IP：[ipv4-addr:value = '198.51.100.1'] OR [ipv6-addr:value = '2001:db8::1']。
-var stixIPRe = regexp.MustCompile(`ipv[46]-addr:value\s*(?:=|IN|ISSUBSET)\s*\(?\s*'([^']+)'((?:\s*,\s*'[^']+')*)`)
+// STIX 指标的模式中取出 IP、域名与 URL：[ipv4-addr:value = '198.51.100.1'] OR [domain-name:value = 'evil.example']。
+var stixIPRe = regexp.MustCompile(`(ipv[46]-addr|domain-name|url):value\s*(?:=|IN|ISSUBSET)\s*\(?\s*'([^']+)'((?:\s*,\s*'[^']+')*)`)
 var stixQuotedRe = regexp.MustCompile(`'([^']+)'`)
 
 type stixObject struct {
@@ -117,6 +171,10 @@ func addSTIXObjects(s *entrySet, objs []stixObject, minConf int, now time.Time) 
 		switch o.Type {
 		case "ipv4-addr", "ipv6-addr":
 			s.add(o.Value)
+		case "domain-name":
+			s.addDomain(o.Value)
+		case "url":
+			s.addIndicator(o.Value)
 		case "indicator":
 			if o.Revoked || (minConf > 0 && (o.Confidence == nil || *o.Confidence < minConf)) {
 				continue
@@ -127,9 +185,9 @@ func addSTIXObjects(s *entrySet, objs []stixObject, minConf int, now time.Time) 
 				}
 			}
 			for _, m := range stixIPRe.FindAllStringSubmatch(o.Pattern, -1) {
-				s.add(m[1])
-				for _, q := range stixQuotedRe.FindAllStringSubmatch(m[2], -1) {
-					s.add(q[1])
+				s.addIndicator(m[2])
+				for _, q := range stixQuotedRe.FindAllStringSubmatch(m[3], -1) {
+					s.addIndicator(q[1])
 				}
 			}
 		}
@@ -174,6 +232,14 @@ func parseMISP(s *entrySet, body []byte) error {
 		case "ip-src|port", "ip-dst|port":
 			v, _, _ := strings.Cut(a.Value, "|")
 			s.add(v)
+		case "domain", "hostname":
+			s.addDomain(a.Value)
+		case "domain|ip":
+			d, ip, _ := strings.Cut(a.Value, "|")
+			s.addDomain(d)
+			s.add(ip)
+		case "url":
+			s.addIndicator(a.Value)
 		}
 	}
 	return nil
@@ -181,13 +247,7 @@ func parseMISP(s *entrySet, body []byte) error {
 
 func parseText(s *entrySet, body []byte) {
 	for _, line := range bytes.Split(body, []byte{'\n'}) {
-		text := string(line)
-		if i := strings.IndexAny(text, "#;"); i >= 0 {
-			text = text[:i]
-		}
-		if f := strings.Fields(text); len(f) > 0 {
-			s.add(f[0])
-		}
+		s.addLine(string(line))
 	}
 }
 
@@ -196,6 +256,7 @@ type fetcher struct {
 	cfg    config.IntelFeedConfig
 	token  string
 	client *http.Client
+	allow  map[string]bool
 }
 
 func (f *fetcher) do(ctx context.Context, method, u, accept string, body []byte) ([]byte, http.Header, error) {
@@ -212,9 +273,12 @@ func (f *fetcher) do(ctx context.Context, method, u, accept string, body []byte)
 		req.Header.Set("Content-Type", "application/json")
 	}
 	if f.token != "" {
-		if f.cfg.Type == "misp" {
+		switch {
+		case f.cfg.TokenHeader != "":
+			req.Header.Set(f.cfg.TokenHeader, f.token)
+		case f.cfg.Type == "misp":
 			req.Header.Set("Authorization", f.token)
-		} else {
+		default:
 			req.Header.Set("Authorization", "Bearer "+f.token)
 		}
 	}
@@ -247,7 +311,7 @@ func (f *fetcher) fetchTAXII(ctx context.Context, s *entrySet, now time.Time) er
 			return err
 		}
 		q := u.Query()
-		q.Set("match[type]", "indicator,ipv4-addr,ipv6-addr")
+		q.Set("match[type]", "indicator,ipv4-addr,ipv6-addr,domain-name,url")
 		if next != "" {
 			q.Set("next", next)
 		}
@@ -274,14 +338,16 @@ func (f *fetcher) fetchTAXII(ctx context.Context, s *entrySet, now time.Time) er
 }
 
 func (f *fetcher) fetch(ctx context.Context, now time.Time) (*entrySet, error) {
-	s := newEntrySet(f.cfg.Name)
+	s := newEntrySet(f.cfg.Name, f.allow)
+	s.l.kind = f.cfg.Kind
 	switch f.cfg.Type {
 	case "taxii":
 		if err := f.fetchTAXII(ctx, s, now); err != nil {
 			return nil, err
 		}
 	case "misp":
-		body, _ := json.Marshal(map[string]any{"returnFormat": "json", "type": []string{"ip-src", "ip-dst", "ip-src|port", "ip-dst|port"}, "to_ids": true, "enforceWarninglist": true})
+		body, _ := json.Marshal(map[string]any{"returnFormat": "json", "type": []string{"ip-src", "ip-dst", "ip-src|port", "ip-dst|port",
+			"domain", "hostname", "domain|ip", "url"}, "to_ids": true, "enforceWarninglist": true})
 		data, _, err := f.do(ctx, http.MethodPost, strings.TrimRight(f.cfg.URL, "/")+"/attributes/restSearch", "application/json", body)
 		if err != nil {
 			return nil, err
@@ -342,6 +408,10 @@ func writeFeedCache(path string, l *list) error {
 			b.WriteByte('\n')
 		}
 	}
+	for d := range l.domains {
+		b.WriteString(d)
+		b.WriteByte('\n')
+	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return err
 	}
@@ -361,11 +431,11 @@ func (db *DB) StartFeeds(ctx context.Context, cfgs []config.IntelFeedConfig, cac
 	}
 	db.feeds.mu.Unlock()
 	for _, c := range cfgs {
-		f := &fetcher{cfg: c, client: &http.Client{Timeout: feedTimeout}}
+		f := &fetcher{cfg: c, client: &http.Client{Timeout: feedTimeout}, allow: db.allow}
 		if c.TokenEnv != "" {
 			f.token = os.Getenv(c.TokenEnv)
 		}
-		st := &FeedStatus{Name: c.Name, Type: c.Type}
+		st := &FeedStatus{Name: c.Name, Type: c.Type, Kind: c.Kind}
 		db.feeds.mu.Lock()
 		db.feeds.status[c.Name] = st
 		db.feeds.mu.Unlock()
@@ -373,11 +443,12 @@ func (db *DB) StartFeeds(ctx context.Context, cfgs []config.IntelFeedConfig, cac
 		if cacheDir != "" {
 			cache = feedCachePath(cacheDir, c.Name)
 			if file, err := os.Open(cache); err == nil {
-				l := parseList(c.Name, file)
+				l, _ := readList(c.Name, file, db.allow, false)
 				file.Close()
+				l.kind = c.Kind
 				db.setFeedList(l)
 				db.feeds.mu.Lock()
-				st.Addrs, st.Nets = len(l.addrs), l.count
+				st.Addrs, st.Nets, st.Domains = len(l.addrs), l.count, len(l.domains)
 				db.feeds.mu.Unlock()
 			}
 		}
@@ -420,7 +491,8 @@ func (db *DB) refreshFeed(ctx context.Context, f *fetcher, st *FeedStatus, cache
 		}
 	}
 	db.feeds.mu.Lock()
-	st.Addrs, st.Nets, st.Skipped, st.Updated, st.LastError = len(s.l.addrs), s.l.count, s.skipped, time.Now(), ""
+	st.Addrs, st.Nets, st.Domains, st.Skipped, st.Updated, st.LastError = len(s.l.addrs), s.l.count, len(s.l.domains), s.skipped, time.Now(), ""
 	db.feeds.mu.Unlock()
-	log.Printf("[intel] 情报源 %s 已更新：%s 个 IP、%s 个网段（丢弃 %d 条不安全的条目）", f.cfg.Name, strconv.Itoa(len(s.l.addrs)), strconv.Itoa(s.l.count), s.skipped)
+	log.Printf("[intel] 情报源 %s 已更新：%s 个 IP、%s 个网段、%s 个域名（丢弃 %d 条不安全的条目）", f.cfg.Name,
+		strconv.Itoa(len(s.l.addrs)), strconv.Itoa(s.l.count), strconv.Itoa(len(s.l.domains)), s.skipped)
 }

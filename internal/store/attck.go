@@ -22,6 +22,13 @@ const CatMalware = "恶意软件/远控"
 // CatCallback 是内网主机在遭受 Web 攻击后连接攻击者或攻击载荷中的回连地址（防火墙与 Web 日志联动）。
 const CatCallback = "攻击后回连"
 
+// CatMalDomain、CatPhishing 是内网主机解析（或连接）情报标记的恶意软件投递、钓鱼域名与地址。
+const (
+	CatMalDomain = "恶意域名"
+	CatPhishing  = "钓鱼网站"
+	CatMining    = "挖矿"
+)
+
 // Tactic 是 MITRE ATT&CK 战术。
 type Tactic struct {
 	ID   string `json:"id"`
@@ -111,6 +118,9 @@ var categoryTechniques = map[string][]string{
 	"DNS隧道":      {"T1071.004"},
 	"带外探测回连":     {"T1071.004", "T1190"},
 	"攻击后回连":      {"T1071", "T1059"},
+	"漏洞接口探测":     {"T1190"},
+	CatMalDomain: {"T1105", "T1071.004"},
+	CatPhishing:  {"T1566"},
 	"DGA域名":      {"T1568.002"},
 	"动态域名/内网穿透":  {"T1568", "T1572"},
 	"挖矿":         {"T1496"},

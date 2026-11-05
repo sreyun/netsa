@@ -250,11 +250,15 @@ type IntelConfig struct {
 	TorExitURL string            `yaml:"tor_exit_url"` // 为空则不拉取
 	// Feeds 在线情报源：STIX / TAXII 2.1 / MISP / 文本列表
 	Feeds []IntelFeedConfig `yaml:"feeds"`
+	// DomainAllowlist 本单位的域名：域名情报中等于或位于其下的条目不生效（情报源误把自家域名列进来时不会误报）
+	DomainAllowlist []string `yaml:"domain_allowlist"`
 }
 
 type BlocklistConfig struct {
 	Name string `yaml:"name"`
 	Path string `yaml:"path"`
+	// Kind 情报类别：c2 / malware / phishing / mining / attacker，为空表示通用黑名单
+	Kind string `yaml:"kind"`
 }
 
 type DetectConfig struct {

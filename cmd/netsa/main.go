@@ -61,7 +61,7 @@ import (
 
 // version 是构建版本号。默认值用于本地构建；镜像构建通过
 // -ldflags "-X main.version=<tag>" 注入，`netsa version` 与 /api/meta 都会显示注入后的值。
-var version = "1.7.7"
+var version = "1.7.8"
 
 func usage() {
 	fmt.Fprintf(os.Stderr, `netsa %s —— 网络安全态势感知与攻击面分析系统
@@ -220,6 +220,7 @@ func build(cfg *config.Config) (*app, error) {
 	a.store.SetLocation(loc)
 	a.store.GeoLookup = a.geo.Lookup
 	a.store.IntelMatch = a.intel.Match
+	a.store.IntelKind = a.intel.KindOf
 	if a.notifier, err = alert.New(cfg.Alert, robotsFile(cfg)); err != nil {
 		return nil, err
 	}
@@ -238,6 +239,8 @@ func build(cfg *config.Config) (*app, error) {
 		Escalate: cfg.Learn.EscalateOn(), EscalateDays: cfg.Learn.EscalateDays, WindowDays: cfg.Learn.WindowDays}); err != nil {
 		return nil, err
 	}
+	a.learn.PriorAttacks = a.store.AttackCount // 业务接口学习只用此前没有攻击记录的访客
+	a.store.Calibrate = a.learn.Calibrate      // 状态库生成的情报命中同样按情报源的准确率校准
 	if added := geo.AddInternalNetworks(a.learn.LearnedNets()); len(added) > 0 {
 		log.Printf("[learn] 载入自动识别的内网网段: %s", strings.Join(added, ", "))
 	}
@@ -247,7 +250,7 @@ func build(cfg *config.Config) (*app, error) {
 	}
 	a.broker = api.NewBroker()
 	a.pipe = &pipeline.Pipeline{
-		Engine: a.engine, Behavior: detect.NewBehavior(cfg.Detect.Thresholds), Store: a.store, Geo: a.geo,
+		Engine: a.engine, Behavior: detect.NewBehavior(cfg.Detect.Thresholds), Store: a.store, Geo: a.geo, Intel: a.intel,
 		RealIP: pipeline.NewRealIP(cfg.RealIP), Notifier: a.notifier,
 		EnrichLevel: model.ParseSeverity(cfg.Geo.EnrichLevel), OnAlert: a.onAlert, Suppress: a.suppress, Assets: a.assets,
 		Exposure: a.exposure, Learn: a.learn,

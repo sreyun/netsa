@@ -238,3 +238,140 @@ func TestProfilePersist(t *testing.T) {
 		t.Fatalf("报告: %+v", r)
 	}
 }
+
+// 漏洞接口签名：站点运行该产品时，同一接口被多个网段的访客正常访问后认定为业务接口，只访问接口的请求降为低危；
+// 站点没有该产品、请求也没有成功时判为不适用。
+func TestVulnEndpointBusiness(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "learn.json")
+	l, e := attackLearner(t, path), profEngine(t)
+	now := time.Date(2026, 11, 5, 10, 0, 0, 0, time.UTC)
+	pages := []string{"/seeyon/main.do?method=index", "/seeyon/common/js/ui/seeyon.ui.js", "/seeyon/apps_res/v3xmain/css/main.css"}
+	train(l, e, "oa.example", 30, 12, now, func(i int) string { return pages[i%len(pages)] })
+	office := func(ip string) model.Hit {
+		t.Helper()
+		ev := siteEv(ip, "oa.example", "/seeyon/htmlofficeservlet", 200, now)
+		ev.Method = "POST"
+		h, ok := hitOf(run(l, e, ev), "vp-cnvd-2019-19299")
+		if !ok {
+			t.Fatalf("应命中漏洞接口签名")
+		}
+		return h
+	}
+	// 此前有攻击记录的来源（扫描器）不计入：100.200.x.x 都是扫描器
+	l.PriorAttacks = func(ip string) int64 {
+		if strings.HasPrefix(ip, "100.200.") {
+			return 3
+		}
+		return 0
+	}
+	for i := 0; i < 2*endpointNets; i++ {
+		office(fmt.Sprintf("100.200.%d.9", i))
+	}
+	if h := office("203.0.113.5"); h.Weak || h.Severity != model.SevMedium {
+		t.Fatalf("学到之前按中危（扫描器不计入）: %+v", h)
+	}
+	for i := 0; i < endpointNets; i++ {
+		office(fmt.Sprintf("100.%d.1.20", 64+i))
+	}
+	h := office("100.100.1.20")
+	if !h.Weak || h.Severity != model.SevLow || !strings.Contains(h.Evidence, "正常业务接口") {
+		t.Fatalf("业务接口应降为低危: %+v", h)
+	}
+	l.ConfirmSource("203.0.113.66", "evidence", "测试", now)
+	if h := office("203.0.113.66"); h.Weak {
+		t.Fatal("已确认攻击源不降级")
+	}
+	if h := office("100.200.99.9"); h.Weak || h.Severity != model.SevMedium {
+		t.Fatalf("此前有攻击记录的来源（扫描器）在业务接口上的探测不降级: %+v", h)
+	}
+	// 带载荷的利用照常是已知漏洞利用
+	ev := siteEv("203.0.113.7", "oa.example", "/seeyon/webmail.do?method=doDownloadAtt&filename=a.jsp&filePath=../conf/datasourceCtp.properties", 200, now)
+	if h, ok := hitOf(run(l, e, ev), "vp-cnvd-2020-62422"); !ok || h.Weak || h.Severity < model.SevMedium || h.Category != detect.CatCVE {
+		t.Fatalf("带载荷的利用: %+v", h)
+	}
+	// 只有 Java、没有致远 OA 的站点：失败的探测判为不适用
+	train(l, e, "java.example", 30, 12, now, func(i int) string { return fmt.Sprintf("/user/view.do?id=%d", i) })
+	ev = siteEv("203.0.113.8", "java.example", "/seeyon/htmlofficeservlet", 404, now)
+	ev.Method = "POST"
+	if h, _ := hitOf(run(l, e, ev), "vp-cnvd-2019-19299"); !h.Inapplicable || h.Severity != model.SevLow || !strings.Contains(h.Evidence, "致远OA") {
+		t.Fatalf("产品不存在: %+v", h)
+	}
+	r := l.Report().Profile
+	if r.EndpointN != 1 || r.Endpoints[0].Host != "oa.example" || r.Business < 1 || r.VulnSigs < 200 {
+		t.Fatalf("报告: %+v", r)
+	}
+	if err := l.Save(); err != nil {
+		t.Fatal(err)
+	}
+	l2 := attackLearner(t, path)
+	ev = siteEv("100.101.1.20", "oa.example", "/seeyon/htmlofficeservlet", 200, now)
+	ev.Method = "POST"
+	if h, _ := hitOf(run(l2, e, ev), "vp-cnvd-2019-19299"); !h.Weak {
+		t.Fatalf("重启后应保留业务接口: %+v", h)
+	}
+}
+
+func TestVulnMarkers(t *testing.T) {
+	for p, want := range map[string]string{
+		"/defaultroot/login.jsp":   "java,wanhu",
+		"/seeyon/main.do":          "java,seeyon",
+		"/cdgserver3/index.jsp":    "java,esafenet",
+		"/static/defaultroot/a.js": "",
+		"/xxl-job-admin/toLogin":   "xxljob,java",
+		"/api/defaultroot":         "",
+	} {
+		if got := strings.Join(techOf(p), ","); got != want {
+			t.Errorf("%s: %q，期望 %q", p, got, want)
+		}
+	}
+	if techText([]string{"wanhu"}) != "万户OA" {
+		t.Error(techText([]string{"wanhu"}))
+	}
+}
+
+// 情报源准确率：命中某个情报源的事件反复被判为误报，只由它产生的情报命中下调一级；
+// 另一个准确的情报源同时标记时不下调；锁定后恢复。
+func TestFeedPrecision(t *testing.T) {
+	l, err := Load(Options{Calibrate: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	var cases []Case
+	for i := 1; i <= 5; i++ {
+		cases = append(cases, Case{Incident: uint64(i), Source: fmt.Sprintf("198.51.100.%d", i), Rules: map[string]int{"intel": 1, "scan-dir": 3, "ua-scanner": 1},
+			Feeds: []string{"不准的情报"}, Verdict: VerdictFP, User: "ana", Time: now})
+	}
+	cases = append(cases, Case{Incident: 9, Source: "203.0.113.9", Rules: map[string]int{"intel": 1}, Feeds: []string{"准确的情报"}, Verdict: VerdictTP, User: "ana", Time: now})
+	l.Feedback(cases...)
+	r := l.Report()
+	var bad FeedStat
+	for _, f := range r.Feeds {
+		if f.Feed == "不准的情报" {
+			bad = f
+		}
+	}
+	if !bad.Calibrated || bad.FP != 5 || bad.Precision != 0 {
+		t.Fatalf("情报源统计: %+v", r.Feeds)
+	}
+	hit := func(feeds ...string) model.Hit {
+		h := l.Calibrate(nil, []model.Hit{{RuleID: "intel", Category: "威胁情报", Severity: model.SevHigh, Feeds: feeds}})
+		return h[0]
+	}
+	if h := hit("不准的情报"); h.Severity != model.SevMedium || h.Learned != -1 || !strings.Contains(h.Evidence, "不准的情报") {
+		t.Fatalf("应下调一级: %+v", h)
+	}
+	if h := hit("不准的情报", "准确的情报"); h.Severity != model.SevHigh {
+		t.Fatalf("准确的情报源同时标记时不下调: %+v", h)
+	}
+	if h := hit(); h.Severity != model.SevHigh {
+		t.Fatalf("没有情报源的命中不受影响: %+v", h)
+	}
+	if l.Report().Applied.Feed < 1 {
+		t.Fatal("应统计情报源校准次数")
+	}
+	l.Pin("feed:不准的情报", "admin", true)
+	if h := hit("不准的情报"); h.Severity != model.SevHigh {
+		t.Fatalf("锁定后恢复: %+v", h)
+	}
+}

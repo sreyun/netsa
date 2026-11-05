@@ -296,6 +296,9 @@ func (e *Engine) inspectWeb(ev *model.Event) []model.Hit {
 		hits = append(hits, h)
 	}
 	hits = reviewSyntax(ev, uri, result, hits, review)
+	if s := matchVuln(ev.Method, path, ev.URI); s != nil { // 国产 OA、中间件的已知漏洞接口
+		hits = append(hits, vulnHit(s, ev, path, result, hits))
+	}
 	return append(hits, specialWebChecks(ev, uri, result)...)
 }
 

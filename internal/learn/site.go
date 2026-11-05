@@ -188,6 +188,9 @@ func techOf(lp string) []string {
 		for _, x := range techImplies[k] {
 			add(x)
 		}
+		if v, ok := detect.VulnVendorInfo(k); ok && v.Lang != "" && techImplies[k] == nil {
+			add(v.Lang) // 漏洞签名覆盖的国产产品：致远 OA 隐含 Java、通达 OA 隐含 PHP
+		}
 	}
 	last := lp[strings.LastIndexByte(lp, '/')+1:]
 	if i := strings.IndexByte(last, ';'); i >= 0 { // ;jsessionid=
@@ -211,6 +214,8 @@ func techOf(lp string) []string {
 		}
 		if k, ok := segTech[seg]; ok {
 			add(k)
+		} else if i == 0 {
+			add(detect.VulnMarker(seg)) // 漏洞签名中只有这个产品使用的第一级目录（/defaultroot/、/cdgserver3/……）
 		}
 	}
 	if strings.Contains(lp, "/_app/immutable/") {
@@ -316,6 +321,9 @@ func requiredTech(h *model.Hit, lp string) []string {
 	if t, ok := ruleTech[h.RuleID]; ok {
 		return t
 	}
+	if v := detect.VulnVendorOf(h.RuleID); v != "" {
+		return []string{v} // 国产 OA、中间件的漏洞接口签名
+	}
 	switch h.Category {
 	case detect.CatCVE, detect.CatWebShell, detect.CatSensitive:
 	default:
@@ -344,6 +352,8 @@ func techText(techs []string) string {
 	for _, t := range techs {
 		if n := techNames[t]; n != "" {
 			names = append(names, n)
+		} else if v, ok := detect.VulnVendorInfo(t); ok {
+			names = append(names, v.Name)
 		} else {
 			names = append(names, t)
 		}

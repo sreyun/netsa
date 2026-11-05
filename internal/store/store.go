@@ -243,6 +243,11 @@ type Store struct {
 	dayEnd      int64
 	loc         *time.Location
 
+	// IntelKind 返回情报的类别（c2 / malware / phishing / mining / attacker，空为通用黑名单），决定情报命中的等级
+	IntelKind func(name string) string
+	// Calibrate 是自学习校准（learn.Learner.Calibrate）：状态库自己生成的情报命中（入站情报、外连情报地址）
+	// 不经过流水线，同样要按情报源的准确率下调。不能回调状态库（调用时持有状态库的写锁）
+	Calibrate func(ev *model.Event, hits []model.Hit) []model.Hit
 	// GeoLookup / IntelMatch 在创建新画像时调用。
 	GeoLookup  func(ip string) *geo.Info
 	IntelMatch func(ip string) []string
@@ -314,7 +319,9 @@ func (s *Store) recordLocked(ev *model.Event, hits []model.Hit) RecordResult {
 	// 普通出站流量不作为攻击来源统计；命中情报的出站连接以发起连接的主机为主体记录告警。
 	var c2 *model.Hit
 	if ev.Kind == model.KindFirewall && s.IntelMatch != nil {
-		c2 = s.c2Hit(ev)
+		if c2 = s.c2Hit(ev); c2 != nil {
+			*c2 = s.calibrated(ev, *c2)
+		}
 	}
 	if ev.Outbound {
 		s.totals.Outbound++
@@ -410,8 +417,15 @@ func (s *Store) recordLocked(ev *model.Event, hits []model.Hit) RecordResult {
 			case ev.Reach == model.ReachNo:
 				sev, res, note = model.SevMedium, model.ResultFailed, "（防火墙会话证据表明未到达任何服务）"
 			}
-			hits = append(hits, model.Hit{RuleID: "intel", Name: "威胁情报命中", Category: "威胁情报", Severity: sev,
-				Phase: model.PhaseRecon, Evidence: strings.Join(p.Intel, ", ") + note, Result: res})
+			// 扫描、暴力破解来源的名单只说明信誉，真实的攻击由规则判断；钓鱼、矿池地址主动来访不常见，只作提示
+			switch s.intelKind(p.Intel) {
+			case "attacker":
+				sev = pick(res != model.ResultUnknown, model.SevLow, model.SevMedium)
+			case "phishing", "mining":
+				sev = model.SevLow
+			}
+			hits = append(hits, s.calibrated(ev, model.Hit{RuleID: "intel", Name: "威胁情报命中", Category: "威胁情报", Severity: sev,
+				Phase: model.PhaseRecon, Evidence: strings.Join(p.Intel, ", ") + note, Result: res, Feeds: feedNames(p.Intel)}))
 		}
 	}
 	oldLevel, oldSeen, oldFirst := p.Level, p.LastSeen, p.FirstSeen
@@ -529,7 +543,7 @@ func (s *Store) recordLocked(ev *model.Event, hits []model.Hit) RecordResult {
 			// 事件里单独累计，避免出现「命中 10 次、告警 6 条」却无处解释的口径差异。
 			s.muteIncidentLocked(ev.SrcIP, incidentHit{
 				rule: h.RuleID, category: h.Category, phase: h.Phase, result: h.Result, proven: h.Proven,
-				target: truncate(ev.Target(), 300), asset: ev.Asset, at: ev.Time,
+				target: truncate(ev.Target(), 300), asset: ev.Asset, at: ev.Time, feeds: h.Feeds,
 			})
 		}
 	}
@@ -570,7 +584,8 @@ func (s *Store) recordLocked(ev *model.Event, hits []model.Hit) RecordResult {
 		s.surf.finding("c2:"+ev.SrcIP, "内网主机触发恶意软件 / 远控告警", "失陷迹象", h.Severity, ev.SrcIP, h.Name+"："+h.Evidence,
 			"隔离该主机并使用终端安全软件全盘查杀，排查恶意进程、自启动项与外连；确认感染途径后修复", ev.DstIP, ev.Time)
 		s.surf.observeFw(ev, s.published(ev))
-	} else if c2 != nil {
+	} else if c2 != nil && (c2.Category == CatC2 || c2.Category == CatMining || c2.Category == CatMalDomain) {
+		// 钓鱼网站、攻击来源类情报只告警，不作为失陷迹象登记
 		s.surf.finding("c2:"+ev.SrcIP, "内网主机外连威胁情报地址", "失陷迹象", c2.Severity, ev.SrcIP, c2.Evidence,
 			"立即隔离该主机，排查恶意进程、计划任务、自启动项与可疑账号；在出口防火墙封禁该地址，并核查同网段其他主机是否存在相同外连", ev.DstIP, ev.Time)
 	} else {
@@ -635,6 +650,9 @@ func (s *Store) newAlert(ev *model.Event, h *model.Hit, p *IPProfile) *model.Ale
 		}
 	}
 	a.IncidentID = s.attachIncidentLocked(a, p)
+	if inc := s.incidents[a.IncidentID]; inc != nil && len(h.Feeds) > 0 {
+		inc.addFeeds(h.Feeds)
+	}
 	if len(s.alerts) < s.maxAlerts {
 		s.alerts = append(s.alerts, a)
 	} else {

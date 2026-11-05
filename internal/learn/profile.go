@@ -124,11 +124,65 @@ func (s *paramStat) shapeText() string {
 // profileState 是参数取值与站点产品的学习状态，有自己的锁：每条正常的 Web 日志都会进来，不与研判反馈争用 l.mu。
 // 加锁顺序与攻击行为学习相同：先 l.mu 后 prof.mu。
 type profileState struct {
-	mu     sync.Mutex
-	params map[string]*paramStat // 站点 路径形态?参数名
-	sites  map[string]*siteStat  // 站点（见 site.go）
+	mu        sync.Mutex
+	params    map[string]*paramStat   // 站点 路径形态?参数名
+	sites     map[string]*siteStat    // 站点（见 site.go）
+	endpoints map[string]*endpointUse // 站点 漏洞接口签名 → 正常访问（见 businessLocked）
+	dirty     bool                    // 有接口刚被认定为业务接口，需要落盘
 
-	weak, anomaly, inapplicable atomic.Int64 // 本次启动以来生效的次数
+	weak, anomaly, inapplicable, business atomic.Int64 // 本次启动以来生效的次数
+}
+
+// 业务接口学习：存在已知漏洞的接口也可能是正常业务在用（致远 OA 的 htmlofficeservlet 就是正文编辑插件的接口）。
+// 站点有足够多的正常访问时，同一接口被足够多网段的访客访问、访客此前没有任何攻击记录、请求中也没有攻击载荷，
+// 就是正常业务接口（扫描器通常先打过别的探测，不计入）。
+// 之后只访问接口、没有载荷的请求降为低危。载荷在请求体里时日志本来就看不到，能看到载荷的照常告警。
+// 不要求先识别出产品：不少产品没有专属目录，否则这些产品的站点上正常业务会一直按中危告警。
+const (
+	endpointNets = 8    // 至少这么多网段的访客正常访问过
+	maxEndpoints = 5000 // 最多记录的接口
+)
+
+// endpointUse 是一个漏洞接口的正常访问统计。
+type endpointUse struct {
+	Name  string    `json:"name"` // 签名名称
+	Nets  []uint32  `json:"nets"`
+	Hits  uint32    `json:"hits"`
+	First time.Time `json:"first"`
+	Last  time.Time `json:"last"`
+}
+
+// businessLocked 记录一次只访问漏洞接口、没有载荷的请求，返回该接口是否已认定为正常业务接口（调用方持 st.mu）。
+func (st *profileState) businessLocked(ev *model.Event, host string, h *model.Hit, hits []model.Hit, confirmed bool, prior int64, at time.Time) (*endpointUse, bool) {
+	if at.IsZero() {
+		at = time.Now()
+	}
+	k := host + " " + h.RuleID
+	u := st.endpoints[k]
+	clean := !confirmed && prior == 0 && ev.Status >= 200 && ev.Status < 400
+	for _, x := range hits {
+		clean = clean && (x.TagOnly || x.Category == detect.CatVulnEndpoint)
+	}
+	if s := st.sites[host]; clean && s != nil && s.mature() {
+		if u == nil && len(st.endpoints) < maxEndpoints {
+			if st.endpoints == nil {
+				st.endpoints = map[string]*endpointUse{}
+			}
+			u = &endpointUse{Name: h.Name, First: at}
+			st.endpoints[k] = u
+		}
+		if u != nil {
+			u.Hits++
+			was := len(u.Nets) >= endpointNets
+			addNet(&u.Nets, netHash(ev.SrcIP), 16)
+			st.dirty = st.dirty || !was && len(u.Nets) >= endpointNets // 刚认定为业务接口：落盘
+			if at.After(u.Last) {
+				u.Last = at
+			}
+		}
+	}
+	// 降级同样只给此前没有攻击记录的访客：扫描器在真实的 OA 站点上找到了存在漏洞的接口，这个信号不能压低
+	return u, u != nil && len(u.Nets) >= endpointNets && !confirmed && prior == 0
 }
 
 // netHash 返回来源所在网段（IPv4 /24、IPv6 /48）的哈希，解析失败返回 0。
@@ -201,6 +255,15 @@ func (l *Learner) Profile(ev *model.Event, hits []model.Hit, train bool) []model
 		at = time.Now()
 	}
 	_, confirmed := l.confirmedSource(ev.SrcIP, at)
+	var prior int64 // 访客此前的攻击次数：只在业务接口学习时查询（在 prof.mu 之外，查询会取状态库的锁）
+	if !benign && l.PriorAttacks != nil {
+		for _, h := range hits {
+			if h.Category == detect.CatVulnEndpoint {
+				prior = l.PriorAttacks(ev.SrcIP)
+				break
+			}
+		}
+	}
 	path, query, _ := strings.Cut(ev.URI, "?")
 	lp := strings.ToLower(path)
 	host, shape := siteKey(ev.Host), pathShape(lp)
@@ -216,7 +279,7 @@ func (l *Learner) Profile(ev *model.Event, hits []model.Hit, train bool) []model
 	st.mu.Lock()
 	switch {
 	case !benign:
-		out = st.reviewLocked(ev, hits, host, shape, lp, ps, confirmed)
+		out = st.reviewLocked(ev, hits, host, shape, lp, ps, confirmed, prior)
 	default:
 		if h, ok := st.anomalyLocked(host, shape, ps); ok {
 			out = append(hits[:len(hits):len(hits)], h)
@@ -226,8 +289,9 @@ func (l *Learner) Profile(ev *model.Event, hits []model.Hit, train bool) []model
 			learned = st.trainLocked(ev, host, shape, lp, ps, at)
 		}
 	}
+	learned, st.dirty = learned || st.dirty, false
 	st.mu.Unlock()
-	if learned { // 有参数开始生效、或识别出新的站点产品：落盘
+	if learned { // 有参数开始生效、识别出新的站点产品或业务接口：落盘
 		l.mu.Lock()
 		l.dirty = true
 		l.mu.Unlock()
@@ -236,7 +300,7 @@ func (l *Learner) Profile(ev *model.Event, hits []model.Hit, train bool) []model
 }
 
 // reviewLocked 复核攻击请求的命中（调用方持 st.mu）。
-func (st *profileState) reviewLocked(ev *model.Event, hits []model.Hit, host, shape, lp string, ps []detect.Param, confirmed bool) []model.Hit {
+func (st *profileState) reviewLocked(ev *model.Event, hits []model.Hit, host, shape, lp string, ps []detect.Param, confirmed bool, prior int64) []model.Hit {
 	var out []model.Hit
 	edit := func(i int) *model.Hit {
 		if out == nil {
@@ -276,6 +340,15 @@ func (st *profileState) reviewLocked(ev *model.Event, hits []model.Hit, host, sh
 				}
 			}
 			continue
+		}
+		if h.Category == detect.CatVulnEndpoint {
+			if u, ok := st.businessLocked(ev, host, h, hits, confirmed, prior, ev.Time); ok {
+				e := edit(i)
+				e.Weak = true
+				e.Evidence += fmt.Sprintf("；自学习：这是站点 %s 上的正常业务接口（%d 个网段的访客访问过、请求中没有攻击载荷），最高低危", host, len(u.Nets))
+				st.business.Add(1)
+				continue
+			}
 		}
 		if h.Result != model.ResultFailed && h.Result != model.ResultBlocked && h.Result != model.ResultError {
 			continue // 只判断没有成功的探测：成功的请求说明目标确实存在，交给响应复核
@@ -395,8 +468,9 @@ func valueOf(ps []detect.Param, name string) string {
 
 // profilePersist 是持久化的参数与站点学习结果：只保存已经生效的参数，未生效的重启后重新统计。
 type profilePersist struct {
-	Params map[string]paramStat `json:"params,omitempty"`
-	Sites  map[string]siteStat  `json:"sites,omitempty"`
+	Params    map[string]paramStat   `json:"params,omitempty"`
+	Sites     map[string]siteStat    `json:"sites,omitempty"`
+	Endpoints map[string]endpointUse `json:"endpoints,omitempty"` // 已认定的业务接口
 }
 
 // profilePersistLocked 复制需要落盘的学习结果（调用方持 l.mu）。复制而不是引用：落盘序列化时不持 prof.mu。
@@ -423,7 +497,17 @@ func (l *Learner) profilePersistLocked() *profilePersist {
 			p.Sites[k] = s.clone()
 		}
 	}
-	if p.Params == nil && p.Sites == nil {
+	for k, u := range st.endpoints {
+		if len(u.Nets) >= endpointNets {
+			if p.Endpoints == nil {
+				p.Endpoints = map[string]endpointUse{}
+			}
+			c := *u
+			c.Nets = append([]uint32(nil), u.Nets...)
+			p.Endpoints[k] = c
+		}
+	}
+	if p.Params == nil && p.Sites == nil && p.Endpoints == nil {
 		return nil
 	}
 	return p
@@ -456,6 +540,16 @@ func (l *Learner) loadProfileLocked(p *profilePersist) {
 		s := s
 		st.sites[k] = &s
 	}
+	for k, u := range p.Endpoints {
+		if st.endpoints == nil {
+			st.endpoints = map[string]*endpointUse{}
+		}
+		if len(st.endpoints) >= maxEndpoints {
+			break
+		}
+		u := u
+		st.endpoints[k] = &u
+	}
 }
 
 // pruneProfileLocked 清理长期没有出现的参数与站点（调用方持 l.mu）。
@@ -474,6 +568,11 @@ func (l *Learner) pruneProfileLocked(now time.Time) {
 			delete(st.sites, k)
 		}
 	}
+	for k, u := range st.endpoints {
+		if u.Last.Before(cut) {
+			delete(st.endpoints, k)
+		}
+	}
 }
 
 // ProfileReport 是参数正常取值与站点产品学习的概览。
@@ -488,6 +587,20 @@ type ProfileReport struct {
 	Weak      int64        `json:"weak"`         // 按普通文字降级的命中（本次启动以来）
 	Anomaly   int64        `json:"anomaly"`      // 发现的取值异常
 	Inapplic  int64        `json:"inapplicable"` // 产品不存在、判为不适用的探测
+	Business  int64        `json:"business"`     // 业务接口上只访问接口、降为低危的命中
+	Endpoints []Endpoint   `json:"endpoints"`    // 已认定的业务接口（最多 50 个，访问最多的在前）
+	EndpointN int          `json:"endpoint_total"`
+	VulnSigs  int          `json:"vuln_sigs"` // 内置的国产 OA、中间件漏洞接口签名数
+}
+
+// Endpoint 是一个已认定为正常业务的漏洞接口。
+type Endpoint struct {
+	Host string    `json:"host"`
+	Rule string    `json:"rule"`
+	Name string    `json:"name"`
+	Nets int       `json:"nets"`
+	Hits uint32    `json:"hits"`
+	Last time.Time `json:"last"`
 }
 
 // ParamShape 是一个已生效参数的学习结果。
@@ -500,8 +613,17 @@ type ParamShape struct {
 
 func (l *Learner) profileReportLocked() ProfileReport {
 	st := &l.prof
-	r := ProfileReport{Samples: []ParamShape{}, Sites: []SiteReport{}, Weak: st.weak.Load(), Anomaly: st.anomaly.Load(), Inapplic: st.inapplicable.Load()}
+	r := ProfileReport{Samples: []ParamShape{}, Sites: []SiteReport{}, Endpoints: []Endpoint{}, Weak: st.weak.Load(), Anomaly: st.anomaly.Load(),
+		Inapplic: st.inapplicable.Load(), Business: st.business.Load(), VulnSigs: detect.VulnSigCount()}
 	st.mu.Lock()
+	for k, u := range st.endpoints {
+		if len(u.Nets) < endpointNets {
+			continue
+		}
+		r.EndpointN++
+		host, rule, _ := strings.Cut(k, " ")
+		r.Endpoints = append(r.Endpoints, Endpoint{Host: host, Rule: rule, Name: u.Name, Nets: len(u.Nets), Hits: u.Hits, Last: u.Last})
+	}
 	r.Params = len(st.params)
 	var text, strict []ParamShape
 	for k, s := range st.params {
@@ -533,6 +655,10 @@ func (l *Learner) profileReportLocked() ProfileReport {
 	sort.Slice(r.Sites, func(i, j int) bool { return r.Sites[i].Reqs > r.Sites[j].Reqs })
 	if len(r.Sites) > 100 {
 		r.Sites = r.Sites[:100]
+	}
+	sort.Slice(r.Endpoints, func(i, j int) bool { return r.Endpoints[i].Hits > r.Endpoints[j].Hits })
+	if len(r.Endpoints) > 50 {
+		r.Endpoints = r.Endpoints[:50]
 	}
 	return r
 }

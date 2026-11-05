@@ -27,7 +27,7 @@
 | `GET /api/auth/oidc/start`、`GET /api/auth/oidc/callback` | 单点登录 |
 | `POST /api/incidents/ai-batch` | 把事件加入后台研判队列（`{"ids":[…]}`，最多 500 个，运营分析员以上） |
 | `POST /api/incidents/{id}/ai` | 对事件执行 AI 研判，结论写入处置记录（运营分析员以上） |
-| `GET /api/learn`、`POST /api/learn/suggestions/{id}/apply|dismiss`、`POST /api/learn/rules/{rule}/pin|unpin`、`PUT /api/learn/policy` | 自学习状态（规则 / 目标级校准、确认攻击源、自动生效次数、模型一致率、建议、进化日志；`report.attack` 为从日志学到的攻击行为，`report.profile` 为参数正常取值与站点产品）、采纳或忽略建议、锁定规则与修改策略（管理员） |
+| `GET /api/learn`、`POST /api/learn/suggestions/{id}/apply|dismiss`、`POST /api/learn/rules/{rule}/pin|unpin`、`PUT /api/learn/policy` | 自学习状态（规则 / 目标级校准、确认攻击源、自动生效次数、模型一致率、建议、进化日志；`report.attack` 为从日志学到的攻击行为，`report.profile` 为参数正常取值、站点产品与已认定的业务接口）、采纳或忽略建议、锁定规则与修改策略（管理员） |
 | `GET /api/ai/settings`、`PUT /api/ai/settings`、`POST /api/ai/test`、`POST /api/ai/models` | 外部模型配置（协议、地址、名称、密钥、启用；响应不含密钥）、连接测试与读取模型列表（管理员） |
 | `GET/POST /api/suppressions`、`DELETE /api/suppressions/{id}` | 误报抑制规则（写操作需运营分析员以上） |
 | `GET /api/syslog/senders`、`POST /api/syslog/senders`、`PUT/DELETE /api/syslog/senders/{id}`、`PUT /api/syslog/policy` | syslog 发送端画像、登记与白名单开关（写操作需管理员） |

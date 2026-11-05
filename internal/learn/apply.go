@@ -115,7 +115,7 @@ func describePolicy(p Policy) string {
 
 // appliedStats 返回自动生效次数（Applied 的计数为原子变量，无需持锁）。
 func (l *Learner) appliedStats() Applied {
-	return Applied{Rule: l.applied.rule.Load(), Target: l.applied.target.Load(), Escalated: l.applied.escalated.Load(), Since: l.applied.since}
+	return Applied{Rule: l.applied.rule.Load(), Target: l.applied.target.Load(), Escalated: l.applied.escalated.Load(), Feed: l.applied.feed.Load(), Since: l.applied.since}
 }
 
 // AppliedStats 返回自学习结果自动生效的次数（监控指标使用）。
