@@ -1570,7 +1570,8 @@ async function loadAssess() {
   $('#asMatrixInfo').textContent = `观测到 ${m.observed} / ${m.total} 项技术${m.unmapped ? ` · ${num(m.unmapped)} 次命中来自威胁情报 / 自定义规则，未映射` : ''}`;
   $('#asMatrix').innerHTML = m.tactics.map((t) => `<div class="attck-col"><div class="attck-tac"><b>${esc(t.name)}</b><span>${esc(t.id)} ${esc(t.en)}</span><em>${num(t.hits)}</em></div>
       ${t.techniques.map((x) => {
-        const alpha = x.hits ? 0.18 + 0.62 * Math.log10(1 + x.hits) / Math.log10(1 + maxHits) : 0;
+        // 底色最深 0.55：再深白字的对比度不到 4.5
+        const alpha = x.hits ? 0.14 + 0.41 * Math.log10(1 + x.hits) / Math.log10(1 + maxHits) : 0;
         return `<button type="button" class="attck-tech${x.hits ? ' hit' : ''}" ${x.hits ? `data-tech="${esc(x.id)}" data-name="${esc(x.name)}"` : 'disabled'}
           style="${x.hits ? `background:rgba(255,122,69,${alpha.toFixed(2)});border-color:${LV_COLOR[x.max_severity] || '#2b4a80'}` : ''}"
           title="${esc(x.id)} ${esc(x.name)}&#10;对应检测：${esc(x.categories.join('、'))}${x.hits ? `&#10;命中 ${num(x.hits)} 次 · 攻击源 ${num(x.attackers)} 个 · 点击查看告警` : '&#10;暂未观测到'}">
@@ -2053,9 +2054,11 @@ const CH_CONF = {
 };
 let chainDefs = [];
 let chainCur = null;
-const chStrip = (reached, big) => `<span class="ch-strip${big ? ' big' : ''}">${chainDefs.map((d) => {
+// weak：只有需核实的迹象、不计入研判的阶段（如只有规律外连的“控制”），虚线框显示
+const chStrip = (reached, big, weak) => `<span class="ch-strip${big ? ' big' : ''}">${chainDefs.map((d) => {
   const on = reached.includes(d.id);
-  return `<i class="${on ? 'on st-' + d.id : ''}" title="${esc(d.name)}：${esc(d.desc)}${on ? '（已出现）' : '（未出现）'}">${esc(d.name)}</i>`;
+  const w = !on && (weak || []).includes(d.id);
+  return `<i class="${on ? 'on st-' + d.id : w ? 'weak' : ''}" title="${esc(d.name)}：${esc(d.desc)}${on ? '（已出现）' : w ? '（只有需核实的迹象，不计入研判）' : '（未出现）'}">${esc(d.name)}</i>`;
 }).join('')}</span>`;
 const chKind = (k) => `<span class="chip">${esc(CH_KIND[k] || k)}</span>`;
 
@@ -2072,17 +2075,18 @@ async function loadChains() {
   // 各阶段的资产数（全部资产）：点击按“推进到该阶段及之后”筛选
   $('#chFunnel').innerHTML = chainDefs.map((d) => `<button type="button" class="ch-fn st-${d.id}${r.counts[d.id] ? '' : ' zero'}" data-stage="${esc(d.id)}" title="${esc(d.desc)}">
       <b>${num(r.counts[d.id] || 0)}</b><span>${esc(d.name)}</span></button>`).join('<span class="ch-arrow" aria-hidden="true">›</span>');
-  $('#chTable').innerHTML = `<colgroup><col style="width:22%"><col style="width:300px"><col style="width:112px"><col style="width:64px"><col style="width:60px"><col style="width:96px"><col></colgroup>
-    <thead><tr><th>资产</th><th>攻击链路</th><th>失陷研判</th><th>等级</th><th>来源</th><th>时间</th><th>结论</th></tr></thead><tbody>${r.chains.map((c) => {
+  // 结论放在阶段条下方（最多两行，完整内容见提示）：单独一列在窄屏下会被挤成一两个字宽，整行被撑得很高
+  $('#chTable').innerHTML = `<colgroup><col class="ch-c-asset"><col class="ch-c-path"><col style="width:112px"><col style="width:64px"><col style="width:56px"><col style="width:104px"></colgroup>
+    <thead><tr><th>资产</th><th>攻击链路与结论</th><th>失陷研判</th><th>等级</th><th class="num">来源</th><th>时间</th></tr></thead><tbody>${r.chains.map((c) => {
       const others = c.members.filter((m) => m !== c.name);
       return `<tr class="clickable" data-chain="${esc(c.key)}" title="点击查看完整攻击链路">
-        <td><b class="mono">${esc(c.name)}</b> ${chKind(c.kind)}${typeof IMPC === 'function' ? IMPC(c.level) : ''}
+        <td><div class="ch-name"><b class="mono" title="${esc(c.name)}">${esc(c.name)}</b> ${chKind(c.kind)}${typeof IMPC === 'function' ? IMPC(c.level) : ''}</div>
           ${others.length ? `<div class="muted mono ch-members" title="${esc(others.join('、'))}">＋ ${esc(others.slice(0, 3).join('、'))}${others.length > 3 ? ` 等 ${others.length} 个` : ''}</div>` : ''}
-          ${c.asset ? `<div class="muted">属于 ${esc(c.asset)}</div>` : ''}</td>
-        <td>${chStrip(c.reached)}</td><td>${CH_CONF[c.confidence] || '<span class="muted">未见失陷迹象</span>'}</td><td>${badge(c.severity)}</td>
-        <td class="num">${num(c.sources)}</td><td class="nowrap muted">${esc(fmtShort(c.first_seen))}<br>${esc(fmtShort(c.last_seen))}</td>
-        <td class="ch-verdict">${esc(c.verdict)}</td></tr>`;
-    }).join('') || empty(7, $('#chStage').value ? '没有越过该阶段的资产，可在筛选中选择“全部”查看只被扫描的资产' : '暂无被攻击的资产')}</tbody>`;
+          ${c.asset ? `<div class="muted ch-members">属于 ${esc(c.asset)}</div>` : ''}</td>
+        <td>${chStrip(c.reached, false, c.weak)}<div class="ch-verdict" title="${esc(c.verdict)}">${esc(c.verdict)}</div></td>
+        <td>${CH_CONF[c.confidence] || '<span class="muted">未见失陷迹象</span>'}</td><td>${badge(c.severity)}</td>
+        <td class="num">${num(c.sources)}</td><td class="nowrap muted">${esc(fmtShort(c.first_seen))}<br>${esc(fmtShort(c.last_seen))}</td></tr>`;
+    }).join('') || empty(6, $('#chStage').value ? '没有越过该阶段的资产，可在筛选中选择“全部”查看只被扫描的资产' : '暂无被攻击的资产')}</tbody>`;
 }
 $('#chTable').addEventListener('click', (e) => {
   const tr = e.target.closest('[data-chain]');
@@ -2112,12 +2116,13 @@ function chStepHTML(v, i) {
     ? `<span class="mono">${esc(v.src)}</span>${v.peer ? ` → <span class="mono">${esc(v.peer)}</span>` : ''}<span class="muted">（资产自身发起）</span>`
     : `来源 ${ipLink(v.src)}${v.src_label ? ` <span class="muted">${esc(v.src_label)}</span>` : ''} → <span class="mono">${esc(v.target || v.asset)}</span>`;
   const techs = (v.techniques || []).map((t) => `<span class="chip" title="MITRE ATT&CK ${esc(t.id)}">${esc(t.id)} ${esc(t.name)}</span>`).join('');
-  return `<li class="ch-step st-${esc(v.stage)}${v.dismissed ? ' dismissed' : ''}" data-k="${i}">
+  return `<li class="ch-step st-${esc(v.stage)}${v.dismissed ? ' dismissed' : ''}${v.weak ? ' weak' : ''}" data-k="${i}">
     <div class="ch-step-head"><span class="ch-stage st-${esc(v.stage)}">${esc(v.stage_name)}</span>${badge(v.severity)} <b>${esc(v.name || v.category)}</b>
-      ${v.result ? resTag(v.result, v.proven) : ''}${v.dismissed ? ' <span class="chip">来源事件已标为误报，不计入研判</span>' : ''}
+      ${v.result ? resTag(v.result, v.proven) : ''}${v.dismissed ? ' <span class="chip">来源事件已标为误报，不计入研判</span>' : ''}${v.weak ? ' <span class="chip warn">需核实，不计入研判</span>' : ''}
       <span class="spacer"></span><span class="muted nowrap">${span}${v.count > 1 ? ` · ${num(v.count)} 次` : ''}</span></div>
-    <div class="ch-who">${who}${v.asset && v.self ? '' : ''}</div>
+    <div class="ch-who">${who}</div>
     ${v.evidence ? `<div class="ch-ev">${esc(v.evidence)}</div>` : ''}
+    ${v.weak ? `<div class="ch-weak">${esc(v.weak)}</div>` : ''}
     <div class="ch-foot">${techs}<span class="spacer"></span>
       ${v.incident ? `<button type="button" class="btn sm" data-inc="${v.incident}">事件 #${v.incident}</button>` : ''}
       <button type="button" class="btn sm" data-alerts="${i}">相关告警</button></div></li>`;
@@ -2133,9 +2138,10 @@ async function openChain(id) {
   mask.classList.add('open');
   const others = c.members.filter((m) => m !== c.name);
   $('#drawerTitle').innerHTML = `<div class="ipbig">${esc(c.name)}</div><div class="muted">${esc(CH_KIND[c.kind] || c.kind)}${c.level ? ` · ${esc(IMP[c.level] || c.level)}资产` : ''}${c.owner ? ` · 负责人 ${esc(c.owner)}` : ''}${others.length ? ` · 合并 ${esc(others.join('、'))}` : ''}</div>`;
-  const stages = c.stages.map((s) => `<div class="ch-st${s.reached ? ' on st-' + esc(s.id) : ''}" title="${esc(s.desc)}">
+  const stages = c.stages.map((s) => `<div class="ch-st${s.reached ? ' on st-' + esc(s.id) : s.weak ? ' weak' : ''}" title="${esc(s.desc)}${s.weak ? '&#10;只有需核实的迹象，不计入研判' : ''}">
       <div class="ch-st-name">${esc(s.name)}</div>
-      ${s.reached ? `<div class="ch-st-n">${num(s.hits)}<small> 次</small></div><div class="ch-st-t">${esc(fmtShort(s.first))}</div>${s.sources ? `<div class="ch-st-t">${num(s.sources)} 个来源</div>` : ''}` : '<div class="ch-st-t">未出现</div>'}
+      ${s.reached ? `<div class="ch-st-n">${num(s.hits)}<small> 次</small></div><div class="ch-st-t">${esc(fmtShort(s.first))}</div>${s.sources ? `<div class="ch-st-t">${num(s.sources)} 个来源</div>` : ''}`
+        : s.weak ? `<div class="ch-st-n">${num(s.hits)}<small> 次</small></div><div class="ch-st-t">需核实</div>` : '<div class="ch-st-t">未出现</div>'}
       ${s.reached && s.techniques ? `<div class="ch-st-tech">${s.techniques.slice(0, 2).map((t) => `<span title="${esc(t.name)}">${esc(t.id)}</span>`).join(' ')}</div>` : ''}</div>`).join('');
   const path = c.path.map((v) => `<li class="st-${esc(v.stage)}"><span class="ch-stage st-${esc(v.stage)}">${esc(v.stage_name)}</span>
       <span class="muted nowrap">${esc(fmtShort(v.first))}</span> <b>${esc(v.name || v.category)}</b>

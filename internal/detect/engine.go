@@ -408,6 +408,10 @@ func sameSiteURL(rest, host string) bool {
 		return false
 	}
 	host = strings.ToLower(host)
+	if i := strings.LastIndexByte(host, ':'); i > 0 && strings.IndexByte(host, ']') < 0 && strings.Count(host, ":") == 1 {
+		host = host[:i] // Host 头带端口（mg.example.com:443）
+	}
+	h = strings.ToLower(h)
 	if h == host {
 		return true
 	}

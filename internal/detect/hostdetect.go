@@ -2,6 +2,7 @@ package detect
 
 import (
 	"math"
+	"net/netip"
 	"strings"
 
 	"netsa/internal/model"
@@ -30,6 +31,48 @@ var miningDomains = domainSet("minexmr.com", "supportxmr.com", "nanopool.org", "
 var dynDomains = domainSet("duckdns.org", "no-ip.com", "no-ip.org", "no-ip.biz", "ddns.net", "hopto.org", "zapto.org", "sytes.net", "serveftp.com",
 	"3322.org", "f3322.net", "f3322.org", "8800.org", "ngrok.io", "ngrok-free.app", "ngrok.app", "trycloudflare.com", "serveo.net", "localtunnel.me",
 	"oicp.net", "vicp.net", "dynu.net", "freedns.afraid.org", "changeip.com", "natappfree.cc")
+
+// 不会是真实站点的 Host 头后缀：通配 DNS（任意地址都能写成域名）、保留 / 测试用的顶级域名。
+var fakeSiteSuffix = domainSet("nip.io", "sslip.io", "xip.io", "nip.direct", "traefik.me", "localtest.me", "lvh.me", "vcap.me",
+	"invalid", "example", "localhost", "bxss.me", "requestrepo.com", "canarytokens.com", "pipedream.net",
+	"metadata.google.internal", "metadata.tencentyun.com", "metadata.azure.com")
+
+// FakeSiteHost 判断 Web 日志里的 Host 头是不是虚构的站点名（已归一为小写、不含端口）：扫描器把带外探测平台（OAST、DNSLog）、
+// 通配 DNS（nip.io、sslip.io）、保留后缀（.invalid、.example、.localhost）、云元数据与对象存储的地址写进 Host 头，
+// 测试 SSRF、Host 头注入与虚拟主机路由，请求实际到达的仍是本机已有的站点。按 Host 头把它们记成站点，资产攻击链路
+// 与攻击面里会出现大量并不存在的“资产”。含有域名中不会出现的字符（载荷、空格、引号）的也是虚构的。
+func FakeSiteHost(h string) bool {
+	if h == "" {
+		return false
+	}
+	for i := 0; i < len(h); i++ {
+		// 非 ASCII 可能是未转成 punycode 的中文域名，不按字符判断
+		if c := h[i]; c < 0x80 && !(c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '.' || c == '-' || c == '_' || c == ':') {
+			return true
+		}
+	}
+	// 先按首字符排除域名再解析地址：每条 Web 日志都要判断一次，解析失败会分配错误对象
+	if h[0] >= '0' && h[0] <= '9' || strings.IndexByte(h, ':') >= 0 {
+		if a, err := netip.ParseAddr(h); err == nil {
+			// 回环、链路本地（169.254.169.254 等云元数据地址）、未指定地址与阿里云的元数据地址
+			return a.IsLoopback() || a.IsLinkLocalUnicast() || a.IsUnspecified() || h == "100.100.100.200"
+		}
+		if strings.IndexByte(h, ':') >= 0 {
+			return true // 非地址的主机名里不会有冒号
+		}
+	}
+	if h == "metadata" || h == "instance-data" {
+		return true
+	}
+	if domainIn(h, oobDomains) != "" || domainIn(h, fakeSiteSuffix) != "" {
+		return true
+	}
+	// AWS S3 存储桶地址（test.s3.amazonaws.com、bucket.s3.us-east-1.amazonaws.com）：探测云存储 SSRF 与存储桶接管
+	if strings.HasSuffix(h, ".amazonaws.com") && (strings.HasPrefix(h, "s3.") || strings.Contains(h, ".s3.") || strings.Contains(h, ".s3-")) {
+		return true
+	}
+	return false
+}
 
 func domainSet(list ...string) map[string]bool {
 	m := make(map[string]bool, len(list))
