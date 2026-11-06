@@ -325,6 +325,8 @@ func (s *Store) Load(path string) error {
 		for _, sv := range sf.Services {
 			sv.src = map[string]struct{}{}
 		}
+		sf.purgeSelfRFI() // 旧版本把本站的 pdf 预览地址记成了远程文件包含
+		sf.cleanLegacy()  // 旧版本把兜底页面登记成的敏感入口与敏感资源暴露
 		s.surf = sf
 	}
 	if len(snap.Scores) > maxScorePoints {

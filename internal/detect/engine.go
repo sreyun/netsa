@@ -393,6 +393,25 @@ func harmlessDotDot(uri string) bool {
 	return true
 }
 
+// reRFIParam 与远程文件包含规则（rfi）的参数写法一致。
+var reRFIParam = regexp.MustCompile(`[?&](file|page|path|include|inc|template|tpl|dir|document|folder|root|lang|module)=\s*(https?|ftps?)://`)
+
+// SelfReferenceRFI 判断“远程文件包含”的证据是否其实指向本站：每一处参数里的地址都是请求的站点或同一主域名。
+// 用于清理旧版本按远程文件包含记录的 pdf.js 本站预览地址（viewer.html?file=https://本站:443/…pdf）。
+func SelfReferenceRFI(text, host string) bool {
+	text = strings.ToLower(text)
+	locs := reRFIParam.FindAllStringIndex(text, -1)
+	if len(locs) == 0 {
+		return false
+	}
+	for _, l := range locs {
+		if !sameSiteURL(text[l[1]:], host) {
+			return false
+		}
+	}
+	return true
+}
+
 // sameSiteURL 判断参数中 "scheme://" 之后的地址是否指向本站（与请求的站点名相同或同一主域名）：
 // pdf.js 的 viewer.html?file=https://本站/group1/M00/…pdf、登录后的回跳地址引用的是自己的资源，不是包含远程文件。
 // 只比较主机名；http://本站@evil.com/、本站.evil.com 这类写法的主机名不同，照常告警。

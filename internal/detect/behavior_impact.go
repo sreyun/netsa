@@ -69,7 +69,35 @@ type hostImpact struct {
 }
 
 func isTimeoutResp(ev *model.Event, slow time.Duration) bool {
-	return ev.Status == 504 || ev.Status == 408 || slow > 0 && ev.ReqTime >= slow.Seconds()
+	return (ev.Status == 504 || ev.Status == 408 || slow > 0 && ev.ReqTime >= slow.Seconds()) && !longLived(ev)
+}
+
+// longLivedSeg 是长连接接口的路径段：SockJS（/websocket/{server}/{session}/websocket、xhr_streaming、eventsource …）、
+// Socket.IO、SignalR、SSE、长轮询。这些连接本来就一直挂着，日志里的耗时是整个会话的时长，网关超时断开也是常态。
+var longLivedSeg = map[string]bool{"websocket": true, "xhr_streaming": true, "xhr": true, "xhr_polling": true, "xhr_send": true,
+	"eventsource": true, "htmlfile": true, "jsonp": true, "ws": true, "wss": true, "sse": true, "longpoll": true, "long-poll": true,
+	"cometd": true, "socket.io": true, "sockjs": true, "signalr": true, "event-stream": true}
+
+// longLived 判断请求是否为长连接（WebSocket 升级、SockJS / Socket.IO / SignalR / SSE / 长轮询）：慢请求与超时攻击不统计它们。
+// 同一个访客的页面开着时会不断重连，每条连接都“耗时”很久，曾被反复判为慢请求攻击。
+func longLived(ev *model.Event) bool {
+	return ev.Status == 101 || LongLivedURI(ev.URI)
+}
+
+// LongLivedURI 判断 URI 是否为长连接接口（SockJS / Socket.IO / SignalR / SSE / 长轮询）。
+func LongLivedURI(uri string) bool {
+	path, query, _ := strings.Cut(uri, "?")
+	if strings.Contains(query, "transport=websocket") || strings.Contains(query, "transport=polling") {
+		return true
+	}
+	for p := path; p != ""; {
+		var seg string
+		seg, p, _ = strings.Cut(p, "/")
+		if seg != "" && longLivedSeg[strings.ToLower(seg)] {
+			return true
+		}
+	}
+	return false
 }
 
 func isWrite(method string) bool {

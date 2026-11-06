@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"netsa/internal/detect"
 	"netsa/internal/exposure"
 	"netsa/internal/geo"
 	"netsa/internal/model"
@@ -251,21 +252,101 @@ func (sf *surface) isFallback(host string, bytes int64) bool {
 
 // confirmFallback 记下站点的兜底页面大小，并撤销此前按这个大小误记的“攻击成功”与敏感入口。
 func (sf *surface) confirmFallback(host string, bytes int64) {
+	if sf.addFallback(host, bytes) {
+		sf.dropCatchAll(host, bytes)
+	}
+}
+
+// addFallback 只记下兜底页面大小，返回是否新增。
+func (sf *surface) addFallback(host string, bytes int64) bool {
 	if bytes <= 0 || sf.isFallback(host, bytes) {
-		return
+		return false
 	}
 	if sf.Fallback == nil {
 		sf.Fallback = map[string][]int64{}
 	}
 	list := sf.Fallback[host]
 	if list == nil && len(sf.Fallback) >= maxSoftHosts {
-		return
+		return false
 	}
 	if len(list) >= maxFallbackSize {
 		list = list[1:] // 最早确认的让位：站点改版后旧的兜底页面大小不再出现
 	}
 	sf.Fallback[host] = append(slices.Clip(list), bytes)
-	sf.dropCatchAll(host, bytes)
+	return true
+}
+
+// nearSize 判断两个响应大小是否只差几个字节（1% 以内，至少容许 2 字节）：同一个首页按请求头的不同（压缩方式、
+// 是否带 Cookie）会有几个字节的差别，扫描器拿到的兜底页面与健康检查拿到的首页常常就差这几个字节。
+func nearSize(a, b int64) bool {
+	d := a - b
+	if d < 0 {
+		d = -d
+	}
+	return d <= max(2, min(a, b)/100)
+}
+
+// nearCommon 判断响应大小是否与首页的某个常见大小只差几个字节（ep 为首页入口，可以为 nil）。
+// 单独一次接近不足以判定兜底页面（真实的小文件也可能恰好接近），只用于有第二份证据的场合。
+func (ep *Endpoint) nearCommon(b int64) bool {
+	if ep == nil || b <= 0 {
+		return false
+	}
+	for _, s := range ep.Sizes {
+		if ep.commonSize(s.B) && nearSize(b, s.B) {
+			return true
+		}
+	}
+	return false
+}
+
+// legacyFake 判断是不是旧版本登记的假敏感入口：没有记录响应大小、从来没有正常访问、只被攻击请求以 200 / 206 访问过
+// （扫描器带 Range 头探测 /backup.sql 时，兜底页面返回 206）。站点确认有兜底页面、入口又没有“敏感资源暴露”时撤销。
+func legacyFake(ep *Endpoint) bool {
+	if ep.Sensitive == "" || ep.SensBytes != 0 || ep.NormN != 0 || ep.Attacks < ep.Hits || len(ep.Status) == 0 {
+		return false
+	}
+	for st := range ep.Status {
+		if st != 200 && st != 206 {
+			return false // 302 跳转到登录页等：入口确实存在
+		}
+	}
+	return true
+}
+
+// cleanLegacy 在快照恢复时按已学到的首页常见大小与兜底页面大小清理一次旧版本留下的记录（只遍历一遍）：
+//   - 没有记录响应大小的“敏感资源暴露”：从证据中取大小，是已确认的兜底页面大小，或与首页常见大小只差几个字节；
+//   - 站点确认有兜底页面后，旧版本登记、没有“敏感资源暴露”的假敏感入口（见 legacyFake）。
+//
+// 返回撤销的入口数。
+func (sf *surface) cleanLegacy() int {
+	n := 0
+	for id, f := range sf.Findings {
+		if f.Category != "敏感资源暴露" || f.Bytes != 0 || !strings.HasPrefix(id, "sens:") {
+			continue
+		}
+		key := strings.TrimPrefix(id, "sens:")
+		host, _, _ := strings.Cut(key, " ")
+		b := evidenceBytes(f.Evidence)
+		if ep := sf.Endpoints[key]; b <= 0 || ep != nil && ep.NormN > 0 {
+			continue
+		}
+		if !sf.isFallback(host, b) {
+			if !sf.Endpoints[host+" /"].nearCommon(b) {
+				continue
+			}
+			sf.addFallback(host, b)
+		}
+		sf.dropEndpoint(key)
+		n++
+	}
+	for key, ep := range sf.Endpoints {
+		if len(sf.Fallback[ep.Host]) > 0 && legacyFake(ep) && sf.Findings["sens:"+key] == nil {
+			sf.dropEndpoint(key)
+			n++
+		}
+	}
+	return n
 }
 
 // maxFindings 是攻击面发现的数量上限。
@@ -319,11 +400,13 @@ func (sf *surface) catchAll(host, path string, bytes int64) bool {
 	}
 	if len(paths) < softSamePath {
 		paths[path] = struct{}{}
-		if len(paths) == softSamePath {
+		// 3 个不同路径大小完全相同；或 2 个、且与首页的常见大小只差几个字节（两份证据）
+		if len(paths) == softSamePath || len(paths) == 2 && sf.Endpoints[host+" /"].nearCommon(bytes) {
 			sf.confirmFallback(host, bytes)
+			return true
 		}
 	}
-	return len(paths) >= softSamePath
+	return len(paths) >= softSamePath || sf.isFallback(host, bytes)
 }
 
 // retractSuccess 撤销来源地址名下没有证据的“疑似攻击成功”记录（分析员把该来源的事件标为误报或忽略时调用，
@@ -349,19 +432,28 @@ func (sf *surface) retractSuccess(ip string) int {
 // 拿到的同样只是首页，并没有这些文件。
 func (sf *surface) dropCatchAll(host string, bytes int64) {
 	prefix := "sens:" + host + " "
+	home := sf.Endpoints[host+" /"]
+	homeSize := home.commonSize(bytes) // 首页的常见大小：旧记录中只差几个字节的同样是兜底页面
 	for id, f := range sf.Findings {
 		switch {
 		case f.Category == "攻击成功研判" && !f.Proven && f.Host == host:
 			if f.dropSize(bytes) {
 				delete(sf.Findings, id)
 			}
-		case f.Category == "敏感资源暴露" && strings.HasPrefix(id, prefix) && (f.Bytes == bytes || f.Bytes == 0 && evidenceBytes(f.Evidence) == bytes):
-			// 旧版本的记录没有响应大小，从证据文本“响应 N 字节”中取
+		case f.Category == "敏感资源暴露" && strings.HasPrefix(id, prefix) && f.Bytes == bytes:
 			sf.dropEndpoint(strings.TrimPrefix(id, "sens:"))
+		case f.Category == "敏感资源暴露" && strings.HasPrefix(id, prefix) && f.Bytes == 0:
+			// 旧版本的记录没有响应大小，从证据文本“响应 N 字节”中取
+			if b := evidenceBytes(f.Evidence); b == bytes || homeSize && b > 0 && nearSize(b, bytes) {
+				if ep := sf.Endpoints[strings.TrimPrefix(id, "sens:")]; ep == nil || ep.NormN == 0 {
+					sf.addFallback(host, b)
+				}
+				sf.dropEndpoint(strings.TrimPrefix(id, "sens:"))
+			}
 		}
 	}
 	for key, ep := range sf.Endpoints {
-		if ep.Host == host && ep.Sensitive != "" && ep.SensBytes == bytes && ep.NormN == 0 {
+		if ep.Host == host && ep.NormN == 0 && (ep.Sensitive != "" && ep.SensBytes == bytes || legacyFake(ep) && sf.Findings["sens:"+key] == nil) {
 			sf.dropEndpoint(key)
 		}
 	}
@@ -380,6 +472,27 @@ func (sf *surface) successKept(cat, target string) bool {
 		return sf.Findings["sens:"+key] != nil
 	}
 	return sf.Findings["succ:"+cat+":"+key] != nil
+}
+
+// purgeSelfRFI 撤销旧版本按“远程文件包含”记录的本站地址（pdf.js 的 viewer.html?file=https://本站:443/…pdf），
+// 快照恢复时调用，返回撤销的条数。检测早已不再这样判断，但留存的记录会一直列为疑似失陷资产。
+// 只撤销没有证据、只有一个来源的：合并了其他来源的记录里可能有真实的远程文件包含。
+func (sf *surface) purgeSelfRFI() int {
+	n := 0
+	for id, f := range sf.Findings {
+		if f.Category != "攻击成功研判" || f.Proven || len(f.IPs) > 1 || !strings.Contains(f.Evidence, "远程文件包含") {
+			continue
+		}
+		h := f.Host
+		if h == "" || h == "-" {
+			h, _, _ = strings.Cut(f.Asset, "/")
+		}
+		if detect.SelfReferenceRFI(f.Evidence, h) {
+			delete(sf.Findings, id)
+			n++
+		}
+	}
+	return n
 }
 
 // dropEndpoint 删除一个并不存在的入口（兜底页面返回的 200 被登记成的敏感入口）及其“敏感资源暴露”发现。

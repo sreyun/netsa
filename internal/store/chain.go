@@ -824,6 +824,8 @@ func (s *Store) weakLocked(g *chainGroup, st *chainStep) string {
 			return "来源是内网地址：多为反向代理、负载均衡、监控或内部扫描器的连接，不是拒绝服务"
 		case st.Rule == "bhv-flood" && s.scannerLocked(st.Src):
 			return "来源是端口扫描器：旧版本把高速扫描误判为流量洪泛"
+		case st.Rule == "bhv-timeout" && longLivedTarget(st.Target):
+			return "长连接（WebSocket / SockJS / SSE）本来就一直挂着：旧版本把页面的不断重连误判为慢请求攻击"
 		}
 	case stBreach, stPersist:
 		if !st.Proven && st.Result == model.ResultSuccess && risk.ResponseProvable(st.Category) && !s.surf.successKept(st.Category, st.Target) {
@@ -849,6 +851,12 @@ func (g *chainGroup) strongPeer(peer string) bool {
 		}
 	}
 	return false
+}
+
+// longLivedTarget 判断 Web 步骤的目标（站点 + 空格 + URI）是否为长连接接口。
+func longLivedTarget(target string) bool {
+	_, uri, ok := strings.Cut(target, " ")
+	return ok && detect.LongLivedURI(uri)
 }
 
 // scannerLocked 判断来源是否做过端口扫描或主机探测（调用方持读锁）。
