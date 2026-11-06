@@ -295,3 +295,30 @@ func TestImpactMemoryBounded(t *testing.T) {
 		t.Fatalf("过期状态应清理: impact=%d slow=%d attacked=%d", len(b.impact), len(b.slow), len(b.attacked))
 	}
 }
+
+// 长连接（SockJS、Socket.IO、WebSocket 升级、SSE）一直挂着，耗时是整个会话的时长：页面开着时不断重连，
+// 生产环境同一个访客 10 分钟内 20 条 /websocket/{server}/{session}/websocket 曾被反复判为慢请求攻击。
+func TestSlowRequestLongLived(t *testing.T) {
+	r := newImpactRun(t)
+	r.visitors(0, 600, 200)
+	uris := []string{"/websocket/384/trcboqfg/websocket", "/websocket/955/occl2nln/xhr_streaming", "/websocket/523/xcktxbt3/xhr_streaming?t=1793933195829",
+		"/socket.io/?EIO=4&transport=websocket&sid=abc", "/sockjs/info", "/api/notify/sse", "/hub/signalr/connect", "/ws"}
+	for i := 0; i < 40; i++ {
+		ev := &model.Event{Kind: model.KindWeb, SrcIP: "60.2.41.105", Host: "shop.example.com", Method: "GET", URI: uris[i%len(uris)],
+			Status: 200, ReqTime: 65, Time: r.now.Add(time.Duration(i*14) * time.Second)}
+		if i%5 == 0 {
+			ev.Status = 101
+		}
+		for _, h := range r.b.ObserveHits(ev, nil) {
+			r.fired[ev.SrcIP] = append(r.fired[ev.SrcIP], h)
+		}
+	}
+	if n := r.count("60.2.41.105", "bhv-timeout"); n != 0 {
+		t.Fatalf("长连接不应判为慢请求攻击: %+v", r.fired)
+	}
+	for _, u := range []string{"/api/websocket-config", "/api/report/export", "/events/list"} {
+		if longLived(&model.Event{URI: u, Status: 200}) {
+			t.Errorf("%s 不是长连接", u)
+		}
+	}
+}
