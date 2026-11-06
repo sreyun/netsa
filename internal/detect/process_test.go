@@ -151,3 +151,16 @@ func TestEncodedPSUnicode(t *testing.T) {
 		t.Fatalf("含多字节字符的命令行: %+v", h)
 	}
 }
+
+// 带版本号的可执行文件（php-fpm8.2、python3.11）按不带版本的名称识别。
+func TestVersionedProcessNames(t *testing.T) {
+	if procName("/usr/sbin/php-fpm8.2") != "php-fpm" || procName("/usr/bin/python3.11") != "python" || procName(`C:\Windows\System32\inetsrv\w3wp.exe`) != "w3wp" ||
+		procName("/usr/bin/7z") != "7z" {
+		t.Fatal(procName("/usr/sbin/php-fpm8.2"), procName("/usr/bin/python3.11"))
+	}
+	hits := procHits(t, `{"@timestamp":"2026-11-01T02:00:00Z","event":{"category":"process","type":"start"},"host":{"ip":["10.0.0.10"],"name":"web01"},`+
+		`"user":{"name":"www-data"},"process":{"executable":"/usr/bin/python3.11","command_line":"python3 -c 'import os;os.system(\"id\")'","parent":{"executable":"/usr/sbin/php-fpm8.2"}}}`)
+	if hasRule(hits, "proc-web-spawn") == nil {
+		t.Fatalf("php-fpm8.2 启动 python3.11: %+v", hits)
+	}
+}

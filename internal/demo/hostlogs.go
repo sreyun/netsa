@@ -1,6 +1,7 @@
 package demo
 
 import (
+	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
@@ -9,6 +10,7 @@ import (
 // 主机认证日志（Linux auth.log）与 DNS 日志（Zeek dns.log）的模拟数据：
 //   - 内网 DNS：正常解析；10.0.0.33 周期性查询大量随机域名（DGA 僵尸程序）；10.0.0.34 通过超长子域名外传数据（DNS 隧道）；
 //     10.0.0.35 在遭受 Log4j 攻击后解析 DNSLog 平台域名（带外回连）；10.0.0.32 解析矿池域名。
+//   - 服务器进程（Elastic Agent / ECS）：定时备份、日志轮转、部署脚本等正常活动；入侵剧本中 PHP-FPM 执行注入的命令、反弹 Shell、写入 cron。
 //   - SSH：运维人员从内网用密钥登录；外部来源暴力破解 root，偶尔在多次失败后登录成功（账号失陷）。
 
 var normalDomains = []string{"www.baidu.com", "api.weixin.qq.com", "mirrors.aliyun.com", "www.example.com", "update.microsoft.com",
@@ -49,6 +51,7 @@ func authLine(t time.Time, msg string) string {
 
 // hostLogs 生成一分钟内的 DNS 与认证日志。
 func (s *Sim) hostLogs(w *writer, t time.Time, intensity int) {
+	s.hostProcs(w, t)
 	for i := 0; i < 2*intensity; i++ {
 		client := fmt.Sprintf("10.0.0.%d", 40+s.r.Intn(20))
 		fmt.Fprintln(w.dns, s.dnsLine(s.sec(t), client, pick(s.r, normalDomains), pick(s.r, []string{"A", "A", "AAAA"}), "NOERROR"))
@@ -87,5 +90,29 @@ func (s *Sim) sshBrute(w *writer, t time.Time, ip string, success bool) {
 	}
 	if success {
 		fmt.Fprintln(w.auth, authLine(t.Add(59*time.Second), fmt.Sprintf("Accepted password for root from %s port %d ssh2", ip, 30000+s.r.Intn(30000))))
+	}
+}
+
+// procLine 生成服务器 10.0.0.10 的进程启动事件（Elastic Agent / ECS 格式，带本机地址）。
+func (s *Sim) procLine(t time.Time, exe, cmd, parent, user string) string {
+	b, _ := json.Marshal(map[string]any{
+		"@timestamp": t.UTC().Format(time.RFC3339Nano),
+		"event":      map[string]any{"category": "process", "type": "start", "dataset": "endpoint.events.process"},
+		"host":       map[string]any{"name": "web01", "ip": []string{s.server}},
+		"user":       map[string]any{"name": user},
+		"process":    map[string]any{"executable": exe, "command_line": cmd, "pid": 20000 + s.r.Intn(40000), "parent": map[string]any{"executable": parent}},
+	})
+	return string(b)
+}
+
+// hostProcs 生成服务器上正常的进程活动：定时备份、日志轮转、部署脚本（不应告警）。
+func (s *Sim) hostProcs(w *writer, t time.Time) {
+	switch t.Minute() {
+	case 0, 30:
+		fmt.Fprintln(w.proc, s.procLine(t.Add(time.Second), "/usr/bin/rsync", "rsync -a --delete /var/www/ /backup/www/", "/usr/sbin/cron", "root"))
+	case 15:
+		fmt.Fprintln(w.proc, s.procLine(t.Add(2*time.Second), "/usr/sbin/logrotate", "/usr/sbin/logrotate /etc/logrotate.conf", "/usr/sbin/cron", "root"))
+	case 45:
+		fmt.Fprintln(w.proc, s.procLine(t.Add(3*time.Second), "/usr/bin/bash", "bash /opt/deploy/healthcheck.sh", "/usr/bin/sudo", "deploy"))
 	}
 }

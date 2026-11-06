@@ -6,7 +6,7 @@
 
 | 镜像 | 用途 |
 |---|---|
-| `swr.cn-east-3.myhuaweicloud.com/sreyun/netsa:latest` | netsa 主程序（默认）；也可使用版本号标签，如 `:1.10.1` |
+| `swr.cn-east-3.myhuaweicloud.com/sreyun/netsa:latest` | netsa 主程序（默认）；也可使用版本号标签，如 `:1.10.2` |
 | `swr.cn-east-3.myhuaweicloud.com/sreyun/pgvector:pg18` | 可选的告警归档数据库（PostgreSQL 18），只在启用归档时拉取 |
 
 ## 生产部署（Docker Compose）
@@ -82,14 +82,14 @@ docker compose up -d
 
 ```bash
 # 联网机器：按服务器架构拉取（arm64 服务器用 --platform linux/arm64），不启用归档可不拉取 pgvector
-docker pull --platform linux/amd64 swr.cn-east-3.myhuaweicloud.com/sreyun/netsa:1.10.1
+docker pull --platform linux/amd64 swr.cn-east-3.myhuaweicloud.com/sreyun/netsa:1.10.2
 docker pull --platform linux/amd64 swr.cn-east-3.myhuaweicloud.com/sreyun/pgvector:pg18
-docker save -o netsa-images.tar swr.cn-east-3.myhuaweicloud.com/sreyun/netsa:1.10.1 \
+docker save -o netsa-images.tar swr.cn-east-3.myhuaweicloud.com/sreyun/netsa:1.10.2 \
   swr.cn-east-3.myhuaweicloud.com/sreyun/pgvector:pg18
 
 # 服务器：导入后直接启动（不要执行 docker compose pull），.env 中写入相同的镜像标签
 docker load -i netsa-images.tar
-echo 'NETSA_IMAGE=swr.cn-east-3.myhuaweicloud.com/sreyun/netsa:1.10.1' >> .env
+echo 'NETSA_IMAGE=swr.cn-east-3.myhuaweicloud.com/sreyun/netsa:1.10.2' >> .env
 docker compose up -d
 ```
 
@@ -146,6 +146,8 @@ docker compose -f docker-compose.demo.yml down -v
 ```
 
 演示环境从源码构建镜像（默认使用 `goproxy.cn` 下载 Go 依赖），账号见 [configs/demo.yaml](../configs/demo.yaml)。
+
+模拟日志包括 nginx 访问日志、UFW 与 FortiGate 防火墙日志、Linux 认证日志、DNS 日志与服务器进程日志（Elastic Agent / ECS 格式），其中有一段完整的入侵剧本：扫描官网与服务器 → 多种漏洞利用 → 命令注入成功、服务器上 PHP-FPM 执行注入的命令 → 反弹 Shell、外连载荷地址、写入 cron → 扫描内网 → 遍历用户接口、外传数据，可在“威胁分析 → 资产攻击链路”中查看；演示配置还登记了诱饵路径 `/backup.zip`、`/old/*`。
 
 ## 从源码构建镜像
 

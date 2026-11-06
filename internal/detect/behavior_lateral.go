@@ -38,10 +38,14 @@ const (
 // adminPorts 是横向移动常用的远程管理端口。
 var adminPorts = map[int]string{22: "SSH", 23: "Telnet", 135: "RPC", 139: "SMB", 445: "SMB", 3389: "RDP", 5900: "VNC", 5985: "WinRM", 5986: "WinRM"}
 
+// srvMark 记录服务器最早的被攻击与失陷证据：日志的读取先后、批次的处理先后都不固定，后来的证据（之后的心跳、外传）
+// 可能先于早期的证据到达，按最早的时刻判断之后的连接，结果才与处理顺序无关。
 type srvMark struct {
-	at          time.Time
+	at          time.Time // 最早的利用尝试
 	why         string
 	compromised bool
+	compAt      time.Time // 最早的失陷证据（回连攻击者、外连远控、主机上执行命令、载荷落地、使用诱饵账号）
+	compWhy     string
 }
 
 type ewSource struct {
@@ -88,10 +92,10 @@ func (b *Behavior) MarkAttacked(ip string, at time.Time, why string, compromised
 	var out []Late
 	keep := b.ewPend[ip][:0]
 	for _, p := range b.ewPend[ip] {
-		if d := p.ev.Time.Sub(m.at); d >= -time.Minute && d <= lateralWindow {
+		if afterMark(p.ev.Time, m.compAt) {
 			ev := p.ev
 			ev.Replay = true
-			out = append(out, Late{Ev: &ev, Hits: []model.Hit{lateralNewHit(&ev, p.svc, m)}})
+			out = append(out, Late{Ev: &ev, Hits: []model.Hit{lateralNewHit(&ev, p.svc, m, true)}})
 			continue
 		}
 		keep = append(keep, p)
@@ -109,8 +113,12 @@ func (b *Behavior) markAttackedLocked(ip string, at time.Time, why string, compr
 	if !ok && len(b.attackedSrv) >= maxAttackedSrv {
 		return
 	}
-	if !ok || at.After(m.at) || compromised && !m.compromised {
+	// 保留最早的时刻；已经过了判断窗口的旧证据换成新的
+	if !ok || at.Before(m.at) || at.Sub(m.at) > lateralWindow {
 		m.at, m.why = at, why
+	}
+	if compromised && (!m.compromised || at.Before(m.compAt) || at.Sub(m.compAt) > lateralWindow) {
+		m.compAt, m.compWhy = at, why
 	}
 	m.compromised = m.compromised || compromised
 	b.attackedSrv[ip] = m
@@ -169,10 +177,12 @@ func (b *Behavior) observeEastWest(ev *model.Event) []model.Hit {
 	m, ok := b.attackedSrv[ev.SrcIP]
 	switch {
 	case seen:
-	case ok && ev.Time.Sub(m.at) >= -time.Minute && ev.Time.Sub(m.at) <= lateralWindow && (m.compromised || ev.Time.Sub(src.first) >= ewLearn):
-		hits = append(hits, lateralNewHit(ev, svc, m))
-	case !ok || !m.compromised:
-		b.notePending(ev, svc) // 之后判定失陷时补记
+	case ok && m.compromised && afterMark(ev.Time, m.compAt):
+		hits = append(hits, lateralNewHit(ev, svc, m, true))
+	case ok && afterMark(ev.Time, m.at) && ev.Time.Sub(src.first) >= ewLearn:
+		hits = append(hits, lateralNewHit(ev, svc, m, false))
+	default:
+		b.notePending(ev, svc) // 之后判定失陷、或更早的失陷证据到达时补记
 	}
 	// 扇出：观察期之后新增的管理连接达到 5 台主机
 	if seen || ev.Time.Sub(src.first) < ewLearn {
@@ -197,13 +207,13 @@ func (b *Behavior) observeEastWest(ev *model.Event) []model.Hit {
 }
 
 // lateralNewHit 是被攻击的服务器第一次发起的内网管理连接。
-func lateralNewHit(ev *model.Event, svc string, m srvMark) model.Hit {
-	sev := model.SevMedium
+func lateralNewHit(ev *model.Event, svc string, m srvMark, compromised bool) model.Hit {
+	sev, ref := model.SevMedium, m.at
 	state := "遭受过攻击（" + m.why + "）"
-	if m.compromised {
-		sev, state = model.SevHigh, "已回连攻击者（"+m.why+"）"
+	if compromised {
+		sev, ref, state = model.SevHigh, m.compAt, "已判定失陷（"+m.compWhy+"）"
 	}
-	when := ev.Time.Sub(m.at).Round(time.Second)
+	when := ev.Time.Sub(ref).Round(time.Second)
 	rel := fmtDur(when) + "前"
 	if when < 0 {
 		rel = "前后"
@@ -211,6 +221,12 @@ func lateralNewHit(ev *model.Event, svc string, m srvMark) model.Hit {
 	return model.Hit{RuleID: "bhv-lateral-new", Name: "被攻击后发起内网连接（" + svc + "）", Category: CatLateral,
 		Severity: sev, Phase: model.PhaseExploit, Result: fwResult(ev),
 		Evidence: fmt.Sprintf("%s %s%s，之后第一次连接 %s:%d（%s），此前没有出现过这条连接", ev.SrcIP, rel, state, ev.DstIP, ev.DstPort, svc)}
+}
+
+// afterMark 判断连接是否发生在证据之后的判断窗口内（容许 1 分钟的时钟误差）。
+func afterMark(t, mark time.Time) bool {
+	d := t.Sub(mark)
+	return d >= -time.Minute && d <= lateralWindow
 }
 
 // notePending 保留来源最近的首次管理连接（只保留判定需要的字段，调用方持锁）。
@@ -344,7 +360,7 @@ func ipKey(s string) uint64 {
 // pruneLateral 清理过期的记录（调用方持锁）。
 func (b *Behavior) pruneLateral(now time.Time) {
 	for k, m := range b.attackedSrv {
-		if outside(now, m.at, lateralWindow) {
+		if outside(now, m.at, lateralWindow) && (!m.compromised || outside(now, m.compAt, lateralWindow)) {
 			delete(b.attackedSrv, k)
 		}
 	}
