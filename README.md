@@ -4,7 +4,7 @@
 
 **开源的网络安全态势感知与攻击面分析平台**
 
-把 nginx、防火墙 / IDS、主机认证与 DNS 日志，变成可溯源、可处置、会持续学习的安全态势。<br>
+把 Web、防火墙 / IDS、流量、主机认证与进程、DNS 日志，变成可溯源、可处置、会持续学习的安全态势。<br>
 单个二进制，开箱即用，支持内网离线运行。
 
 [![CI](https://github.com/sreyun/netsa/actions/workflows/ci.yml/badge.svg)](https://github.com/sreyun/netsa/actions/workflows/ci.yml)
@@ -23,9 +23,9 @@
 ## 为什么是 netsa
 
 - **零依赖，一键部署**：Go 单二进制，前端、世界与中国省市地图、离线定位库全部内置，不需要 Elasticsearch、Kafka 或数据库。Docker 镜像同时提供 amd64 与 arm64，关闭在线溯源后可在隔离网络中完全离线运行。
-- **日志不用先适配**：自动识别 40 余种格式，覆盖 nginx / Tengine / OpenResty / APISIX / Kong / Apache / IIS / Caddy、ModSecurity 等 WAF、iptables、华为、H3C、FortiGate、Palo Alto、Suricata、Linux 与 Windows 认证、主流 DNS、Zeek、NetFlow / sFlow / IPFIX、Sysmon / auditd / Wazuh 主机日志、应用登录日志，以及 Docker、Filebeat 等采集器的包装格式。
+- **日志不用先适配**：自动识别 50 余种格式，覆盖 nginx / Tengine / OpenResty / APISIX / Kong / Apache / IIS / Caddy、ModSecurity 等 WAF、iptables、华为、H3C、FortiGate、Palo Alto、Suricata、Linux 与 Windows 认证、主流 DNS、Zeek、NetFlow / sFlow / IPFIX、Sysmon / auditd / Wazuh 主机日志、应用登录日志，以及 Docker、Filebeat 等采集器的包装格式。
 - **检测准，告警可信**：87 条特征规则（部分改编自 OWASP CRS）、libinjection 语法分析加行为检测，用响应、会话证据和资产漏洞复核“表面成功”。等级由统一裁决决定：已拦截的攻击不会被标成“严重”，真正利用成功的不会被漏掉。
-- **认得国产 OA 和中间件**：内置 261 条漏洞接口签名，覆盖致远、泛微、用友、通达、蓝凌、万户 OA，帆软、亿赛通、若依、Nacos、APISIX、Nginx UI，以及深信服、锐捷、海康、大华等 43 个国产产品，告警直接注明产品与 CVE / CNVD 编号；正常业务在用的漏洞接口自动学习，不会一直刷告警。
+- **认得国产 OA 和中间件**：内置 261 条漏洞接口签名，覆盖致远、泛微、用友、通达、蓝凌、万户 OA，帆软、亿赛通、若依、Nacos、APISIX、Nginx UI，以及深信服、锐捷、海康、大华等 42 个产品，告警直接注明产品与 CVE / CNVD 编号；正常业务在用的漏洞接口自动学习，不会一直刷告警。
 - **情报在准不在多**：IP 与域名情报（STIX / TAXII / MISP / 文本列表），按远控、恶意软件、钓鱼、矿池、攻击来源分类定级，自动过滤被滥用的公共平台；每个情报源的准确率按分析员结论自动统计，长期误报的自动降级。
 - **防火墙与 Web 日志联动**：Web 攻击之后内网主机连接攻击者、或连接攻击载荷里写着的回连地址，直接判为失陷迹象；载荷中的地址被连接即证明载荷已被执行。
 - **能溯源到城市，能关联到团伙**：还原 CDN 与代理背后的真实 IP，识别 XFF 伪造和绕过 CDN 直连；多源定位交叉比对并给出置信度；同源关联与攻击活动归并找出同一攻击者轮换的出口（同一工具指纹、同一 OAST 关联标识、TLS 指纹、同一诱饵线索）；[诱饵](docs/detection.md#诱饵)（诱饵路径、线索、账号、蜜罐）命中即高置信攻击者；资产攻击链路把一台服务器从被扫描、被利用到被控制、横向移动的全过程按时间串起来。
@@ -84,7 +84,7 @@ go build -o bin/netsa ./cmd/netsa
 | 模块 | 能力 |
 |---|---|
 | [日志采集](docs/log-sources.md) | 实时跟踪文件（通配符、logrotate 轮转）、批量分析（含 `.gz`）、Syslog UDP / TCP / TLS（可双向认证）、[NetFlow / sFlow / IPFIX 采集](docs/log-sources.md#流量日志zeeknetflow--sflow-与云抗-d-服务)；发送端识别、白名单、限速与断流告警 |
-| [攻击检测](docs/detection.md) | SQL 注入、XSS、命令执行、Log4Shell、SSRF、XXE、反序列化、WebShell、已知漏洞利用等特征规则，部分命令、代码、Java 类规则改编自 OWASP CRS；[libinjection 语法分析](docs/detection.md#语法分析libinjection)复核注入命中并补上正则漏掉的变形；[国产 OA、中间件漏洞接口签名](docs/detection.md#国产-oa中间件漏洞接口签名)（254 条，41 个产品）；CC、暴力破解、撞库、接口遍历、端口扫描、WebShell 行为画像、数据外传、横向移动、带宽型 DDoS 等行为检测；记录了请求体时同样检测 POST 载荷；多轮解码对抗常见绕过 |
+| [攻击检测](docs/detection.md) | SQL 注入、XSS、命令执行、Log4Shell、SSRF、XXE、反序列化、WebShell、已知漏洞利用等特征规则，部分命令、代码、Java 类规则改编自 OWASP CRS；[libinjection 语法分析](docs/detection.md#语法分析libinjection)复核注入命中并补上正则漏掉的变形；[国产 OA、中间件漏洞接口签名](docs/detection.md#国产-oa中间件漏洞接口签名)（261 条，42 个产品）；CC、暴力破解、撞库、接口遍历、端口扫描、WebShell 行为画像、数据外传、横向移动、带宽型 DDoS 等行为检测；记录了请求体时同样检测 POST 载荷；多轮解码对抗常见绕过 |
 | [结果研判](docs/detection.md#研判复核用证据排除表面成功) | 按响应与会话证据区分已拦截、失败、未拦截、疑似成功；排除单页应用兜底页、统一错误页、未到达服务的“放行”等表面现象 |
 | [主机与 DNS 检测](docs/log-sources.md#主机认证日志与-dns-日志) | SSH / RDP / VPN 暴力破解与破解成功、密码喷洒、日志被清除、新建账号与提权、[账号盗用](docs/detection.md#账号盗用)（不可能的旅行、新国家登录、多地并发）；[主机进程检测](docs/detection.md#主机进程检测)（Web 进程执行命令、反弹 Shell、凭证窃取、持久化）；DNSLog 带外回连、DNS 隧道、DGA、矿池域名，以及情报标记的远控、恶意软件、钓鱼域名 |
 | [攻击源溯源](docs/traceability.md) | 融合 ip2region、MaxMind、ip-api、rDNS、RDAP / WHOIS，支持内网自定义网段定位；同源关联按网段、工具指纹、攻击手法找出疑似同一团伙 |
@@ -99,24 +99,26 @@ go build -o bin/netsa ./cmd/netsa
 ## 工作原理
 
 ```text
-日志源      nginx · 防火墙 / IDS · 主机认证 · DNS · 容器与采集器
-   │        文件跟踪 / 批量分析 / Syslog（UDP · TCP · TLS）
+日志源      nginx · 防火墙 / IDS · Zeek · 主机认证与进程 · 应用登录 · DNS · 容器与采集器
+   │        文件跟踪 / 批量分析 / Syslog（UDP · TCP · TLS）/ 流量采集（NetFlow · IPFIX · sFlow）
    ▼
 格式识别    每个数据源、每个发送端独立识别格式与时区
    ▼
 真实 IP     按可信代理还原来源，标记 XFF 伪造与绕过 CDN
    ▼
-威胁检测    特征规则（AC 预筛 + 正则）+ 语法分析（libinjection）+ 行为检测（时间窗口，内存有上限）
+威胁检测    特征规则（AC 预筛 + 正则）+ 语法分析（libinjection）+ 主机进程规则 + 行为检测（时间窗口，内存有上限）
+   ▼
+情报与诱饵  IP / 域名 / TLS 指纹 / 文件哈希情报；诱饵路径、线索、账号与蜜罐命中即确认攻击源
    ▼
 证据过滤    会话证据与 DNAT 映射排除未到达服务的探测，应用误报抑制
    ▼
 学习校准    参数正常取值、站点产品复核命中；按分析员结论下调反复误报的命中，升级已确认攻击源（learn）
    ▼
-联动分析    防火墙出站连接关联此前的 Web 攻击：被攻击后回连攻击者或载荷中的回连地址
+联动分析    关联此前的 Web 攻击：被攻击后回连、下载载荷；失陷主机事后的横向连接
    ▼
 等级裁决    分类底线、成功升级、结果封顶，统一决定最终等级（risk）
    ▼
-状态库      攻击者画像 · 告警 · 安全事件 · 攻击面 · 时间序列 · 快照持久化
+状态库      攻击者画像 · 告警 · 安全事件 · 攻击活动 · 资产攻击链路 · 攻击面 · 时间序列 · 快照持久化
    │
    ├── Web 大屏与 REST API（SSE 实时推送）
    ├── 钉钉 / 企业微信 / 飞书 / Webhook
@@ -137,10 +139,13 @@ go build -o bin/netsa ./cmd/netsa
 |---|---|
 | **Web** | nginx / Tengine / OpenResty / Apache（combined、main、vhost）、任意自定义 `log_format`、nginx JSON、APISIX、Kong、Nginx Proxy Manager、Caddy、Traefik、Elastic ECS、IIS W3C |
 | **WAF** | nginx / Tengine / OpenResty 错误日志中的 ModSecurity、naxsi 拦截与限流，ModSecurity JSON 审计日志，OpenResty Lua WAF |
-| **防火墙** | iptables、UFW、firewalld、nftables、pfSense / OPNsense、Windows 防火墙、Cisco ASA / FTD、Palo Alto、FortiGate、华为 USG、H3C、深信服、山石 |
+| **防火墙** | iptables、UFW、firewalld、nftables、pfSense / OPNsense、Windows 防火墙、Cisco ASA / FTD、Palo Alto、FortiGate、华为 USG、H3C、深信服、山石，以及华为、H3C、深信服的攻击防范日志 |
 | **IDS / IPS** | Suricata EVE JSON、Snort fast alert、FortiGate IPS / UTM 等设备威胁日志 |
 | **主机与 VPN 认证** | Linux `auth.log` / `secure`、Windows 安全事件（NXLog、Winlogbeat、Snare）、FortiGate / Cisco / OpenVPN、SQL Server 登录 |
 | **DNS** | BIND、dnsmasq、CoreDNS、Windows DNS、Zeek、Suricata DNS |
+| **流量** | Zeek（conn / http / ssl / files，TSV 或 JSON）、NetFlow v5 / v9、IPFIX、sFlow v5（UDP 采集）、云抗 D 服务的攻击事件 |
+| **主机进程（EDR / HIDS）** | Sysmon（Winlogbeat / NXLog / Elastic Agent）、Windows 4688、Elastic Defend（ECS）、Linux auditd、Wazuh 告警 |
+| **应用登录与蜜罐** | 业务系统、统一身份认证 / SSO 的 JSON 登录日志，OpenCanary 蜜罐日志 |
 | **容器与采集器** | Docker json-file、Fluent Bit / Fluentd、Filebeat / Logstash / Vector、containerd / CRI-O，自动拆开后识别原始日志 |
 
 接入方法见[日志接入](docs/log-sources.md)；接入后在大屏“数据源”页查看识别结果和解析失败样例。
@@ -150,14 +155,14 @@ go build -o bin/netsa ./cmd/netsa
 | 文档 | 内容 |
 |---|---|
 | [部署指南](docs/deployment.md) | 生产部署、`.env` 变量、升级回滚、内网离线、演示环境、从源码运行 |
-| [日志接入](docs/log-sources.md) | Web、防火墙、认证、DNS 接入，syslog 发送端管理，时区，DNAT 与会话证据 |
-| [检测与研判](docs/detection.md) | 威胁等级判定、研判复核、威胁评分、安全评估与失陷研判 |
+| [日志接入](docs/log-sources.md) | Web、防火墙、认证、DNS、流量（Zeek、NetFlow / sFlow、云抗 D）、主机进程、应用登录接入，syslog 发送端管理，时区，DNAT 与会话证据 |
+| [检测与研判](docs/detection.md) | 威胁等级判定、研判复核、攻击活动与资产攻击链路、数据窃取与横向移动、诱饵、主机进程检测、账号盗用、威胁评分、安全评估与失陷研判 |
 | [攻击源溯源](docs/traceability.md) | 多源定位、内网网段、定位库热更新、同源关联分析 |
 | [自学习与 AI 研判](docs/self-learning.md) | 自动生效的范围与边界、行为基线、合规自检、外部模型配置与模型适配 |
 | [安全运营](docs/operations.md) | 事件处置、告警推送、原始日志、资产漏洞、报表合规、账号审计、监控指标、告警归档 |
 | [配置参考](docs/configuration.md) | 常用配置项与运行注意事项 |
 | [API](docs/api.md) | REST 接口一览 |
-| [对接外部系统](docs/integrations.md) | LDAP / OIDC 单点登录、SIEM 转发、联动封禁、工单与处置剧本、STIX / TAXII / MISP 与文本情报（IP、域名，情报类别）、Sigma 与签名规则包 |
+| [对接外部系统](docs/integrations.md) | LDAP / OIDC 单点登录、SIEM 转发、联动封禁、工单与处置剧本、STIX / TAXII / MISP 与文本情报（IP、域名、TLS 指纹、文件哈希，情报类别）、Sigma 与签名规则包 |
 | [开发与发布](docs/development.md) | 本地测试、代码结构、镜像构建与发布 |
 | [能力评估与路线图](docs/roadmap.md) | 按攻击链路评估识别、定位、溯源能力，缺口与分步计划 |
 | [更新记录](docs/CHANGELOG.md) | 影响使用的变化 |

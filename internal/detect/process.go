@@ -61,13 +61,18 @@ var lsassSafe = map[string]bool{"msmpeng": true, "mssense": true, "csrss": true,
 var lsassRead = map[string]bool{"0x1010": true, "0x1410": true, "0x1418": true, "0x1438": true, "0x143a": true, "0x1f0fff": true,
 	"0x1fffff": true, "0x1f1fff": true, "0x1f3fff": true, "0x40": true, "0x1410a": true}
 
-// procName 返回进程的文件名（小写、不含扩展名）。
+// procName 返回进程的文件名（小写、不含扩展名与版本号）：带版本号的可执行文件（php-fpm8.2、python3.11、tomcat9）
+// 按不带版本的名称识别。
 func procName(p string) string {
 	p = strings.ToLower(strings.Trim(strings.TrimSpace(p), `"`))
 	if i := strings.LastIndexAny(p, `/\`); i >= 0 {
 		p = p[i+1:]
 	}
-	return strings.TrimSuffix(strings.TrimSuffix(p, ".exe"), ".com")
+	p = strings.TrimSuffix(strings.TrimSuffix(p, ".exe"), ".com")
+	if t := strings.TrimRight(strings.TrimRight(p, "0123456789."), "-_"); t != "" {
+		p = t
+	}
+	return p
 }
 
 type procRule struct {

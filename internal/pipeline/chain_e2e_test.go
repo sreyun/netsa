@@ -13,6 +13,7 @@ import (
 	"netsa/internal/demo"
 	"netsa/internal/detect"
 	"netsa/internal/ingest"
+	"netsa/internal/model"
 	"netsa/internal/store"
 )
 
@@ -51,6 +52,8 @@ func TestDemoAssetChain(t *testing.T) {
 			typ = "auth"
 		case "dns.log":
 			typ = "dns"
+		case "process.log":
+			typ = "edr"
 		}
 		if err := m.ReadFile(ctx, f, typ, "", host); err != nil {
 			t.Fatal(err)
@@ -110,6 +113,21 @@ func TestDemoAssetChain(t *testing.T) {
 			t.Logf("%s %s %s → %s %s", v.Stage, v.Category, v.Src, v.Target, v.Evidence)
 		}
 		t.Fatalf("链路中应有数据外传（%v）与横向移动（%v）", exfil, lateral)
+	}
+	// P3：服务器进程日志中 PHP-FPM 执行注入的命令（突破）、反弹 Shell（控制）、写入 cron（植入）；正常的备份、日志轮转不进入链路
+	got := map[string]string{}
+	for _, v := range c.Steps {
+		if v.Src == "10.0.0.10" {
+			got[v.Category] = v.Stage
+		}
+	}
+	if got["主机命令执行"] != "breach" || got["反弹Shell"] != "control" || got["持久化"] != "persist" {
+		t.Fatalf("链路中应有主机侧的证据: %v", got)
+	}
+	for _, a := range st.Alerts(store.AlertQuery{Limit: 5000}) {
+		if a.Kind == model.KindProcess && (strings.Contains(a.Evidence, "rsync") || strings.Contains(a.Evidence, "logrotate") || strings.Contains(a.Evidence, "healthcheck")) {
+			t.Fatalf("正常的进程活动不应告警: %+v", a)
+		}
 	}
 	// 被横向扫描的数据库主机单独成链，来源为失陷的服务器
 	db := st.AssetChain("10.0.0.21")

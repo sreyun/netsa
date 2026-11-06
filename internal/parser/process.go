@@ -33,7 +33,7 @@ func procEvent(format, hostIP, host string, p *model.ProcInfo) *model.Event {
 // SysmonJSON 解析 JSON 格式的 Sysmon、Windows 4688 与 ECS 进程事件。
 type SysmonJSON struct{}
 
-func (SysmonJSON) Name() string { return "sysmon" }
+func (SysmonJSON) Name() string { return "edr_json" } // Sysmon、Windows 4688 与 ECS 进程事件
 
 func (SysmonJSON) Parse(line string) (*model.Event, bool) {
 	line = strings.TrimSpace(line)

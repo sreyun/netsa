@@ -187,7 +187,7 @@ intel:
   - STIX 2.x：指标模式中的 IP、域名、URL，以及 `ipv4-addr`、`ipv6-addr`、`domain-name`、`url` 对象；
   - MISP：`to_ids` 的 `ip-src`、`ip-dst`、`domain`、`hostname`、`domain|ip`、`url`；
   - `text` 与本地的 `blocklists` 文件：每行一个 IP、网段、域名或 URL，也支持 hosts 文件格式（`0.0.0.0 evil.example`），`#` 与 `;` 之后为注释。
-  - 哈希类指标不使用：日志里没有文件哈希。
+  - `text` 与本地 `blocklists` 中的 **TLS 客户端指纹**（JA3 的 32 位十六进制 MD5、JA4，可带 `ja3:` / `ja4:` 前缀）与**文件哈希**（MD5 / SHA1 / SHA256）按指纹与哈希情报使用，CSV（如 abuse.ch SSLBL 的 `ja3_fingerprints.csv`、MalwareBazaar 的哈希列表）取每行第一列。指纹与 Zeek `ssl.log`、网关日志中的客户端指纹匹配，哈希与 Zeek `files.log` 中传输的文件匹配，见 [TLS 指纹与文件情报](detection.md#tls-指纹与文件情报)；STIX 与 MISP 中的文件哈希指标暂不导入。
 - **情报类别**（`kind`）决定命中的等级。同时命中多个情报时，按最严重的类别：
 
   | 类别 | 外部来源访问 | 内网主机连接该地址 | 内网主机解析该域名 |
@@ -198,6 +198,8 @@ intel:
   | `mining` 矿池 | 低危 | 挖矿，高危 | 挖矿，高危 |
   | `phishing` 钓鱼 | 低危 | 中危（被拦截低危） | 中危 |
   | `attacker` 扫描、暴力破解来源 | 中危（被拦截、未到达服务为低危） | 中危（被拦截低危） | 低危 |
+
+  TLS 握手中的服务器名称（SNI）与域名情报的匹配同“内网主机解析该域名”一列。TLS 客户端指纹命中：内网主机作为客户端时按疑似木马 / 远控处理（高危，`attacker`、`phishing` 类别中危）；外部来源按攻击工具的指纹处理（中危，`attacker` 类别低危）。文件哈希命中为高危，内网主机从公网下载的为严重。
 
   外部来源访问被防火墙拦截、或会话证据表明没有到达服务时降一级；域名没有解析成功（NXDOMAIN）时降一级。只命中 Tor 出口节点时最高中危。
 - **域名情报**：与 DNS 日志中内网主机的查询比对，情报标记了 `evil.example` 时 `a.evil.example` 同样命中。情报源常把被滥用的公共平台本身列进来，这类条目一律丢弃，页面显示丢弃数量：
@@ -240,4 +242,4 @@ netsa rulepack sign -key pack.key -in rules.yaml -name acme -serial 1 -o acme-1.
 
 ## 尚未支持
 
-高可用（双活或主备）、多租户、Kafka 输出、域名和哈希类情报、面向具体厂商防火墙的管理接口、授权管理。界面目前只有中文。
+高可用（双活或主备）、多租户、Kafka 输出、STIX / MISP 中的文件哈希指标、面向具体厂商防火墙的管理接口、授权管理。界面目前只有中文。

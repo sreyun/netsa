@@ -63,7 +63,7 @@ import (
 
 // version 是构建版本号。默认值用于本地构建；镜像构建通过
 // -ldflags "-X main.version=<tag>" 注入，`netsa version` 与 /api/meta 都会显示注入后的值。
-var version = "1.10.1"
+var version = "1.10.2"
 
 func usage() {
 	fmt.Fprintf(os.Stderr, `netsa %s —— 网络安全态势感知与攻击面分析系统
@@ -882,7 +882,7 @@ func cmdSimulate(args []string) error {
 		if err := demo.Generate(*dir, *hours, *intensity, *seed); err != nil {
 			return err
 		}
-		fmt.Printf("已生成 %d 小时演示日志到 %s/ (access.log, ufw.log, fortigate.log, auth.log, dns.log)\n", *hours, *dir)
+		fmt.Printf("已生成 %d 小时演示日志到 %s/ (access.log, ufw.log, fortigate.log, auth.log, dns.log, process.log)\n", *hours, *dir)
 	}
 	if !*live {
 		return nil

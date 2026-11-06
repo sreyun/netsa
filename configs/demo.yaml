@@ -33,6 +33,10 @@ sources:
     type: dns
     paths: ["demo-logs/dns.log"]
     from_beginning: true
+  - name: edr
+    type: edr            # 服务器的进程日志（Elastic Agent / ECS 格式）
+    paths: ["demo-logs/process.log"]
+    from_beginning: true
 
 syslog:
   enabled: true

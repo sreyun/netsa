@@ -167,3 +167,27 @@ func TestHugeCountsSaturate(t *testing.T) {
 		t.Fatalf("超大入向流量: %+v", late)
 	}
 }
+
+// 失陷证据乱序到达：较晚的证据（之后的心跳）先到，内网连接随后到，最早的证据最后到；横向移动仍按最早的证据判断并补记。
+func TestLateralEvidenceOrder(t *testing.T) {
+	b := NewBehavior(config.Default().Detect.Thresholds)
+	t0 := time.Date(2026, 11, 1, 10, 0, 0, 0, time.UTC)
+	if late := b.MarkAttacked("10.0.0.60", t0.Add(30*time.Minute), "外连威胁情报地址", true); len(late) != 0 {
+		t.Fatalf("%+v", late)
+	}
+	hits := b.ObserveHits(&model.Event{Kind: model.KindFirewall, SrcIP: "10.0.0.60", DstIP: "10.0.0.61", DstPort: 445, Proto: "tcp", Action: model.ActionAllow,
+		Time: t0.Add(10 * time.Minute)}, nil)
+	if len(ruleHits(hits, "bhv-lateral-new")) != 0 {
+		t.Fatalf("早于已知证据的连接先不判断: %+v", hits)
+	}
+	late := b.MarkAttacked("10.0.0.60", t0, "Web 服务进程执行系统命令", true)
+	if len(late) != 1 || late[0].Ev.DstIP != "10.0.0.61" || !strings.Contains(late[0].Hits[0].Evidence, "Web 服务进程执行系统命令") {
+		t.Fatalf("更早的失陷证据到达后补记: %+v", late)
+	}
+	// 之后的新连接按最早的证据直接判断
+	hits = b.ObserveHits(&model.Event{Kind: model.KindFirewall, SrcIP: "10.0.0.60", DstIP: "10.0.0.62", DstPort: 3389, Proto: "tcp", Action: model.ActionAllow,
+		Time: t0.Add(15 * time.Minute)}, nil)
+	if h := ruleHits(hits, "bhv-lateral-new"); len(h) != 1 || h[0].Severity != model.SevHigh {
+		t.Fatalf("失陷之后的新连接: %+v", hits)
+	}
+}
