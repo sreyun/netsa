@@ -107,6 +107,7 @@ flow:
   sflow: ""            # 例如 ":6343"
   sampling: 1          # 设备没有报告采样率时使用
   window: 10s
+  allowlist: false     # 只接收 exporters 中登记的设备（UDP 源地址可以伪造，建议开启）
   exporters: []
   #  - cidr: 10.0.0.254
   #    name: 核心交换机

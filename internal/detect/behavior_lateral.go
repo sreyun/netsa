@@ -31,8 +31,8 @@ const (
 	logonChainGap   = time.Hour
 	maxLogonTargets = 20000
 	ewPendWindow    = time.Hour // 尚未判定的首次管理连接保留多久：失陷判定（回连、外连远控）可能晚于这些连接到达
-	ewPendPerSrc    = 16
-	maxEWPendSrcs   = 5000
+	ewPendPerSrc    = 8
+	maxEWPendSrcs   = 2000
 )
 
 // adminPorts 是横向移动常用的远程管理端口。

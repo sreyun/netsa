@@ -35,6 +35,9 @@ func (a *Aggregator) Add(r Record, now time.Time) bool {
 		if r.End.After(x.End) {
 			x.End = r.End
 		}
+		if !r.Start.IsZero() && (x.Start.IsZero() || r.Start.Before(x.Start)) {
+			x.Start = r.Start
+		}
 		if x.SrcPort != r.SrcPort {
 			x.SrcPort = 0 // 多个源端口
 		}

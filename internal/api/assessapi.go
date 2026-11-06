@@ -19,6 +19,7 @@ func (s *Server) visibility(r *http.Request) store.Visibility {
 		HTTPS:         s.Cfg.Server.TLSCert != "" || r != nil && (r.TLS != nil || strings.EqualFold(r.Header.Get("X-Forwarded-Proto"), "https")),
 		AllowNetworks: len(s.Cfg.Server.AllowNetworks) > 0,
 		Require2FA:    s.Cfg.Server.Require2FA,
+		Decoys:        s.Deception.Count(),
 	}
 	if s.RawLog != nil {
 		v.RawLogDays = s.Cfg.RawLog.RetentionDays

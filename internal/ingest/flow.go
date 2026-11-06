@@ -73,13 +73,16 @@ func (m *Manager) StartFlow(ctx context.Context, cfg config.FlowConfig) error {
 		}
 		exps = append(exps, flowExporter{p.Masked(), e.Name, uint32(max(e.Sampling, 0))})
 	}
-	lookup := func(a netip.Addr) (string, uint32) {
+	if cfg.Allowlist && len(exps) == 0 {
+		return fmt.Errorf("flow.allowlist 已开启，但 flow.exporters 中没有登记任何设备")
+	}
+	lookup := func(a netip.Addr) (string, uint32, bool) {
 		for _, e := range exps {
 			if e.prefix.Contains(a) {
-				return e.name, e.rate
+				return e.name, e.rate, true
 			}
 		}
-		return "", uint32(max(cfg.Sampling, 0))
+		return "", uint32(max(cfg.Sampling, 0)), !cfg.Allowlist
 	}
 	window := cfg.Window
 	if window <= 0 {
@@ -98,7 +101,7 @@ func (m *Manager) StartFlow(ctx context.Context, cfg config.FlowConfig) error {
 		st := &flowStats{formats: map[string]int64{}, devices: map[netip.Addr]string{}}
 		s.detectFn, s.offsetFn = st.detected, func() string { return "" }
 		dec := flow.NewDecoder()
-		dec.Default = func(a netip.Addr) uint32 { _, r := lookup(a); return r }
+		dec.Default = func(a netip.Addr) uint32 { _, r, _ := lookup(a); return r }
 		go func() {
 			<-ctx.Done()
 			uc.Close()
@@ -121,7 +124,7 @@ func (m *Manager) StartFlow(ctx context.Context, cfg config.FlowConfig) error {
 }
 
 func (m *Manager) serveFlow(ctx context.Context, uc *net.UDPConn, s *source, st *flowStats, dec *flow.Decoder, sflow bool, window time.Duration,
-	lookup func(netip.Addr) (string, uint32)) {
+	lookup func(netip.Addr) (string, uint32, bool)) {
 	agg := &flow.Aggregator{Window: window}
 	formats := map[aggFmt]string{}
 	buf := make([]byte, 65535)
@@ -158,6 +161,14 @@ func (m *Manager) serveFlow(ctx context.Context, uc *net.UDPConn, s *source, st 
 		}
 		s.lines.Add(1)
 		dev := ap.Addr().Unmap()
+		if _, _, ok := lookup(dev); !ok {
+			// 未登记的设备（flow.allowlist）：丢弃，不解析
+			s.skipped.Add(1)
+			if agg.Due(now) {
+				emit(now)
+			}
+			continue
+		}
 		var recs []flow.Record
 		var format string
 		if sflow {
@@ -180,7 +191,7 @@ func (m *Manager) serveFlow(ctx context.Context, uc *net.UDPConn, s *source, st 
 			}
 			continue
 		}
-		name, _ := lookup(dev)
+		name, _, _ := lookup(dev)
 		if name == "" {
 			name = dev.String()
 		}
@@ -192,6 +203,9 @@ func (m *Manager) serveFlow(ctx context.Context, uc *net.UDPConn, s *source, st 
 			}
 			if r.End.IsZero() || r.End.After(now.Add(time.Hour)) {
 				r.End = now
+			}
+			if r.Start.IsZero() || r.Start.After(r.End) {
+				r.Start = r.End
 			}
 			formats[aggFmt{r.Src, r.Dst}] = format
 			full = agg.Add(r, now) || full
@@ -209,6 +223,9 @@ func flowEvent(r flow.Record, format, source string) *model.Event {
 	ev := &model.Event{Kind: model.KindFirewall, Format: format, Source: source, Time: r.End, SrcIP: r.Src.String(), DstIP: r.Dst.String(),
 		SrcPort: int(r.SrcPort), DstPort: int(r.DstPort), Proto: protoName(r.Proto), Action: model.ActionAllow,
 		SentBytes: int64(min(r.Bytes, 1<<62)), Packets: int64(min(r.Packets, 1<<62)), Sampling: int(r.Sampling)}
+	if !r.Start.IsZero() && r.End.After(r.Start) {
+		ev.Duration = r.End.Sub(r.Start).Seconds()
+	}
 	if r.Denied {
 		ev.Action = model.ActionDeny
 	}

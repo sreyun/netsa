@@ -2,6 +2,7 @@ package detect
 
 import (
 	"fmt"
+	"math"
 	"strings"
 	"testing"
 	"time"
@@ -114,5 +115,55 @@ func TestAccountTakeover(t *testing.T) {
 	// 失败的登录、内网来源不参与
 	if h := b.ObserveHits(&model.Event{Kind: model.KindAuth, Service: "SSH", SrcIP: "7.7.7.7", User: "zhangsan", Action: model.ActionDeny, Time: at.Add(2 * time.Hour)}, nil); len(ruleHits(h, "auth-impossible-travel")) != 0 {
 		t.Fatalf("失败的登录不参与: %+v", h)
+	}
+}
+
+// 长连接结束时一次性报告的字节数按持续时间折算：持续两小时的备份会话不当作一次外传突发，
+// 持续一小时的大流量会话不当作带宽型 DDoS；同样的量在几分钟内发生时照常告警。
+func TestDurationShare(t *testing.T) {
+	b := NewBehavior(config.Default().Detect.Thresholds)
+	t0 := time.Date(2026, 11, 1, 0, 0, 0, 0, time.UTC)
+	out := func(src string, bytes int64, dur float64, at time.Time) []model.Hit {
+		return ruleHits(b.Observe(&model.Event{Kind: model.KindFirewall, SrcIP: src, DstIP: "203.0.113.50", DstPort: 443, Proto: "tcp", Action: model.ActionAllow,
+			Outbound: true, SentBytes: bytes, Duration: dur, Time: at}), "bhv-exfil")
+	}
+	if h := out("10.0.0.41", 30<<30, 7200, t0); len(h) != 0 {
+		t.Fatalf("持续两小时的 30 GB 会话按每 10 分钟约 2.5 GB 折算，不告警: %+v", h)
+	}
+	if h := out("10.0.0.42", 5<<30, 300, t0); len(h) != 1 {
+		t.Fatalf("5 分钟内外发 5 GB 应告警: %+v", h)
+	}
+	in := func(src, dst string, bytes int64, dur float64, at time.Time) {
+		b.ObserveHits(&model.Event{Kind: model.KindFirewall, SrcIP: src, SrcPort: 50000, DstIP: dst, DstPort: 873, Proto: "tcp", Action: model.ActionAllow,
+			SentBytes: bytes, Packets: bytes / 1400, Duration: dur, Time: at}, nil)
+	}
+	in("198.51.100.5", "10.0.0.70", 50<<30, 3600, t0)
+	if late := b.TakeLate(); len(late) != 0 {
+		t.Fatalf("持续一小时的 50 GB 同步会话不是带宽型 DDoS: %+v", late[0].Hits)
+	}
+	in("198.51.100.6", "10.0.0.71", 50<<30, 30, t0)
+	if late := b.TakeLate(); len(late) != 1 {
+		t.Fatal("30 秒内 50 GB 应判为带宽型 DDoS")
+	}
+}
+
+// 伪造的超大计数：累计封顶而不是溢出成负数，检测照常生效。
+func TestHugeCountsSaturate(t *testing.T) {
+	b := NewBehavior(config.Default().Detect.Thresholds)
+	t0 := time.Date(2026, 11, 1, 0, 0, 0, 0, time.UTC)
+	var exfil []model.Hit
+	for i := range 3 {
+		exfil = append(exfil, ruleHits(b.Observe(&model.Event{Kind: model.KindFirewall, SrcIP: "10.0.0.43", DstIP: "203.0.113.50", DstPort: 443, Proto: "tcp",
+			Action: model.ActionAllow, Outbound: true, SentBytes: math.MaxInt64, Time: t0.Add(time.Duration(i) * time.Second)}), "bhv-exfil")...)
+	}
+	if len(exfil) != 1 || strings.Contains(exfil[0].Evidence, "-") {
+		t.Fatalf("超大外发量: %+v", exfil)
+	}
+	for i := range 3 {
+		b.ObserveHits(&model.Event{Kind: model.KindFirewall, SrcIP: fmt.Sprintf("198.51.100.%d", i+1), DstIP: "10.0.0.72", DstPort: 80, Proto: "tcp",
+			Action: model.ActionAllow, SentBytes: math.MaxInt64, Packets: math.MaxInt64, Time: t0.Add(time.Duration(i) * time.Second)}, nil)
+	}
+	if late := b.TakeLate(); len(late) != 1 || late[0].Ev.Bps <= 0 {
+		t.Fatalf("超大入向流量: %+v", late)
 	}
 }

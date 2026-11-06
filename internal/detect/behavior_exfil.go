@@ -2,6 +2,7 @@ package detect
 
 import (
 	"fmt"
+	"math"
 	"path"
 	"sort"
 	"strings"
@@ -52,7 +53,7 @@ func (s *slideSum) add(t time.Time, win time.Duration, n int64) (int64, int) {
 	i := int((id%slideSlots + slideSlots) % slideSlots)
 	switch {
 	case s.at[i] == id:
-		s.sum[i] += n
+		s.sum[i] = satAdd(s.sum[i], n)
 		s.cnt[i]++
 	case s.at[i] < id:
 		s.at[i], s.sum[i], s.cnt[i] = id, n, 1
@@ -65,7 +66,7 @@ func (s *slideSum) add(t time.Time, win time.Duration, n int64) (int64, int) {
 	count := 0
 	for j, a := range s.at {
 		if d := hi - a; d >= 0 && d < slideSlots {
-			total += s.sum[j]
+			total = satAdd(total, s.sum[j])
 			count += int(s.cnt[j])
 		}
 	}
@@ -77,6 +78,7 @@ func (b *Behavior) observeExfil(ev *model.Event) (model.Hit, bool) {
 	if ev.SentBytes <= 0 || ev.SrcIP == "" {
 		return model.Hit{}, false
 	}
+	sent := windowShare(ev.SentBytes, ev.Duration, b.th.ExfilWindow)
 	w := b.exfil[ev.SrcIP]
 	if w == nil {
 		if len(b.exfil) >= maxExfilHosts {
@@ -89,14 +91,14 @@ func (b *Behavior) observeExfil(ev *model.Event) (model.Hit, bool) {
 		w.bytes = 0
 		clear(w.dsts)
 	}
-	w.bytes += ev.SentBytes
-	total, sessions := w.slide.add(ev.Time, b.th.ExfilWindow, ev.SentBytes)
+	w.bytes = satAdd(w.bytes, sent)
+	total, sessions := w.slide.add(ev.Time, b.th.ExfilWindow, sent)
 	if _, ok := w.dsts[ev.DstIP]; ok || len(w.dsts) < maxExfilDsts {
-		w.dsts[ev.DstIP] += ev.SentBytes
+		w.dsts[ev.DstIP] = satAdd(w.dsts[ev.DstIP], sent)
 	}
 	need := b.th.ExfilBytes * exfilImmature
 	if w.windows >= surgeMature {
-		need = max(b.th.ExfilBytes, int64(w.base*exfilFactor))
+		need = max(b.th.ExfilBytes, int64(min(w.base*exfilFactor, 9e18)))
 	}
 	if !w.fired.IsZero() && ev.Time.Sub(w.fired).Abs() < b.th.ExfilWindow {
 		w.surge = true // 突增延续到下一个窗口：同样不计入基线，也不重复告警
@@ -107,7 +109,7 @@ func (b *Behavior) observeExfil(ev *model.Event) (model.Hit, bool) {
 	w.surge, w.fired = true, ev.Time // 突增窗口不计入基线
 	base := "平时没有足够的记录"
 	if w.windows >= surgeMature {
-		base = "平时约 " + fmtBytes(int64(w.base))
+		base = "平时约 " + fmtBytes(int64(min(w.base, 9e18)))
 	}
 	top, topBytes := "", int64(0)
 	for d, n := range w.dsts {
@@ -123,6 +125,27 @@ func (b *Behavior) observeExfil(ev *model.Event) (model.Hit, bool) {
 		Result: fwResult(ev),
 		Evidence: fmt.Sprintf("%s内 %s 向外发送 %s（%s），%d 个会话；主要目的地址 %s（%s，%d%%）", fmtDur(b.th.ExfilWindow), ev.SrcIP,
 			fmtBytes(total), base, sessions, top, fmtBytes(topBytes), min(topBytes*100/max(total, 1), 100))}, true
+}
+
+// windowShare 返回一个统计窗口内的量：长连接结束时一次性报告的字节数、包数按持续时间平均折算，
+// 持续时间不超过窗口（或没有记录）时全部计入。否则一个持续两小时的备份会话会在结束的那个窗口里显得像一次突发。
+func windowShare(n int64, dur float64, win time.Duration) int64 {
+	n = min(n, maxCount) // 日志与数据包中的计数来自外部，异常的巨大值不能让累计溢出
+	if n <= 0 || dur <= win.Seconds() {
+		return n
+	}
+	return int64(float64(n) * win.Seconds() / dur)
+}
+
+// maxCount 是单条记录计入的字节数 / 包数上限（1 PB），satAdd 是不会溢出的加法：伪造的超大计数只会让统计封顶，
+// 不会因为溢出变成负数而让检测失效。
+const maxCount = 1 << 50
+
+func satAdd(a, b int64) int64 {
+	if b > 0 && a > math.MaxInt64-b {
+		return math.MaxInt64
+	}
+	return a + b
 }
 
 // rollBytes 与 roll 相同，但按窗口内的字节数而不是事件数累计基线。

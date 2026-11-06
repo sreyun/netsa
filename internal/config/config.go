@@ -106,6 +106,8 @@ type FlowConfig struct {
 	Sampling int `yaml:"sampling" json:"sampling"`
 	// Exporters 按设备（地址或网段）指定名称与采样率
 	Exporters []FlowExporter `yaml:"exporters" json:"-"`
+	// Allowlist 只接收 exporters 中登记的设备发来的数据包：UDP 源地址可以伪造，开启后伪造的流量记录不会进入检测
+	Allowlist bool `yaml:"allowlist" json:"allowlist"`
 	// Window 是合并窗口：同一（源、目的、目的端口、协议）的流在窗口内合并为一个事件，默认 10s
 	Window time.Duration `yaml:"window" json:"window"`
 }

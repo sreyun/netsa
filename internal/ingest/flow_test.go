@@ -84,3 +84,49 @@ func TestResponseFlow(t *testing.T) {
 		}
 	}
 }
+
+// 流量设备白名单：只接收登记的设备，其余来源的数据包丢弃（计为跳过）；开启白名单却没有登记设备时启动报错。
+func TestFlowAllowlist(t *testing.T) {
+	m := NewManager(16)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if err := m.StartFlow(ctx, config.FlowConfig{NetFlow: "127.0.0.1:0", Allowlist: true}); err == nil {
+		t.Fatal("开启白名单但没有登记设备应报错")
+	}
+	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Skip(err)
+	}
+	addr := pc.LocalAddr().String()
+	pc.Close()
+	cfg := config.FlowConfig{NetFlow: addr, Window: 100 * time.Millisecond, Allowlist: true, Exporters: []config.FlowExporter{{CIDR: "10.9.9.9", Name: "核心交换机"}}}
+	if err := m.StartFlow(ctx, cfg); err != nil {
+		t.Fatal(err)
+	}
+	conn, err := net.Dial("udp", addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	pkt := binary.BigEndian.AppendUint16(nil, 5)
+	pkt = append(pkt, make([]byte, 22)...)
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		conn.Write(pkt)
+		for _, st := range m.Stats() {
+			if st.Name == "netflow" && st.Skipped > 0 {
+				if st.Parsed != 0 || st.Failed != 0 {
+					t.Fatalf("未登记设备的数据包不应解析: %+v", st)
+				}
+				select {
+				case b := <-m.Out:
+					t.Fatalf("不应产生事件: %+v", b[0])
+				default:
+				}
+				return
+			}
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Fatal("未登记设备的数据包应计为跳过")
+}

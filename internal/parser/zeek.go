@@ -221,6 +221,7 @@ func zeekEvent(kind zeekKind, get func(string) string) (*model.Event, bool) {
 		ev.SentBytes, ev.RecvBytes = atoi64(get("orig_bytes")), atoi64(get("resp_bytes"))
 		ev.Packets = atoi64(get("orig_pkts")) + atoi64(get("resp_pkts"))
 		ev.Flags = get("history")
+		ev.Duration, _ = strconv.ParseFloat(get("duration"), 64)
 		switch st := get("conn_state"); st {
 		case "REJ", "RSTOS0", "RSTRH":
 			ev.Action, ev.Reply = model.ActionDeny, model.ReplyYes // 目标拒绝了连接（端口关闭）

@@ -25,16 +25,17 @@ import (
 )
 
 const (
-	maxEntries   = 500
-	maxDuration  = 90 * 24 * time.Hour // 单次登记的最长时间窗
-	endedKeep    = 180 * 24 * time.Hour
-	maxCats      = 30
-	maxTargets   = 20
-	minPrefixV4  = 16 // 网段范围：IPv4 至少 /16，IPv6 至少 /48
-	minPrefixV6  = 48
-	startLeeway  = 24 * time.Hour // 开始时间最多回溯一天（补登已经开始的测试）
-	lateLogs     = 24 * time.Hour // 登记结束后仍按日志时间匹配多久：积压、补录的日志中，时间窗内的扫描同样放行
-	futureWindow = time.Hour      // 日志时间晚于当前时间超过该值时按当前时间判断（设备时钟错误）
+	maxEntries     = 500
+	maxDuration    = 90 * 24 * time.Hour // 单次登记的最长时间窗
+	endedKeep      = 180 * 24 * time.Hour
+	maxCats        = 30
+	maxTargets     = 20
+	minPrefixV4    = 16 // 网段范围：IPv4 至少 /16，IPv6 至少 /48
+	minPrefixV6    = 48
+	startLeeway    = 24 * time.Hour // 开始时间最多回溯一天（补登已经开始的测试）
+	immediateSlack = time.Minute    // 立即开始的登记向前覆盖的时间
+	lateLogs       = 24 * time.Hour // 登记结束后仍按日志时间匹配多久：积压、补录的日志中，时间窗内的扫描同样放行
+	futureWindow   = time.Hour      // 日志时间晚于当前时间超过该值时按当前时间判断（设备时钟错误）
 )
 
 // 登记状态。
@@ -253,7 +254,9 @@ func (m *Manager) Add(e Entry) (Entry, error) {
 		return Entry{}, errors.New("说明过长（最多 200 字）")
 	}
 	if e.Start.IsZero() {
-		e.Start = now
+		// 立即开始：向前留 1 分钟，容许设备与平台之间的时钟误差、只精确到秒的日志时间
+		// （否则登记之后马上开始的扫描，日志时间比登记时刻早几百毫秒就匹配不上）
+		e.Start = now.Add(-immediateSlack)
 	}
 	switch {
 	case e.End.IsZero():
