@@ -36,6 +36,68 @@ type Endpoint struct {
 	NormN    int64   `json:"norm_n,omitempty"`
 	NormMean float64 `json:"norm_mean,omitempty"`
 	NormVar  float64 `json:"norm_var,omitempty"`
+	// Sizes 是站点首页正常响应最常见的几个大小（只记录首页）：同一个首页按是否压缩、是否登录、健康检查与浏览器访问
+	// 会有几种固定的大小，均值与方差判断不了时，按出现次数识别扫描器拿到的兜底页面
+	Sizes     []sizeCount `json:"sizes,omitempty"`
+	SizeTotal int64       `json:"size_total,omitempty"`
+	// SensBytes 是敏感入口登记时的响应大小：之后确认该大小是站点的兜底页面时，据此撤销这个并不存在的敏感入口
+	SensBytes int64 `json:"sens_bytes,omitempty"`
+}
+
+// sizeCount 是一个响应大小的出现次数（Space-Saving 算法：E 为替换进来时继承的计数，N-E 是确定的下限）。
+type sizeCount struct {
+	B int64 `json:"b"`
+	N int64 `json:"n"`
+	E int64 `json:"e,omitempty"`
+}
+
+const (
+	homeSizeSlots = 8  // 记录的首页常见大小个数
+	homeSizeMin   = 10 // 确定出现过的次数下限
+	homeSizeShare = 50 // 且至少占首页正常响应的 1/50
+)
+
+// noteSize 记录一次首页正常响应的大小，返回该大小是否由此成为常见大小。
+func (ep *Endpoint) noteSize(b int64) bool {
+	was := ep.commonSize(b)
+	ep.SizeTotal++
+	i := -1
+	for k := range ep.Sizes {
+		if ep.Sizes[k].B == b {
+			i = k
+			break
+		}
+	}
+	switch {
+	case i >= 0:
+		ep.Sizes[i].N++
+	case len(ep.Sizes) < homeSizeSlots:
+		ep.Sizes = append(ep.Sizes, sizeCount{B: b, N: 1})
+	default:
+		m := 0
+		for k := range ep.Sizes {
+			if ep.Sizes[k].N < ep.Sizes[m].N {
+				m = k
+			}
+		}
+		ep.Sizes[m] = sizeCount{B: b, N: ep.Sizes[m].N + 1, E: ep.Sizes[m].N}
+	}
+	return !was && ep.commonSize(b)
+}
+
+// commonSize 判断响应大小是不是首页常见的正常大小：确定出现过至少 10 次，且占首页正常响应的 2% 以上。
+// 只比较完全相同的字节数：真实存在的敏感文件恰好与首页的某种响应一样大，几乎不可能。
+func (ep *Endpoint) commonSize(b int64) bool {
+	if ep == nil || b <= 0 {
+		return false
+	}
+	for _, s := range ep.Sizes {
+		if s.B == b {
+			n := s.N - s.E
+			return n >= homeSizeMin && n*homeSizeShare >= ep.SizeTotal
+		}
+	}
+	return false
 }
 
 // observeNormal 记录一次正常响应的大小。
@@ -114,6 +176,41 @@ type Finding struct {
 	// 攻击成功研判记录站点与响应大小：之后确认该大小是站点的兜底页面时，据此撤销扫描开头几条被误记的“疑似成功”
 	Host  string `json:"host,omitempty"`
 	Bytes int64  `json:"bytes,omitempty"`
+	// Sizes 是这条攻击成功研判中各次命中的不同响应大小：同一接口的研判合并了多次命中（扫描器拿到兜底页面、
+	// 真实利用拿到命令输出），只撤销兜底页面大小的那部分，全部是兜底页面时才删除。SizesFull 表示超出上限、没有记全
+	Sizes     []int64 `json:"sizes,omitempty"`
+	SizesFull bool    `json:"sizes_full,omitempty"`
+}
+
+const maxFindingSizes = 16
+
+// noteSize 记录一次成功命中的响应大小。
+func (f *Finding) noteSize(b int64) {
+	if b <= 0 || slices.Contains(f.Sizes, b) {
+		return
+	}
+	if len(f.Sizes) == 0 && f.Bytes > 0 && f.Bytes != b {
+		f.Sizes = append(f.Sizes, f.Bytes) // 旧版本的记录：先补上第一次命中的大小
+	}
+	if len(f.Sizes) >= maxFindingSizes {
+		f.SizesFull = true
+		return
+	}
+	f.Sizes = append(f.Sizes, b)
+}
+
+// dropSize 撤销响应为兜底页面大小的命中，返回这条研判是否只剩兜底页面（应删除）。
+func (f *Finding) dropSize(b int64) bool {
+	sizes := f.Sizes
+	if len(sizes) == 0 && f.Bytes > 0 {
+		sizes = []int64{f.Bytes} // 旧版本只记录了第一次命中的大小
+	}
+	i := slices.Index(sizes, b)
+	if i < 0 {
+		return false
+	}
+	f.Sizes = slices.Delete(slices.Clone(sizes), i, i+1)
+	return len(f.Sizes) == 0 && !f.SizesFull
 }
 
 // effectiveSev 返回发现的有效等级：没有证据的攻击成功研判最高高危。
@@ -133,15 +230,43 @@ type surface struct {
 	// 漏洞利用类攻击的结果统计，用于评估 WAF 防护有效性
 	ExploitBlocked int64 `json:"exploit_blocked"`
 	ExploitPassed  int64 `json:"exploit_passed"`
+	// Fallback 是各站点已确认的兜底页面大小（首页的常见响应大小、3 个以上不同探测路径返回的同一大小）。随快照保存：
+	// 扫描器每晚从 /.env、/.git/HEAD 开始探测，重启后不必再等 3 个路径才认出兜底页面
+	Fallback map[string][]int64 `json:"fallback,omitempty"`
 	// soft 记录各站点敏感路径 / WebShell 探测返回 200 时的响应大小 → 路径（有上限），用于识别兜底页（不持久化，运行中重新学习）
 	soft map[string]map[int64]map[string]struct{}
 }
 
 const (
-	maxSoftHosts = 2000
-	maxSoftSizes = 64
-	softSamePath = 3 // 不同探测路径返回完全相同大小的次数达到该值即判定为兜底页
+	maxSoftHosts    = 2000
+	maxSoftSizes    = 64
+	softSamePath    = 3  // 不同探测路径返回完全相同大小的次数达到该值即判定为兜底页
+	maxFallbackSize = 16 // 每个站点保存的兜底页面大小个数
 )
+
+// isFallback 判断响应大小是否是站点已确认的兜底页面大小。
+func (sf *surface) isFallback(host string, bytes int64) bool {
+	return bytes > 0 && slices.Contains(sf.Fallback[host], bytes)
+}
+
+// confirmFallback 记下站点的兜底页面大小，并撤销此前按这个大小误记的“攻击成功”与敏感入口。
+func (sf *surface) confirmFallback(host string, bytes int64) {
+	if bytes <= 0 || sf.isFallback(host, bytes) {
+		return
+	}
+	if sf.Fallback == nil {
+		sf.Fallback = map[string][]int64{}
+	}
+	list := sf.Fallback[host]
+	if list == nil && len(sf.Fallback) >= maxSoftHosts {
+		return
+	}
+	if len(list) >= maxFallbackSize {
+		list = list[1:] // 最早确认的让位：站点改版后旧的兜底页面大小不再出现
+	}
+	sf.Fallback[host] = append(slices.Clip(list), bytes)
+	sf.dropCatchAll(host, bytes)
+}
 
 // maxFindings 是攻击面发现的数量上限。
 const maxFindings = 5000
@@ -152,20 +277,24 @@ func (sf *surface) homePage(host, path string, bytes int64) bool {
 		return false
 	}
 	ep := sf.Endpoints[host+" /"]
-	return ep != nil && ep.baselineMatches(bytes)
+	return ep != nil && (ep.baselineMatches(bytes) || ep.commonSize(bytes))
 }
 
 // catchAll 判断一个 200 响应是否其实是站点的兜底页面：单页应用把所有路径都返回 index.html、统一错误页返回 200 时，
 // 扫描器探测 /.env、/.git/config、webshell 路径都会得到 200，但拿到的只是首页。判断依据（自动学习，无需配置）：
-//   - 响应大小与该站点首页的正常响应一致；
-//   - 或已有 3 个以上不同的探测路径返回了完全相同的大小（真实存在的不同敏感文件几乎不可能大小完全一致）。
+//   - 响应大小与该站点首页的正常响应一致（大小稳定的首页按均值与方差，几种固定大小的首页按常见大小）；
+//   - 或已有 3 个以上不同的探测路径返回了完全相同的大小（真实存在的不同敏感文件几乎不可能大小完全一致）；
+//   - 或是此前已确认的兜底页面大小（随快照保存）。
 func (sf *surface) catchAll(host, path string, bytes int64) bool {
 	if bytes <= 0 {
 		return false
 	}
+	if sf.isFallback(host, bytes) {
+		return true
+	}
 	path = resourceKey(path)
 	if path != "/" {
-		if ep := sf.Endpoints[host+" /"]; ep != nil && ep.baselineMatches(bytes) {
+		if ep := sf.Endpoints[host+" /"]; ep != nil && (ep.baselineMatches(bytes) || ep.commonSize(bytes)) {
 			return true
 		}
 	}
@@ -191,7 +320,7 @@ func (sf *surface) catchAll(host, path string, bytes int64) bool {
 	if len(paths) < softSamePath {
 		paths[path] = struct{}{}
 		if len(paths) == softSamePath {
-			sf.dropCatchAll(host, bytes)
+			sf.confirmFallback(host, bytes)
 		}
 	}
 	return len(paths) >= softSamePath
@@ -216,13 +345,75 @@ func (sf *surface) retractSuccess(ip string) int {
 
 // dropCatchAll 撤销站点上响应为兜底页面大小的“疑似攻击成功”：兜底页面要等到 3 个不同探测路径返回同样大小才能认出，
 // 扫描开头的几条探测在此之前已被记为成功（例如 /..\..\windows\win.ini 拿到的其实是首页），确认后不应再列为疑似失陷。
-// 有响应码之外证据的（Proven）不撤销。
+// 有响应码之外证据的（Proven）不撤销。同时撤销按这个大小登记的敏感入口与“敏感资源暴露”：/.env、/backup.sql
+// 拿到的同样只是首页，并没有这些文件。
 func (sf *surface) dropCatchAll(host string, bytes int64) {
+	prefix := "sens:" + host + " "
 	for id, f := range sf.Findings {
-		if f.Category == "攻击成功研判" && !f.Proven && f.Bytes == bytes && f.Host == host {
-			delete(sf.Findings, id)
+		switch {
+		case f.Category == "攻击成功研判" && !f.Proven && f.Host == host:
+			if f.dropSize(bytes) {
+				delete(sf.Findings, id)
+			}
+		case f.Category == "敏感资源暴露" && strings.HasPrefix(id, prefix) && (f.Bytes == bytes || f.Bytes == 0 && evidenceBytes(f.Evidence) == bytes):
+			// 旧版本的记录没有响应大小，从证据文本“响应 N 字节”中取
+			sf.dropEndpoint(strings.TrimPrefix(id, "sens:"))
 		}
 	}
+	for key, ep := range sf.Endpoints {
+		if ep.Host == host && ep.Sensitive != "" && ep.SensBytes == bytes && ep.NormN == 0 {
+			sf.dropEndpoint(key)
+		}
+	}
+}
+
+// successKept 判断只凭 2xx 的 Web“攻击成功”在攻击面中是否还有对应的记录（target 为 Event.Target()：站点 + 空格 + URI）。
+// 确认响应是兜底页面、来源被标为误报后，攻击成功研判与敏感资源暴露会被撤销，资产攻击链路中对应的“突破”随之
+// 只作为需核实的迹象，与疑似失陷资产的口径一致。取不到路径时按仍保留处理。
+func (sf *surface) successKept(cat, target string) bool {
+	host, uri, ok := strings.Cut(target, " ")
+	if !ok || host == "" || uri == "" || len(target) >= 200 { // 记录时截断到 200 字节：路径可能不完整
+		return true
+	}
+	key := host + " " + normPath(uri)
+	if cat == "敏感文件探测" {
+		return sf.Findings["sens:"+key] != nil
+	}
+	return sf.Findings["succ:"+cat+":"+key] != nil
+}
+
+// dropEndpoint 删除一个并不存在的入口（兜底页面返回的 200 被登记成的敏感入口）及其“敏感资源暴露”发现。
+// 有正常访问的入口不删除：它确实存在，只是这一次的响应恰好是兜底页面的大小。
+func (sf *surface) dropEndpoint(key string) {
+	if ep := sf.Endpoints[key]; ep != nil {
+		if ep.NormN > 0 {
+			return
+		}
+		for _, t := range ep.Tech {
+			if sf.Tech[t]--; sf.Tech[t] <= 0 {
+				delete(sf.Tech, t)
+			}
+		}
+		delete(sf.Endpoints, key)
+	}
+	delete(sf.Findings, "sens:"+key)
+}
+
+// evidenceBytes 从“…返回 200，响应 N 字节”的证据文本中取出响应大小，取不到时返回 -1。
+func evidenceBytes(ev string) int64 {
+	_, rest, ok := strings.Cut(ev, "响应 ")
+	if !ok {
+		return -1
+	}
+	num, _, ok := strings.Cut(rest, " 字节")
+	if !ok {
+		return -1
+	}
+	n, err := strconv.ParseInt(num, 10, 64)
+	if err != nil {
+		return -1
+	}
+	return n
 }
 
 // resourceKey 把指向同一资源的路径变体归一：百分号编码、重复斜杠、/./ 与 ../、末尾斜杠、;参数（Tomcat / Spring）。
@@ -423,10 +614,17 @@ func (sf *surface) observeWeb(ev *model.Event, hits []model.Hit, attacked bool) 
 			}
 		}
 	}
-	// 敏感路径返回的 200 其实是兜底页面（单页应用、统一错误页）：资源并不存在，不登记、不报暴露
-	fake := sens != nil && ev.Status == 200 && ep == nil && sf.catchAll(host, path, ev.Bytes)
+	// 敏感路径返回的 200 其实是兜底页面（单页应用、统一错误页）：资源并不存在，不登记、不报暴露。扫描器带 Range 头
+	// 请求时兜底页面返回 206，同样处理。已登记、但从来没有正常访问的敏感入口再次被探测时重新核对：旧版本把
+	// 兜底页面登记成了 /.env、/backup.sql 这类敏感入口
+	ok2xx := ev.Status == 200 || ev.Status == 206
+	fake := sens != nil && ok2xx && (ep == nil || ep.Sensitive != "" && ep.NormN == 0) && sf.catchAll(host, path, ev.Bytes)
 	if fake {
 		sens = nil
+		if ep != nil {
+			sf.dropEndpoint(key)
+			ep = nil
+		}
 	}
 	// 攻击请求只在命中敏感资源时才登记为新入口：对所有路径都返回 200 的站点（SPA 兜底路由），
 	// 扫描器的随机路径不会污染资产清单；已有入口上的攻击仍会被统计。
@@ -441,6 +639,9 @@ func (sf *surface) observeWeb(ev *model.Event, hits []model.Hit, attacked bool) 
 		}
 		if sens != nil {
 			ep.Sensitive, ep.Severity = sens.title, sens.sev
+			if ok2xx {
+				ep.SensBytes = ev.Bytes
+			}
 		}
 		sf.Endpoints[key] = ep
 	}
@@ -455,6 +656,10 @@ func (sf *surface) observeWeb(ev *model.Event, hits []model.Hit, attacked bool) 
 		}
 		if !attacked && ev.Status >= 200 && ev.Status < 300 && ev.Bytes > 0 {
 			ep.observeNormal(ev.Bytes)
+			// 首页的常见响应大小即兜底页面的大小：确认后立即撤销此前按这个大小误记的成功与敏感入口
+			if path == "/" && ev.Status == 200 && ep.noteSize(ev.Bytes) {
+				sf.confirmFallback(host, ev.Bytes)
+			}
 		}
 		if attacked {
 			ep.Attacks++
@@ -473,6 +678,9 @@ func (sf *surface) observeWeb(ev *model.Event, hits []model.Hit, attacked bool) 
 	if ev.Status == 200 && ev.Bytes > 0 && sens != nil && !sf.catchAll(host, path, ev.Bytes) {
 		sf.finding("sens:"+key, sens.title, "敏感资源暴露", sens.sev, asset,
 			ev.SrcIP+" 访问返回 200，响应 "+strconv.FormatInt(ev.Bytes, 10)+" 字节", sens.remediation, ev.SrcIP, ev.Time)
+		if f := sf.Findings["sens:"+key]; f != nil && f.Bytes == 0 {
+			f.Host, f.Bytes = host, ev.Bytes
+		}
 	}
 	for _, h := range hits {
 		if h.TagOnly || h.Phase == model.PhaseRecon {
@@ -499,6 +707,7 @@ func (sf *surface) observeWeb(ev *model.Event, hits []model.Hit, attacked bool) 
 				if f.Bytes == 0 {
 					f.Host, f.Bytes = host, ev.Bytes
 				}
+				f.noteSize(ev.Bytes)
 			}
 		}
 	}

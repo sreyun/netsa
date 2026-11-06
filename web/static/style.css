@@ -259,6 +259,8 @@ table { border-collapse: collapse; width: 100%; }
 
 .badge { display: inline-block; padding: 0 7px; border-radius: 3px; font-size: 11px; line-height: 18px; white-space: nowrap; border: 1px solid currentColor; }
 .lv-critical { color: var(--critical); } .lv-high { color: var(--high); } .lv-medium { color: var(--medium); } .lv-low { color: var(--low); } .lv-info { color: var(--info); }
+/* 严重级徽章：红字压在浅红底上对比度只有 4.4，文字提亮一档 */
+.badge.lv-critical { color: #ff6b6d; }
 .bg-critical { background: rgba(255,77,79,.18); } .bg-high { background: rgba(255,122,69,.16); } .bg-medium { background: rgba(255,197,61,.14); } .bg-low { background: rgba(64,169,255,.14); } .bg-info { background: rgba(140,154,184,.12); }
 .res-blocked { color: var(--ok); } .res-success { color: var(--critical); font-weight: 600; } .res-error { color: var(--high); } .res-passed { color: var(--medium); } .res-failed, .res-unknown { color: var(--muted); } .res-allowed { color: var(--high); }
 .chip { display: inline-block; padding: 1px 8px; margin: 2px 4px 2px 0; border-radius: 10px; background: rgba(58,139,255,.15); border: 1px solid var(--border-hi); font-size: 11px; white-space: nowrap; }
@@ -524,7 +526,7 @@ pre.cmd { background: #050b18; border: 1px solid var(--border); padding: 8px 10p
   border: 1px solid var(--border); background: rgba(8,16,34,.4); color: var(--muted); cursor: default; }
 .attck-tech.hit { color: #fff; cursor: pointer; }
 .attck-tech.hit:hover { outline: 1px solid #fff; }
-.attck-tech .tid { font-family: var(--mono); font-size: 10px; opacity: .8; }
+.attck-tech .tid { font-family: var(--mono); font-size: 10px; }
 .attck-tech .tname { font-size: 12px; line-height: 1.35; }
 .attck-tech .thits { font-size: 11px; font-family: var(--mono); color: #ffe7ba; }
 @media (max-width: 1400px) {
@@ -567,7 +569,7 @@ pre.cmd { background: #050b18; border: 1px solid var(--border); padding: 8px 10p
 
 /* ---------------- 安全运营（事件处置、发送端、日志检索、资产、报表、双因素、令牌） ---------------- */
 .tab-badge { display: inline-block; min-width: 18px; padding: 0 5px; margin-left: 4px; border-radius: 9px; font-size: 11px; line-height: 16px; background: rgba(58,139,255,.35); color: #fff; text-align: center; }
-.tab-badge.hot { background: var(--critical); }
+.tab-badge.hot { background: #d4343a; } /* 白字对比度 ≥ 4.5 */
 .seg.inc-seg, .seg.as-seg, .seg.rp-seg { margin-left: 0; }
 .seg.inc-seg button, .seg.as-seg button, .seg.rp-seg button { padding: 5px 12px; font-size: 13px; }
 .seg.inc-seg b { font-weight: 600; margin-left: 2px; }
@@ -681,9 +683,11 @@ pre.cmd { background: #050b18; border: 1px solid var(--border); padding: 8px 10p
 .ch-fn span { font-size: 12px; color: var(--muted); }
 .ch-fn:hover { border-color: var(--accent); }
 .ch-fn.zero b { color: var(--muted); }
-.ch-arrow { align-self: center; color: var(--border-hi); font-size: 18px; }
+.ch-arrow { align-self: center; color: #5b6d96; font-size: 18px; }
 .ch-strip { display: inline-flex; gap: 2px; flex-wrap: nowrap; }
-.ch-strip i { font-style: normal; font-size: 11px; line-height: 18px; padding: 0 5px; border-radius: 3px; border: 1px solid var(--border); color: #4d5d82; white-space: nowrap; }
+.ch-strip i { font-style: normal; font-size: 11px; line-height: 18px; padding: 0 5px; border-radius: 3px; border: 1px solid var(--border); color: var(--muted); white-space: nowrap; }
+/* 只有需核实的迹象（不计入研判）的阶段：虚线框 */
+.ch-strip i.weak { color: var(--medium); border: 1px dashed rgba(255,197,61,.6); }
 .ch-strip i.on { color: #fff; }
 .ch-strip.big i { font-size: 12px; line-height: 22px; padding: 0 8px; }
 /* 阶段颜色：越往后越危险 */
@@ -694,14 +698,20 @@ pre.cmd { background: #050b18; border: 1px solid var(--border); padding: 8px 10p
 .st-lateral.on, .ch-stage.st-lateral, .st-collect.on, .ch-stage.st-collect { background: rgba(255,77,79,.28); border-color: #ff4d4f; }
 .st-impact.on, .ch-stage.st-impact { background: rgba(179,127,235,.28); border-color: #b37feb; }
 .ch-members { font-size: 11px; margin-top: 2px; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.ch-verdict { font-size: 12px; color: var(--muted); }
+/* 列表：资产名称单行省略；结论在阶段条下方，最多两行（完整内容见提示）。表格设最小宽度，窄屏横向滚动而不是把列挤成一两个字宽 */
+#chTable { table-layout: fixed; min-width: 880px; }
+#chTable .ch-c-asset { width: 26%; }
+.ch-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ch-verdict { font-size: 12px; color: var(--muted); line-height: 1.45; margin-top: 4px; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2; overflow: hidden; }
 .ch-verdict-box { padding: 10px 12px; border-left: 3px solid var(--border-hi); background: rgba(58,139,255,.08); border-radius: 4px; font-size: 13px; line-height: 1.7; }
 .ch-verdict-box.conf-high { border-left-color: var(--critical); background: rgba(255,77,79,.1); }
 .ch-verdict-box.conf-medium { border-left-color: var(--medium); background: rgba(255,197,61,.08); }
 .ch-stages { display: grid; grid-template-columns: repeat(8, minmax(0, 1fr)); gap: 4px; margin: 12px 0 4px; }
 .ch-st { border: 1px solid var(--border); border-radius: 4px; padding: 6px 4px; text-align: center; background: rgba(16,28,54,.6); min-width: 0; }
 .ch-st-name { font-size: 12px; font-weight: 600; }
-.ch-st:not(.on) .ch-st-name { color: #4d5d82; }
+.ch-st:not(.on) .ch-st-name { color: var(--muted); }
+.ch-st.weak { border-style: dashed; border-color: rgba(255,197,61,.6); }
+.ch-st.weak .ch-st-name, .ch-st.weak .ch-st-t { color: var(--medium); }
 .ch-st-n { font-family: var(--mono); font-size: 15px; font-weight: 700; margin-top: 2px; }
 .ch-st-n small { font-size: 10px; font-weight: 400; color: var(--muted); }
 .ch-st-t { font-size: 10px; color: var(--muted); }
@@ -722,6 +732,8 @@ pre.cmd { background: #050b18; border: 1px solid var(--border); padding: 8px 10p
 .ch-step.st-persist, .ch-step.st-control, .ch-step.st-lateral, .ch-step.st-collect { border-left-color: #ff4d4f; }
 .ch-step.st-impact { border-left-color: #b37feb; }
 .ch-step.dismissed { opacity: .55; }
+.ch-step.weak { border-left-style: dashed; border-left-color: var(--medium); }
+.ch-weak { margin-top: 3px; font-size: 12px; color: #f0cf7a; }
 .ch-step-head { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
 .ch-who { margin-top: 3px; color: var(--text); word-break: break-all; }
 .ch-ev { margin-top: 3px; color: var(--muted); font-size: 12px; word-break: break-all; }

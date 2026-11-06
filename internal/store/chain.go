@@ -6,8 +6,10 @@ import (
 	"strings"
 	"time"
 
+	"netsa/internal/detect"
 	"netsa/internal/geo"
 	"netsa/internal/model"
+	"netsa/internal/risk"
 )
 
 // 资产攻击链路：以被攻击的资产（站点、主机、资产台账中的资产）为中心，把侦察、利用、突破、植入、控制、横向、
@@ -366,6 +368,9 @@ func (s *Store) chainRolesOf(ev *model.Event) chainRoles {
 	switch ev.Kind {
 	case model.KindWeb:
 		host := chainHost(ev.Host)
+		if detect.FakeSiteHost(host) {
+			host = "" // 虚构的 Host 头（OAST、nip.io、云元数据地址）：记在实际收到请求的服务器或日志源上
+		}
 		server := ""
 		switch {
 		case ev.NatDstIP != "" && geo.IsPrivate(ev.NatDstIP):
@@ -435,6 +440,13 @@ var controlCats = map[string]bool{
 	"DNS隧道": true, "带外探测回连": true, "DGA域名": true, "动态域名/内网穿透": true,
 }
 
+// volumeCats 是只凭连接 / 请求数量判断的攻击类型。
+var volumeCats = map[string]bool{"洪水攻击": true, "CC攻击": true}
+
+// lateralReconCats 是侦察性质的攻击类型：内网主机发起时可能是运维人员或漏洞扫描器。
+var lateralReconCats = map[string]bool{"端口扫描": true, "主机探测": true, "高危服务探测": true, "扫描器": true, "网络空间测绘": true,
+	"协议异常": true, "自动化工具": true, "目录扫描": true, "管理后台探测": true}
+
 // hostStages 是主机侧证据（进程日志、流量日志中的文件、账号盗用）所处的阶段。
 var hostStages = map[string]int{
 	"主机命令执行": stBreach, "反弹Shell": stControl, "凭证窃取": stLateral, "可疑命令": stPersist, "持久化": stPersist, "痕迹清除": stPersist,
@@ -471,6 +483,11 @@ func targetStage(h *model.Hit) int {
 // actorStage 返回资产自身发起的命中所处的阶段，第二个返回值为 false 表示不计入链路。
 func (r *chainRoles) actorStage(h *model.Hit) (int, bool) {
 	if !r.egress {
+		if volumeCats[h.Category] || h.Phase == model.PhaseImpact {
+			// 连接量类命中（洪泛、CC）说明不了发起方在横向移动：反向代理回源、监控探活、内部扫描器都会这样，
+			// 只记在被访问的一侧
+			return 0, false
+		}
 		return stLateral, true
 	}
 	switch {
@@ -662,12 +679,17 @@ type ChainStepView struct {
 	Alert      uint64         `json:"alert,omitempty"`
 	Incident   uint64         `json:"incident,omitempty"`
 	Dismissed  bool           `json:"dismissed,omitempty"` // 来源的事件已被标为误报：不计入阶段与失陷研判
+	Weak       string         `json:"weak,omitempty"`      // 只是需核实的迹象（原因）：照常显示，不计入阶段与失陷研判
 }
+
+// counted 判断一步是否计入阶段与研判。
+func (v *ChainStepView) counted() bool { return !v.Dismissed && v.Weak == "" }
 
 // ChainStageView 是链路中的一个阶段。
 type ChainStageView struct {
 	StageDef
 	Reached    bool           `json:"reached"`
+	Weak       bool           `json:"weak,omitempty"` // 只有需核实的迹象
 	First      time.Time      `json:"first,omitempty"`
 	Last       time.Time      `json:"last,omitempty"`
 	Hits       int64          `json:"hits"`
@@ -716,6 +738,7 @@ type ChainSummary struct {
 	Owner      string         `json:"owner,omitempty"`
 	Members    []string       `json:"members"`
 	Reached    []string       `json:"reached"`
+	Weak       []string       `json:"weak,omitempty"` // 只有需核实的迹象、未计入的阶段
 	Depth      string         `json:"depth"`
 	Severity   model.Severity `json:"severity"`
 	Confidence string         `json:"confidence,omitempty"` // 失陷研判：high / medium，空为未见失陷迹象
@@ -724,6 +747,8 @@ type ChainSummary struct {
 	FirstSeen  time.Time      `json:"first_seen"`
 	LastSeen   time.Time      `json:"last_seen"`
 	Verdict    string         `json:"verdict"`
+	// InternalOnly 表示越过侦察的攻击来源全部是内网地址（常是内部漏洞扫描）
+	InternalOnly bool `json:"internal_only,omitempty"`
 }
 
 // AssetChain 是一个资产的完整攻击链路。
@@ -770,6 +795,81 @@ type chainIndex struct {
 	byID   map[string]int // 资产标识（含别名）→ list 下标
 	groups []*chainGroup
 	of     []int // list 下标 → groups 下标
+}
+
+// weakLocked 返回一步只是“需核实的迹象”的原因，不是时返回空。这样的步骤照常显示并注明原因，但不计入阶段、推进深度
+// 与失陷研判：与疑似失陷资产的口径一致（只凭规律外连不列为失陷主机），否则内网里定时调用接口、监控探活的主机都会被
+// 标成疑似失陷，反向代理、内部扫描器的大量连接也会被当成横向移动与拒绝服务。查询时判断，已记录的历史数据同样适用
+// （调用方持读锁）。
+func (s *Store) weakLocked(g *chainGroup, st *chainStep) string {
+	switch st.Stage {
+	case stControl:
+		switch {
+		case st.Category == CatBeacon && st.Severity < model.SevHigh && !g.strongPeer(st.Peer):
+			// 规律外连的对端正是命中情报的远控地址时，是佐证而不是需核实的迹象
+			return "只有规律外连：软件更新、监控探活、定时调用接口同样等间隔，需在主机上核实发起连接的进程"
+		case st.Severity < model.SevMedium:
+			return "低危迹象（如解析动态域名、定时 ping）：正常软件也会这样，需结合主机核实"
+		}
+	case stLateral:
+		switch {
+		case volumeCats[st.Category]:
+			return "只是连接量多：反向代理回源、监控探活同样频繁，说明不了横向移动"
+		case st.Severity < model.SevHigh && (lateralReconCats[st.Category] || st.Rule == "bhv-fwbrute"):
+			return "内网扫描或连接次数：运维人员与漏洞扫描器同样会这样做，需核实发起方；是授权扫描的请登记"
+		}
+	case stImpact:
+		switch {
+		case volumeCats[st.Category] && st.Src != "" && (geo.IsPrivate(st.Src) || g.isSelf(st.Src)):
+			return "来源是内网地址：多为反向代理、负载均衡、监控或内部扫描器的连接，不是拒绝服务"
+		case st.Rule == "bhv-flood" && s.scannerLocked(st.Src):
+			return "来源是端口扫描器：旧版本把高速扫描误判为流量洪泛"
+		}
+	case stBreach, stPersist:
+		if !st.Proven && st.Result == model.ResultSuccess && risk.ResponseProvable(st.Category) && !s.surf.successKept(st.Category, st.Target) {
+			if st.Category == "敏感文件探测" {
+				return "攻击面中没有对应的敏感资源暴露：响应是站点的兜底页面，并没有取到文件"
+			}
+			return "攻击成功研判已撤销：响应是站点的兜底页面，或来源已被标为误报 / 授权扫描"
+		}
+	}
+	return ""
+}
+
+// strongPeer 判断资产是否以高危以上的非规律外连（命中情报的远控、恶意软件）连接过该对端。
+func (g *chainGroup) strongPeer(peer string) bool {
+	if peer == "" {
+		return false
+	}
+	for _, tr := range g.tracks {
+		for _, st := range tr.Steps {
+			if st.Stage == stControl && st.Peer == peer && st.Category != CatBeacon && st.Severity >= model.SevHigh {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// scannerLocked 判断来源是否做过端口扫描或主机探测（调用方持读锁）。
+func (s *Store) scannerLocked(ip string) bool {
+	p := s.ips[ip]
+	return p != nil && (p.Rules["bhv-portscan"] > 0 || p.Rules["bhv-hostsweep"] > 0)
+}
+
+// fakeGroup 判断合并后的资产是否全部是虚构的站点（Host 头里的 OAST、nip.io 等，旧版本按站点记录过）。
+func (g *chainGroup) fakeGroup() bool {
+	for _, tr := range g.tracks {
+		if !fakeSite(tr) {
+			return false
+		}
+	}
+	return true
+}
+
+// fakeSite 判断资产标识是不是虚构的站点名。没有 Host 头时按日志源记录的“日志源 nginx”“未知站点”不是虚构的。
+func fakeSite(tr *chainTrack) bool {
+	return tr.Kind == "site" && tr.Key != "未知站点" && !strings.HasPrefix(tr.Key, "日志源 ") && detect.FakeSiteHost(tr.Key)
 }
 
 func kindRank(k string) int {
@@ -942,17 +1042,20 @@ func (s *Store) chainIndexLocked() *chainIndex {
 // chainEval 是一个资产的阶段与研判。
 type chainEval struct {
 	reached [stageN]bool
-	sev     [stageN]model.Severity
-	hits    [stageN]int64
-	first   [stageN]time.Time
-	last    [stageN]time.Time
-	srcs    map[string]uint16 // 攻击来源（不含资产自身）→ 出现过的阶段（位）
-	conf    string
-	maxSev  model.Severity
-	depth   int
-	hitsAll int64
-	firstT  time.Time
-	lastT   time.Time
+	weak    [stageN]bool // 出现过需核实的迹象（不计入阶段与研判）
+	// internalOnly 表示越过侦察的攻击来源全部是内网地址（常是内部漏洞扫描、安全测试）
+	internalOnly bool
+	sev          [stageN]model.Severity
+	hits         [stageN]int64
+	first        [stageN]time.Time
+	last         [stageN]time.Time
+	srcs         map[string]uint16 // 攻击来源（不含资产自身）→ 出现过的阶段（位）
+	conf         string
+	maxSev       model.Severity
+	depth        int
+	hitsAll      int64
+	firstT       time.Time
+	lastT        time.Time
 }
 
 func (s *Store) evalLocked(g *chainGroup) *chainEval {
@@ -960,6 +1063,7 @@ func (s *Store) evalLocked(g *chainGroup) *chainEval {
 	var steps [stageN]int
 	strong := false        // 单独即可判定失陷的证据
 	var kinds [stageN]bool // 出现过的失陷迹象种类
+	atkInt, atkExt := false, false
 	for _, tr := range g.tracks {
 		e.hitsAll += tr.Hits
 		if e.firstT.IsZero() || tr.FirstSeen.Before(e.firstT) {
@@ -987,17 +1091,29 @@ func (s *Store) evalLocked(g *chainGroup) *chainEval {
 				continue
 			}
 			i := st.Stage
+			if s.weakLocked(g, st) != "" {
+				e.weak[i] = true
+				continue
+			}
 			e.reached[i] = true
 			e.sev[i] = max(e.sev[i], st.Severity)
 			if st.Src != "" && !g.isSelf(st.Src) {
 				e.srcs[st.Src] |= 1 << i
+				if i >= stExploit && st.Category != "横向移动" { // 横向移动是另一台失陷主机发起的，不是内部扫描
+					if geo.IsPrivate(st.Src) {
+						atkInt = true
+					} else {
+						atkExt = true
+					}
+				}
 			}
 			// 与疑似失陷资产的口径一致：Web 只有带证据的命令执行、WebShell 等成功才单独判定；主机外连远控、
 			// 安全设备报出恶意软件（高危以上）、暴力破解后登录成功、清除日志 / 加入管理员组单独判定
 			switch i {
 			case stBreach:
 				strong = strong || st.Proven && highImpact[st.Category] || st.Rule == "auth-brute-ok"
-				kinds[i] = true
+				// 敏感文件确实可以下载是已验证的暴露面，不说明服务器已被控制（与疑似失陷资产的口径一致）
+				kinds[i] = kinds[i] || st.Category != "敏感文件探测" || st.Proven
 			case stPersist:
 				strong = strong || st.Proven || st.Severity >= model.SevHigh && st.Category != "WebShell后门"
 				kinds[i] = true
@@ -1037,6 +1153,7 @@ func (s *Store) evalLocked(g *chainGroup) *chainEval {
 	case n == 1:
 		e.conf = "medium"
 	}
+	e.internalOnly = atkInt && !atkExt && e.conf == "" // 已有失陷迹象时不提示登记授权扫描
 	return e
 }
 
@@ -1068,9 +1185,15 @@ func (e *chainEval) stageSources(i int) int {
 
 // title 返回合并后资产的名称：台账资产 > 站点 > 主机，同类按命中多的。
 func (g *chainGroup) title() *chainTrack {
+	rank := func(tr *chainTrack) int {
+		if fakeSite(tr) {
+			return 3 // 虚构的站点名（旧版本按 Host 头记录）排在服务器地址之后
+		}
+		return kindRank(tr.Kind)
+	}
 	best := g.tracks[0]
 	for _, tr := range g.tracks[1:] {
-		if kindRank(tr.Kind) < kindRank(best.Kind) || kindRank(tr.Kind) == kindRank(best.Kind) && tr.Hits > best.Hits {
+		if rank(tr) < rank(best) || rank(tr) == rank(best) && tr.Hits > best.Hits {
 			best = tr
 		}
 	}
@@ -1100,9 +1223,13 @@ func (s *Store) summaryLocked(g *chainGroup, e *chainEval) ChainSummary {
 			sm.Asset = tr.Asset
 		}
 	}
+	var weak []string
 	for i, r := range e.reached {
 		if r {
 			sm.Reached = append(sm.Reached, ChainStages[i].ID)
+		} else if e.weak[i] {
+			sm.Weak = append(sm.Weak, ChainStages[i].ID)
+			weak = append(weak, ChainStages[i].Name)
 		}
 	}
 	path := stagePath(e)
@@ -1114,10 +1241,22 @@ func (s *Store) summaryLocked(g *chainGroup, e *chainEval) ChainSummary {
 		sm.Verdict = "攻击已推进到「" + deep + "」阶段（" + path + "），疑似失陷，需结合主机核实"
 	case e.depth == 0 && e.reached[stRecon]:
 		sm.Verdict = "只有侦察：被扫描探测，未见进一步攻击"
+	case e.depth == 0 && len(weak) > 0:
+		sm.Verdict = "未见攻击推进：只有需核实的迹象（" + strings.Join(weak, "、") + "），不判为失陷"
+		weak = nil
 	case e.depth == 0:
 		sm.Verdict = "命中均已被标为误报"
+	case e.reached[stBreach]: // 没有失陷迹象的突破只有敏感文件可下载
+		sm.Verdict = "攻击推进到「" + deep + "」阶段（" + path + "），有敏感资源可被访问，未见失陷迹象"
 	default:
 		sm.Verdict = "攻击推进到「" + deep + "」阶段（" + path + "），未见攻击成功或失陷迹象"
+	}
+	if len(weak) > 0 {
+		sm.Verdict += "；「" + strings.Join(weak, "、") + "」只有需核实的迹象，不计入"
+	}
+	if e.internalOnly && e.depth >= stExploit {
+		sm.InternalOnly = true
+		sm.Verdict += "；越过侦察的攻击都来自内网地址，如是内部漏洞扫描请登记为授权扫描"
 	}
 	return sm
 }
@@ -1141,6 +1280,10 @@ func (s *Store) ChainList(q ChainQuery) *ChainList {
 	}
 	items := make([]item, 0, len(ix.groups))
 	for _, g := range ix.groups {
+		if g.fakeGroup() {
+			out.Tracked -= len(g.tracks)
+			continue // 只有虚构站点名的记录（旧版本按 Host 头记录）：不是资产
+		}
 		e := s.evalLocked(g)
 		for i, r := range e.reached {
 			if r {
@@ -1283,6 +1426,9 @@ func (s *Store) AssetChain(id string) *AssetChain {
 			Rule: st.Rule, Name: st.Name, Src: st.Src, Peer: st.Peer, Target: st.Target, Evidence: st.Evidence, Severity: st.Severity,
 			Result: st.Result, Proven: st.Proven, First: st.First, Last: st.Last, Count: st.Count, Techniques: techsOf(st.Category),
 			Alert: st.Alert, Incident: st.Incident, Dismissed: s.dismissedLocked(st)}
+		if !v.Dismissed {
+			v.Weak = s.weakLocked(g, st)
+		}
 		v.Self = self[st.Src] || st.Peer != "" && (st.Stage == stControl || st.Stage == stLateral)
 		if st.Src == "" {
 			v.SrcLabel = noSourceLabel // 设备只记录了目的地址的多源洪泛
@@ -1305,7 +1451,7 @@ func (s *Store) AssetChain(id string) *AssetChain {
 
 	// 阶段
 	for i := 0; i < stageN; i++ {
-		sv := ChainStageView{StageDef: ChainStages[i], Reached: e.reached[i], Hits: e.hits[i], Severity: e.sev[i], Sources: e.stageSources(i)}
+		sv := ChainStageView{StageDef: ChainStages[i], Reached: e.reached[i], Weak: e.weak[i] && !e.reached[i], Hits: e.hits[i], Severity: e.sev[i], Sources: e.stageSources(i)}
 		if e.hits[i] > 0 {
 			sv.First, sv.Last = e.first[i], e.last[i]
 		}
@@ -1328,13 +1474,13 @@ func (s *Store) AssetChain(id string) *AssetChain {
 	// 其次是突破、植入成功的来源；其他阶段也优先选它们的步骤，串起一次完整的入侵
 	var ctrl []string
 	for _, v := range c.Steps {
-		if !v.Dismissed && v.Stage == "control" && v.Peer != "" {
+		if v.counted() && v.Stage == "control" && v.Peer != "" {
 			ctrl = append(ctrl, v.Peer)
 		}
 	}
 	key, prime := map[string]bool{}, map[string]bool{}
 	for _, v := range c.Steps {
-		if v.Dismissed || v.Self {
+		if !v.counted() || v.Self {
 			continue
 		}
 		if v.Stage == "breach" || v.Stage == "persist" {
@@ -1362,7 +1508,7 @@ func (s *Store) AssetChain(id string) *AssetChain {
 		var best *ChainStepView
 		for k := range c.Steps {
 			v := &c.Steps[k]
-			if v.Stage == ChainStages[i].ID && !v.Dismissed && (best == nil || better(v, best)) {
+			if v.Stage == ChainStages[i].ID && v.counted() && (best == nil || better(v, best)) {
 				best = v
 			}
 		}
@@ -1375,7 +1521,7 @@ func (s *Store) AssetChain(id string) *AssetChain {
 	// 攻击来源
 	srcs := map[string]*ChainSource{}
 	for _, v := range c.Steps {
-		if v.Self || v.Dismissed || v.Src == "" {
+		if v.Self || !v.counted() || v.Src == "" {
 			continue
 		}
 		x := srcs[v.Src]
@@ -1426,9 +1572,16 @@ func chainAdvice(c *AssetChain, e *chainEval) []string {
 			hosts = addUnique(hosts, m.Key, 3)
 		}
 	}
-	var attackers []string
+	var attackers, weak, weakHosts []string
 	for _, v := range c.Steps {
 		if v.Dismissed {
+			continue
+		}
+		if v.Weak != "" {
+			weak = addUnique(weak, "「"+v.StageName+"」"+v.Name+"："+v.Weak, 4)
+			if v.Self {
+				weakHosts = addUnique(weakHosts, v.Src, 3)
+			}
 			continue
 		}
 		switch v.Stage {
@@ -1451,7 +1604,8 @@ func chainAdvice(c *AssetChain, e *chainEval) []string {
 	if len(hosts) > 0 {
 		who = strings.Join(hosts, "、")
 	}
-	if e.reached[stControl] || e.reached[stLateral] || e.conf == "high" {
+	// 只有横向（内网暴力破解等）、没有失陷迹象时不要求隔离：先核实发起方
+	if e.reached[stControl] || e.reached[stLateral] && e.conf != "" || e.conf == "high" {
 		out = append(out, "立即隔离 "+who+"（断开外网或迁移到隔离区），保全内存与日志后再排查，避免攻击者察觉后清理痕迹")
 	}
 	if e.reached[stControl] && len(peers) > 0 {
@@ -1478,6 +1632,16 @@ func chainAdvice(c *AssetChain, e *chainEval) []string {
 	}
 	if len(attackers) > 0 {
 		out = append(out, "封禁对该资产发起利用的来源 "+strings.Join(attackers, "、")+"，并在攻击活动中查看是否有同一攻击者的其他地址")
+	}
+	if c.InternalOnly {
+		out = append(out, "越过侦察的攻击都来自内网地址：如是内部漏洞扫描或安全测试，在「授权扫描」中登记扫描器地址与时间窗口，之后不再告警、不计入链路；不是的话按内网主机失陷排查发起方")
+	}
+	if len(weak) > 0 {
+		w := ""
+		if len(weakHosts) > 0 {
+			w = "（在 " + strings.Join(weakHosts, "、") + " 上）"
+		}
+		out = append(out, "需核实"+w+"："+strings.Join(weak, "；")+"。确认是正常业务后把对应事件标为误报（自学习据此校准同类告警），无法解释时再按失陷排查")
 	}
 	if len(out) == 0 {
 		out = append(out, "只有侦察：确认暴露的端口与路径确有必要对外开放，关闭不必要的服务；被频繁探测的敏感路径在 WAF 中加入拦截")

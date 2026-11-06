@@ -711,8 +711,10 @@ func (b *Behavior) observeFw(ev *model.Event) []model.Hit {
 	}
 	// 事件多但分散在大量端口 / 主机上的是高速扫描（已由端口扫描、主机扫描告警），不是洪泛：
 	// 互联网扫描源（如 79.124.58.130）5 分钟内对上百个地址的随机端口各连一次，曾被判为高危的“流量洪泛/DoS”
-	if w.events >= b.th.FloodEvents && w.fired&bitFlood == 0 && b.scanLike(w) {
-		w.fired |= bitFlood // 扫描窗口：不判为洪泛，之后的事件也不再重复判断
+	// 内部来源的连接多是业务本身：反向代理、负载均衡回源、监控探活、内部漏洞扫描器打出的成千上万个会话，
+	// 判为“流量洪泛/DoS”会让这些主机在资产攻击链路里出现“横向 / 影响”。内部主机对外的异常流量由外发流量突增判断
+	if w.events >= b.th.FloodEvents && w.fired&bitFlood == 0 && (internal || b.scanLike(w)) {
+		w.fired |= bitFlood // 扫描窗口或内部来源：不判为洪泛，之后的事件也不再重复判断
 	}
 	fire(bitFlood, w.events >= b.th.FloodEvents, func() model.Hit {
 		return model.Hit{RuleID: "bhv-flood", Name: "流量洪泛/DoS", Category: CatFlood,

@@ -285,3 +285,16 @@ func TestProvenCannotOverrideBlocked(t *testing.T) {
 		t.Errorf("弱特征应保持低危: %s", w.Severity)
 	}
 }
+
+// 周期性外连的等级由检测给出：定时 ping、多台主机连同一地址的低危不被分类底线抬回中危。
+func TestBeaconFloor(t *testing.T) {
+	h := model.Hit{Category: "可疑外连", Severity: model.SevLow, Result: model.ResultAllowed}
+	Finalize(&h)
+	if h.Severity != model.SevLow {
+		t.Fatalf("低危的规律外连不应抬到 %v", h.Severity)
+	}
+	h = model.Hit{Category: "可疑外连", Severity: model.SevMedium, Result: model.ResultAllowed}
+	if Finalize(&h); h.Severity != model.SevMedium {
+		t.Fatalf("中危的规律外连保持中危: %v", h.Severity)
+	}
+}

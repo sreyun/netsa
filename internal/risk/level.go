@@ -62,7 +62,7 @@ var catFloor = map[string]model.Severity{
 	"自动化工具":      model.SevLow,
 	"协议异常":       model.SevLow,
 	"数据爬取/越权遍历":  model.SevLow,
-	"可疑外连":       model.SevMedium,
+	"可疑外连":       model.SevLow,    // 周期性外连：等级由检测给出（定时 ping、多台主机连同一地址为低危），底线不再抬回中危
 	"恶意外连":       model.SevMedium, // 主动连接情报标记的地址；等级由情报类型决定（C2 严重、Tor 中危）
 	"恶意软件/远控":    model.SevHigh,   // 设备已明确判定为木马 / 远控通信
 	"挖矿":         model.SevHigh,

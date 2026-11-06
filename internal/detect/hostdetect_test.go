@@ -281,3 +281,21 @@ func TestServer5xxOutage(t *testing.T) {
 		t.Fatal("服务故障期间不应判定为攻击")
 	}
 }
+
+// Web 日志 Host 头里虚构的站点名：带外探测平台、通配 DNS、保留后缀、云元数据与对象存储地址、含载荷字符的。
+func TestFakeSiteHost(t *testing.T) {
+	for _, h := range []string{"aws.oast.online", "dbmdin6cm7odcll7dhrgpwsp1r3w7bwqc.oast.online", "alibaba.oast.pro", "x.interact.sh",
+		"169.254.169.254.nip.io", "10.0.0.1.sslip.io", "btjwyof9eg9c4bvk.invalid", "test.example", "localhost", "a.localhost",
+		"test.s3.amazonaws.com", "bucket.s3.us-east-1.amazonaws.com", "s3.amazonaws.com", "169.254.169.254", "127.0.0.1", "::1", "0.0.0.0",
+		"100.100.100.200", "metadata.google.internal", "metadata", "${jndi:ldap://x}", "a b.com", "\"evil.com", "x.com:evil"} {
+		if !FakeSiteHost(h) {
+			t.Errorf("%q 应判为虚构的站点名", h)
+		}
+	}
+	for _, h := range []string{"mg.hc-yun.com", "www.example.com", "MG.Example.COM", "mg-prd-nginx", "api_gw", "43.242.97.38", "10.34.44.88",
+		"2001:db8::1", "my-elb-123.us-east-1.elb.amazonaws.com", "中文.cn", ""} {
+		if FakeSiteHost(h) {
+			t.Errorf("%q 是真实的站点名或地址", h)
+		}
+	}
+}

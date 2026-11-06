@@ -138,6 +138,11 @@ func TestProductionFalsePositives(t *testing.T) {
 	if h := hitIDs(web("GET", "/static/pdf/web/viewer.html?file=https://files.example.com/a.pdf", 200)); h["rfi"].RuleID != "" {
 		t.Errorf("同一主域名的地址不是远程文件包含: %+v", h["rfi"])
 	}
+	// Host 头带端口、参数中的域名大写：仍是本站
+	if h := hitIDs(e.Inspect(&model.Event{Kind: model.KindWeb, SrcIP: "203.0.113.90", Host: "App.Example.com:443", Method: "GET",
+		URI: "/static/pdf/web/viewer.html?file=https://APP.example.com:443/a.pdf", Status: 200, Bytes: 5000, UA: "Mozilla/5.0"})); h["rfi"].RuleID != "" {
+		t.Errorf("Host 头带端口时本站的 pdf 预览地址不是远程文件包含: %+v", h["rfi"])
+	}
 	for _, uri := range []string{"/x.php?file=http://evil.example/shell.txt", "/x.php?file=http://app.example.com@evil.example/s.txt", "/x.php?page=http://app.example.com.evil.example/s.txt"} {
 		if _, ok := hitIDs(web("GET", uri, 200))["rfi"]; !ok {
 			t.Errorf("%s 应命中远程文件包含", uri)
@@ -177,6 +182,19 @@ func TestBehaviorScanFloodAnd401(t *testing.T) {
 	}, th.FloodEvents+10)
 	if !flood["bhv-flood"] {
 		t.Errorf("集中打向一个目标应判为洪泛: %v", flood)
+	}
+	// 内部来源（反向代理回源、内部漏洞扫描器）集中连接自己的服务：业务本身，不是洪泛
+	for _, src := range []string{"10.34.45.31", "192.0.2.10"} {
+		zone := ""
+		if src == "192.0.2.10" {
+			zone = "trust" // 内部安全域中的公网段地址
+		}
+		own := fired(src, func(i int) *model.Event {
+			return &model.Event{Kind: model.KindFirewall, DstIP: "10.34.44.88", DstPort: 443, Action: model.ActionAllow, SrcZone: zone}
+		}, th.FloodEvents+10)
+		if own["bhv-flood"] {
+			t.Errorf("内部来源 %s 的大量连接不应判为洪泛: %v", src, own)
+		}
 	}
 	paths := []string{"/message/api/bulletins", "/uaa/api/app-menus/homepage", "/uaa/api/users/current", "/base/api/app-patches"}
 	app := fired("223.160.231.63", func(i int) *model.Event {
