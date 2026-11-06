@@ -68,32 +68,33 @@ func (b *Behavior) observeBandwidth(ev *model.Event) {
 			w.nsrc = 0
 		}
 	}
-	w.cur += ev.SentBytes
+	bytes, packets := windowShare(ev.SentBytes, ev.Duration, bwWindow), windowShare(max(ev.Packets, 1), ev.Duration, bwWindow)
+	w.cur = satAdd(w.cur, bytes)
 	if ev.Time.After(w.lastSeen) {
 		w.lastSeen = ev.Time
 	}
-	total, _ := w.bytes.add(ev.Time, bwWindow, ev.SentBytes)
-	pkts, _ := w.pkts.add(ev.Time, bwWindow, max(ev.Packets, 1))
+	total, _ := w.bytes.add(ev.Time, bwWindow, bytes)
+	pkts, _ := w.pkts.add(ev.Time, bwWindow, max(packets, 1))
 	if _, ok := w.srcs[ev.SrcIP]; ok {
-		w.srcs[ev.SrcIP] += ev.SentBytes
+		w.srcs[ev.SrcIP] = satAdd(w.srcs[ev.SrcIP], bytes)
 	} else {
 		if w.nsrc < bwSrcCounts {
 			w.nsrc++
 		}
 		if len(w.srcs) < maxBWSrcs {
-			w.srcs[ev.SrcIP] = ev.SentBytes
+			w.srcs[ev.SrcIP] = bytes
 		}
 	}
 	pk := ev.Proto + "/" + fmt.Sprint(ev.SrcPort)
 	if _, ok := w.ports[pk]; ok || len(w.ports) < maxBWPorts {
-		w.ports[pk] += ev.SentBytes
+		w.ports[pk] = satAdd(w.ports[pk], bytes)
 	}
 	secs := int64(bwWindow / time.Second)
-	bps, pps := total*8/secs, pkts/secs
+	bps, pps := total/secs*8, pkts/secs
 	w.peakBps, w.peakPps = max(w.peakBps, bps), max(w.peakPps, pps)
 	needBps, needPps := b.th.DDoSBps, b.th.DDoSPps
 	if w.windows >= surgeMature {
-		needBps = max(needBps, int64(w.base*bwFactor)*8/secs) // 平时的 10 倍以上
+		needBps = max(needBps, int64(min(w.base*bwFactor, 9e18))/secs*8) // 平时的 10 倍以上
 	}
 	over := needBps > 0 && bps >= needBps || needPps > 0 && pps >= needPps && bps >= needBps/20
 	if !w.fired.IsZero() && ev.Time.Sub(w.fired).Abs() < bwRefire {
@@ -106,7 +107,7 @@ func (b *Behavior) observeBandwidth(ev *model.Event) {
 	w.surge, w.fired = true, ev.Time
 	base := "平时没有足够的记录"
 	if w.windows >= surgeMature {
-		base = "平时约 " + fmtBps(int64(w.base)*8/secs)
+		base = "平时约 " + fmtBps(int64(min(w.base, 9e18))/secs*8)
 	}
 	evidence := fmt.Sprintf("%s 1 分钟内入向流量 %s、%s，来自 %s 个来源（%s）", dst, fmtBps(bps), fmtPps(pps), countStr(w.nsrc, bwSrcCounts), base)
 	if refl := topPorts(w.ports, total); refl != "" {

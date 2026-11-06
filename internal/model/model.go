@@ -216,6 +216,8 @@ type Event struct {
 	SentBytes int64
 	RecvBytes int64
 	Packets   int64
+	// Duration 是会话 / 流的持续时间（秒，0 为没有记录）：长连接结束时一次性报告的字节数按时长折算到统计窗口
+	Duration float64
 	// SrcHost 是认证日志记录的来源主机名（Windows 4624 的 WorkstationName），用于串起横向登录链
 	SrcHost string
 	// PayloadAddrs 是利用载荷中写明的公网地址（反弹 Shell、下载执行、JNDI 的回连地址），由流水线的联动检测提取。

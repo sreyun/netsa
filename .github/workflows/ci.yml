@@ -56,11 +56,23 @@ jobs:
       # race 检测会让用例慢 5~10 倍，用 -short 走降级规模（如畸形日志 60000→5000 条），
       # 否则按耗时预算断言的性能用例会被慢环境误判为失败。
       - name: go test (race)
-        run: go test -race -count=1 -short -timeout 20m ./...
+        run: |
+          set +e
+          go test -race -count=1 -short -timeout 20m ./... > race.log 2>&1
+          status=$?
+          cat race.log
+          [ $status -eq 0 ] || bash .github/scripts/annotate-test-log.sh race.log "go test (race)"
+          exit $status
 
       # 不带 race 再跑一遍完整规模：保留「性能退化」类断言的原始灵敏度（race 下只看并发正确性）。
       - name: go test (full)
-        run: go test -count=1 -timeout 20m ./...
+        run: |
+          set +e
+          go test -count=1 -timeout 20m ./... > full.log 2>&1
+          status=$?
+          cat full.log
+          [ $status -eq 0 ] || bash .github/scripts/annotate-test-log.sh full.log "go test (full)"
+          exit $status
 
       - name: build
         run: CGO_ENABLED=0 go build -trimpath -o /tmp/netsa ./cmd/netsa

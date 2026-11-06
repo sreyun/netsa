@@ -194,3 +194,22 @@ func BenchmarkMatchActive(b *testing.B) {
 		m.Match("203.0.113.9", time.Time{})
 	}
 }
+
+// 立即开始的登记向前覆盖 1 分钟：日志时间比登记时刻略早（设备时钟误差、只精确到秒的日志）的扫描同样放行，
+// 更早的不放行。用固定时钟验证，与平台的时钟精度无关（Linux 的纳秒时钟上曾经匹配不上）。
+func TestImmediateStartSlack(t *testing.T) {
+	m, _ := Load("")
+	clock := time.Date(2026, 11, 5, 10, 0, 0, 500_000_000, time.UTC)
+	m.now = func() time.Time { return clock }
+	if _, err := m.Add(Entry{IP: "203.0.113.5", End: clock.Add(time.Hour), Note: "渗透测试"}); err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range []struct {
+		at   time.Time
+		want bool
+	}{{clock.Truncate(time.Second), true}, {clock.Add(-30 * time.Second), true}, {clock.Add(-2 * time.Minute), false}, {clock.Add(30 * time.Minute), true}} {
+		if got := m.Match("203.0.113.5", c.at) != nil; got != c.want {
+			t.Errorf("%s: %v", c.at.Format(time.RFC3339Nano), got)
+		}
+	}
+}

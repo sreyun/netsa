@@ -279,6 +279,9 @@ func fillSession(ev *model.Event, kv map[string]string, act string) {
 		ev.SentBytes = atoi64(pick(kv, kvSentBytes...))
 		ev.RecvBytes = atoi64(pick(kv, kvRcvBytes...))
 		ev.Packets = atoi64(pick(kv, kvSentPkts...)) + atoi64(pick(kv, kvRcvPkts...))
+		if d := atoi64(pick(kv, "duration", "elapsed", "elapsed_time", "session_duration", "elapsedtime")); d > 0 {
+			ev.Duration = float64(d) // FortiGate duration、Palo Alto elapsed（秒）
+		}
 	}
 	if strings.EqualFold(strings.Trim(act, `"' `), "start") {
 		return

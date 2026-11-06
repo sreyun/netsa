@@ -24,7 +24,7 @@ const (
 	concWindow       = 10 * time.Minute
 	concCities       = 3
 	takeoverRefire   = 6 * time.Hour
-	maxAccounts      = 100000
+	maxAccounts      = 50000
 	maxAcctCountries = 16
 )
 

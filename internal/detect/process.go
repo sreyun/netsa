@@ -140,8 +140,11 @@ var procRules = []procRule{
 			`delete\s+shadows\s+/all|get-wmiobject\s+win32_shadowcopy.*delete`),
 }
 
+// maxCmdLine 是参与匹配的命令行长度上限。
+const maxCmdLine = 8192
+
 // reEncodedPS 匹配 PowerShell 的编码参数（-e / -enc / -EncodedCommand 及其缩写）。
-var reEncodedPS = regexp.MustCompile(`(?:^|\s)[-/]e(?:c|nc|nco|ncod|ncode|ncoded|ncodedc|ncodedcommand)?\s+([a-z0-9+/=]{20,})`)
+var reEncodedPS = regexp.MustCompile(`(?i)(?:^|\s)[-/]e(?:c|nc|nco|ncod|ncode|ncoded|ncodedc|ncodedcommand)?\s+([a-z0-9+/=]{20,})`)
 
 // inspectProcess 检测主机进程事件。
 func inspectProcess(ev *model.Event) []model.Hit {
@@ -156,7 +159,11 @@ func inspectProcess(ev *model.Event) []model.Hit {
 		return nil
 	}
 	img, parent := procName(p.Image), procName(p.Parent)
-	cmd := strings.ToLower(p.CommandLine)
+	cmdLine := p.CommandLine
+	if len(cmdLine) > maxCmdLine {
+		cmdLine = cmdLine[:maxCmdLine] // 只匹配前 8 KB（Windows 命令行最长 32 KB）
+	}
+	cmd := strings.ToLower(cmdLine)
 	who := hostLabel(ev)
 	hit := func(id, name, cat string, sev model.Severity, phase, tech, evidence string) model.Hit {
 		return model.Hit{RuleID: id, Name: name, Category: cat, Severity: sev, Phase: phase, Result: model.ResultSuccess, Proven: true,
@@ -213,10 +220,8 @@ func inspectProcess(ev *model.Event) []model.Hit {
 			"T1505.003", fmt.Sprintf("%s 启动 %s：%s", from, img, Printable(p.CommandLine, 240))))
 	}
 	if (img == "powershell" || img == "pwsh") && cmd != "" {
-		if m := reEncodedPS.FindStringSubmatch(cmd); m != nil {
-			// 命令行已转小写，解码需用原始大小写
-			raw := p.CommandLine[strings.Index(cmd, m[1]) : strings.Index(cmd, m[1])+len(m[1])]
-			dec := decodePSCommand(raw)
+		if m := reEncodedPS.FindStringSubmatch(cmdLine); m != nil { // 在原始命令行上匹配：Base64 区分大小写
+			dec := decodePSCommand(m[1])
 			sev, name := model.SevHigh, "编码的 PowerShell 命令"
 			low := strings.ToLower(dec)
 			if strings.Contains(low, "downloadstring") || strings.Contains(low, "net.webclient") || strings.Contains(low, "iex") ||
