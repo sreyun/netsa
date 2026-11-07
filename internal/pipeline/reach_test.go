@@ -164,8 +164,9 @@ func TestReachGateDeviceLocal(t *testing.T) {
 	for _, f := range rep.Findings {
 		titles = append(titles, f.Title)
 	}
-	if len(rep.Findings) != 1 || rep.Findings[0].Title != "防火墙管理服务对公网放行: Telnet" || rep.Findings[0].Severity != model.SevHigh {
-		t.Fatalf("应只记录 Telnet 管理服务暴露: %v", titles)
+	// 策略匹配日志只说明放行，扫描器的单次探测看不出端口上有没有服务：按策略合并记一条，不按端口报管理服务
+	if len(rep.Findings) != 1 || rep.Findings[0].Title != "防火墙策略放行公网访问设备自身: 允许本地上外网" || rep.Findings[0].Severity != model.SevMedium {
+		t.Fatalf("单次探测应只按策略记录一条: %v", titles)
 	}
 	for _, s := range rep.Services {
 		if s.Port == 37215 || s.Port == 2323 || s.Port == 5432 {
@@ -178,5 +179,38 @@ func TestReachGateDeviceLocal(t *testing.T) {
 	pol := exp.Policies()
 	if len(pol) != 1 || pol[0].DstZone != "local" || pol[0].Permits != 3 {
 		t.Fatalf("可疑放行策略（local 安全域）: %+v", pol)
+	}
+}
+
+// 同一来源反复连接防火墙自身的管理端口（端口上确有服务在应答）：按端口记“防火墙管理服务对公网放行”。
+// 默认策略放行公网到设备自身：按策略记一条高危。
+func TestReachGateDeviceInUse(t *testing.T) {
+	local := func(port int, src, rule string) *model.Event {
+		line := strings.Replace(huaweiUnmapped, "destination-zone=untrust", "destination-zone=local", 1)
+		line = strings.Replace(line, "destination-port=23,", "destination-port="+strconv.Itoa(port)+",", 1)
+		line = strings.Replace(line, "rule-name=允许本地上外网", "rule-name="+rule, 1)
+		return parseLine(t, strings.Replace(line, "195.184.76.97", src, 1))
+	}
+	var evs []*model.Event
+	for range 12 {
+		evs = append(evs, local(23, "113.57.107.46", "允许本地上外网"))
+	}
+	for i := range 20 {
+		evs = append(evs, local(830, "79.124.58."+strconv.Itoa(100+i), "default"))
+	}
+	exp, _ := exposure.Load(config.ExposureConfig{})
+	st, _ := runOnce(t, exp, evs)
+	got := map[string]model.Severity{}
+	for _, f := range st.Surface().Findings {
+		got[f.Title] = f.Severity
+	}
+	if got["防火墙管理服务对公网放行: Telnet"] != model.SevHigh {
+		t.Errorf("同一来源反复连接的管理端口应记为管理服务暴露: %v", got)
+	}
+	if got["防火墙策略放行公网访问设备自身: default"] != model.SevHigh {
+		t.Errorf("默认策略放行公网到设备自身应记一条高危: %v", got)
+	}
+	if _, ok := got["防火墙管理服务对公网放行: NETCONF"]; ok {
+		t.Errorf("扫描器各探测一次的 NETCONF 不应按端口报管理服务: %v", got)
 	}
 }

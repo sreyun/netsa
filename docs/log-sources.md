@@ -237,7 +237,7 @@ exposure:
 | 会话结束时目标无应答（华为会话日志 `RcvPkts=0`、FortiGate `rcvdpkt=0`、Palo Alto end 日志收包数为 0） | 没有建立通信 | 只打标签，不告警 |
 | DNAT 后为内网地址（FortiGate `trandisp=dnat tranip`、华为 `DestinationNatIP`、Palo Alto NAT 目的地址等），或转发到内部安全域（`destination-zone=dmz`） | 确实到达了内部服务 | 保持告警并注明证据，不再按手工清单过滤；DNAT 后地址直接用于关联资产台账 |
 | 目的安全域为 `local`，端口不是设备服务（如 37215、2323、5432） | 打到防火墙自身未提供服务的端口 | 只打标签，不告警；按策略汇总为“可疑放行策略”（local 安全域策略过宽）。ICMP 等无端口协议（ping 防火墙）由设备自身应答，不按此判断 |
-| 目的安全域为 `local`，端口是设备的管理 / VPN 服务（SSH、Telnet、HTTP(S)、SNMP、NETCONF、IKE、L2TP、SSL VPN；可用 `exposure.device_ports` 追加） | 打到防火墙自身的服务 | 单次探测只打标签；管理服务对公网放行记为攻击面风险“防火墙管理服务对公网放行”（Telnet / HTTP / SNMP 为高危，SSH / HTTPS / NETCONF 为中危，VPN 不计）；针对该端口的暴力破解照常告警 |
+| 目的安全域为 `local`，端口是设备的管理 / VPN 服务（SSH、Telnet、HTTP(S)、SNMP、NETCONF、IKE、L2TP、SSL VPN；可用 `exposure.device_ports` 追加） | 打到防火墙自身的服务 | 单次探测只打标签；有证据表明端口上有服务在应答（会话有应答，或同一来源连接 10 次以上）时记为攻击面风险“防火墙管理服务对公网放行”（Telnet / HTTP / SNMP 为高危，SSH / HTTPS / NETCONF 为中危，VPN 不计）；只有策略匹配日志（如华为 `POLICYPERMIT`，扫描器各探测一次）时按策略合并记一条“防火墙策略放行公网访问设备自身”（默认策略 `default` 为高危，其余中危），不按端口逐个报；针对该端口的暴力破解照常告警 |
 | 日志没有上述字段 | 无法判断 | 按 `exposure.enabled` / `services` 判断 |
 
 - **可疑放行策略**：被放行却没到达任何服务的外部流量会按“策略 + 安全域”汇总，显示在 **数据源 → 溯源与检测能力** 和 `GET /api/exposure` 的 `policies` 中。例如外部探测命中出站策略「允许本地上外网」（untrust → untrust），通常是该策略的源安全域或源地址配得过宽，建议限定为内网安全域。

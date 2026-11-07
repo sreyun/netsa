@@ -358,7 +358,24 @@ func (d *assessData) exposureDim() *Dimension {
 		dim.Advice = []string{"定期复核攻击面分析中的 Web 资产与网络服务清单，及时下线不再使用的入口"}
 		return dim
 	}
-	dim.Summary = fmt.Sprintf("发现 %d 项暴露面风险（严重 %d 项），攻击者无需漏洞即可获取敏感信息或直接访问内部服务", len(d.exposure), crit)
+	// 按类型说明，只有敏感数据可直接下载、或有严重 / 高危服务对公网开放时才强调“无需漏洞”
+	var parts []string
+	if svc > 0 {
+		parts = append(parts, fmt.Sprintf("对公网开放的高危服务 %d 项", svc))
+	}
+	if n := sens - admin; n > 0 {
+		parts = append(parts, fmt.Sprintf("可公开访问的敏感资源 %d 项", n))
+	}
+	if admin > 0 {
+		parts = append(parts, fmt.Sprintf("对外暴露的管理后台 %d 项", admin))
+	}
+	dim.Summary = fmt.Sprintf("发现 %d 项暴露面风险：%s", len(d.exposure), strings.Join(parts, "、"))
+	if crit > 0 {
+		dim.Summary += fmt.Sprintf("（严重 %d 项）", crit)
+	}
+	if crit > 0 || sens-admin > 0 || countSev(d.exposure, model.SevHigh) > 0 {
+		dim.Summary += "，攻击者无需利用漏洞即可获取敏感信息或直接访问内部服务"
+	}
 	seen := map[string]bool{}
 	for _, f := range d.exposure {
 		if !seen[f.Remediation] && len(dim.Advice) < 4 {
@@ -459,10 +476,41 @@ func (d *assessData) perimeter() *Dimension {
 		{"被探测端口", num(int64(d.probedPorts)), ""},
 	}
 	if len(d.services) > 0 {
-		var names []string
+		// 按服务归并（同一服务开在多台主机上时写台数），按服务的风险、台数排序
+		type svcN struct {
+			name string
+			risk model.Severity
+			n    int
+		}
+		var order []*svcN
+		by := map[string]*svcN{}
 		for _, sv := range d.services {
-			if len(names) < 5 {
-				names = append(names, fmt.Sprintf("%s(%d)", sv.Name, sv.Port))
+			k := fmt.Sprintf("%s(%d)", sv.Name, sv.Port)
+			x := by[k]
+			if x == nil {
+				x = &svcN{name: k}
+				by[k] = x
+				order = append(order, x)
+			}
+			x.n++
+			x.risk = max(x.risk, sv.Risk)
+		}
+		sort.SliceStable(order, func(i, j int) bool {
+			if order[i].risk != order[j].risk {
+				return order[i].risk > order[j].risk
+			}
+			return order[i].n > order[j].n
+		})
+		var names []string
+		for _, x := range order {
+			if len(names) == 5 {
+				names = append(names, "等")
+				break
+			}
+			if x.n > 1 {
+				names = append(names, fmt.Sprintf("%s ×%d 台", x.name, x.n))
+			} else {
+				names = append(names, x.name)
 			}
 		}
 		dim.Summary = fmt.Sprintf("%d 个高危服务对公网开放：%s", len(d.services), strings.Join(names, "、"))

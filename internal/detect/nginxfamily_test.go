@@ -183,6 +183,31 @@ func TestBehaviorScanFloodAnd401(t *testing.T) {
 	if !flood["bhv-flood"] {
 		t.Errorf("集中打向一个目标应判为洪泛: %v", flood)
 	}
+	// 被放行、服务端正常应答的 HTTPS 连接（NAT 后面的大量用户、不断重连的长连接）：交给 Web 日志的 CC 检测，不判洪泛；
+	// 没有应答的大量连接（SYN 洪泛）照常判定
+	served := fired("60.2.41.105", func(i int) *model.Event {
+		return &model.Event{Kind: model.KindFirewall, DstIP: "10.34.44.88", DstPort: 443, Action: model.ActionAllow, Reply: model.ReplyYes}
+	}, th.FloodEvents+10)
+	if served["bhv-flood"] {
+		t.Errorf("正常应答的 Web 连接不应判为洪泛: %v", served)
+	}
+	// 策略匹配日志没有应答信息：该来源同时出现在 Web 日志中（正常访问站点）时，同样交给 CC 检测
+	for i := range 20 {
+		b.Observe(&model.Event{Kind: model.KindWeb, SrcIP: "60.2.41.106", Host: "mg.example.com", Method: "GET", URI: "/websocket/1/x/websocket",
+			Status: 200, Time: now.Add(time.Duration(i) * time.Second)})
+	}
+	policyOnly := fired("60.2.41.106", func(i int) *model.Event {
+		return &model.Event{Kind: model.KindFirewall, DstIP: "10.34.44.88", DstPort: 443, Action: model.ActionAllow}
+	}, th.FloodEvents+10)
+	if policyOnly["bhv-flood"] {
+		t.Errorf("同时在 Web 日志中正常访问的来源，不应按防火墙连接数判为洪泛: %v", policyOnly)
+	}
+	syn := fired("198.51.100.67", func(i int) *model.Event {
+		return &model.Event{Kind: model.KindFirewall, DstIP: "10.34.44.88", DstPort: 443, Action: model.ActionAllow, Reply: model.ReplyNone}
+	}, th.FloodEvents+10)
+	if !syn["bhv-flood"] {
+		t.Errorf("没有应答的大量连接应判为洪泛: %v", syn)
+	}
 	// 内部来源（反向代理回源、内部漏洞扫描器）集中连接自己的服务：业务本身，不是洪泛
 	for _, src := range []string{"10.34.45.31", "192.0.2.10"} {
 		zone := ""

@@ -443,3 +443,86 @@ func TestCatchAllTwoPathsNearHome(t *testing.T) {
 		t.Fatal("单独一次接近首页大小不足以判定兜底页面")
 	}
 }
+
+// 快照恢复时：旧版本只凭策略匹配日志记下的“防火墙管理服务对公网放行”（扫描器各探测一次）撤销，确有大量访问的保留；
+// 规则收紧后，业务接口里带 console 的路径不再是管理后台。
+func TestLoadPurgesDeviceAndReclassifies(t *testing.T) {
+	s := newTestStore()
+	s.mu.Lock()
+	sf := s.surf
+	for _, x := range []struct {
+		key     string
+		allowed int64
+		sources int
+		name    string
+	}{{"43.242.97.48:830/tcp", 38, 30, "NETCONF"}, {"43.242.97.51:8080/tcp", 751, 144, "HTTP 管理"}, {"43.242.97.47:8080/tcp", 1926938, 133, "HTTP 管理"}} {
+		sf.Services[x.key] = &Service{DstIP: strings.Split(x.key, ":")[0], Port: 1, Allowed: x.allowed, Sources: x.sources, Exposed: true, src: map[string]int32{}}
+		sf.Findings["dev:"+x.key] = &Finding{ID: "dev:" + x.key, Title: "防火墙管理服务对公网放行: " + x.name, Category: "服务暴露", Severity: model.SevHigh, Asset: x.key}
+	}
+	ep := &Endpoint{Host: "mg.example.com", Path: "/waterbuddy/api/console/push-messages", Methods: map[string]int{}, Status: map[int]int{200: 9}, NormN: 9,
+		Sensitive: "管理后台/运维入口对外暴露", Severity: model.SevMedium, atk: map[string]struct{}{}}
+	sf.Endpoints["mg.example.com /waterbuddy/api/console/push-messages"] = ep
+	sf.Findings["sens:mg.example.com /waterbuddy/api/console/push-messages"] = &Finding{Category: "敏感资源暴露", Title: "管理后台/运维入口对外暴露"}
+	nacos := &Endpoint{Host: "mg.example.com", Path: "/nacos/console", Methods: map[string]int{}, Status: map[int]int{200: 2}, NormN: 2,
+		Sensitive: "管理后台/运维入口对外暴露", Severity: model.SevMedium, atk: map[string]struct{}{}}
+	sf.Endpoints["mg.example.com /nacos/console"] = nacos
+	s.mu.Unlock()
+
+	path := filepath.Join(t.TempDir(), "state.json.gz")
+	if err := s.Save(path); err != nil {
+		t.Fatal(err)
+	}
+	r := newTestStore()
+	if err := r.Load(path); err != nil {
+		t.Fatal(err)
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	for _, k := range []string{"43.242.97.48:830/tcp", "43.242.97.51:8080/tcp"} {
+		if r.surf.Findings["dev:"+k] != nil {
+			t.Errorf("%s 只有扫描器的单次探测，应撤销", k)
+		}
+	}
+	if r.surf.Findings["dev:43.242.97.47:8080/tcp"] == nil {
+		t.Error("确有大量访问的设备服务应保留")
+	}
+	if e := r.surf.Endpoints["mg.example.com /waterbuddy/api/console/push-messages"]; e == nil || e.Sensitive != "" || r.surf.Findings["sens:mg.example.com /waterbuddy/api/console/push-messages"] != nil {
+		t.Errorf("业务接口不是管理后台: %+v", e)
+	}
+	if e := r.surf.Endpoints["mg.example.com /nacos/console"]; e == nil || e.Sensitive == "" {
+		t.Errorf("/nacos/console 仍是管理后台: %+v", e)
+	}
+}
+
+// 边界防护的结论按服务归并，不重复列出同一服务。
+func TestPerimeterSummaryDedup(t *testing.T) {
+	d := &assessData{totals: Totals{Firewall: 10}}
+	for _, ip := range []string{"10.0.0.1", "10.0.0.2", "10.0.0.3"} {
+		d.services = append(d.services, &Service{DstIP: ip, Port: 873, Name: "Rsync", Risk: model.SevHigh, Exposed: true})
+	}
+	d.services = append(d.services, &Service{DstIP: "10.0.0.9", Port: 3306, Name: "MySQL", Risk: model.SevHigh, Exposed: true})
+	dim := d.perimeter()
+	if strings.Count(dim.Summary, "Rsync") != 1 || !strings.Contains(dim.Summary, "Rsync(873) ×3 台") || !strings.Contains(dim.Summary, "MySQL(3306)") {
+		t.Fatalf("应按服务归并: %s", dim.Summary)
+	}
+}
+
+// 旧版本把正常 Web 客户端（NAT 后的大量用户、不断重连的长连接）的防火墙连接判为洪泛：查询时按需核实处理。
+func TestAssetChainWebClientFlood(t *testing.T) {
+	s := newTestStore()
+	now := time.Now().Add(-time.Hour)
+	for i := range 80 {
+		s.Record(&model.Event{Kind: model.KindWeb, SrcIP: "60.2.41.105", Host: "mg.example.com", Method: "GET", URI: fmt.Sprintf("/websocket/%d/x/websocket", i),
+			Status: 200, Time: now}, nil)
+	}
+	s.Record(&model.Event{Kind: model.KindFirewall, SrcIP: "60.2.41.105", DstIP: "10.34.44.88", DstPort: 443, Proto: "tcp", Action: model.ActionAllow, Time: now},
+		[]model.Hit{hit("bhv-flood", "洪水攻击", model.PhaseImpact, model.SevHigh, model.ResultAllowed)})
+	s.Record(&model.Event{Kind: model.KindFirewall, SrcIP: "198.51.100.66", DstIP: "10.34.44.89", DstPort: 443, Proto: "tcp", Action: model.ActionAllow, Time: now},
+		[]model.Hit{hit("bhv-flood", "洪水攻击", model.PhaseImpact, model.SevHigh, model.ResultAllowed)})
+	if c := s.AssetChain("10.34.44.88"); c == nil || slices.Contains(c.Reached, "impact") || !slices.Contains(c.Weak, "impact") {
+		t.Fatalf("正常 Web 客户端的“洪泛”不应推进到影响: %+v", c)
+	}
+	if c := s.AssetChain("10.34.44.89"); c == nil || !slices.Contains(c.Reached, "impact") {
+		t.Fatalf("没有 Web 访问的来源打出的洪泛照常计入影响: %+v", c)
+	}
+}

@@ -3,6 +3,7 @@ package parser
 import (
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 )
 
@@ -53,19 +54,55 @@ func ParseTime(s string) time.Time {
 	if loc == nil {
 		loc = time.Local
 	}
-	for _, layout := range timeLayouts {
-		t, err := time.ParseInLocation(layout, s, loc)
-		if err != nil {
+	// 按首字符只试同一类格式，并先试上一次成功的格式：同一数据源的时间格式不变，每次失败的尝试都会分配错误对象。
+	// 能匹配同一字符串的几种格式解析出的时间相同，尝试顺序不影响结果
+	layouts, hint := digitLayouts, &digitHint
+	if c := s[0]; c < '0' || c > '9' {
+		layouts, hint = alphaLayouts, &alphaHint
+	}
+	h := int(hint.Load())
+	if h < len(layouts) {
+		if t, err := time.ParseInLocation(layouts[h], s, loc); err == nil {
+			return withYear(t, loc)
+		}
+	}
+	for i, layout := range layouts {
+		if i == h {
 			continue
 		}
-		if t.Year() == 0 { // syslog 时间没有年份
-			now := time.Now().In(loc)
-			t = t.AddDate(now.Year(), 0, 0)
-			if t.After(now.Add(48 * time.Hour)) {
-				t = t.AddDate(-1, 0, 0)
-			}
+		if t, err := time.ParseInLocation(layout, s, loc); err == nil {
+			hint.Store(int32(i))
+			return withYear(t, loc)
 		}
-		return t
 	}
 	return time.Time{}
+}
+
+// withYear 给没有年份的 syslog 时间补上年份（跨年时不超过当前时间 48 小时）。
+func withYear(t time.Time, loc *time.Location) time.Time {
+	if t.Year() != 0 {
+		return t
+	}
+	now := time.Now().In(loc)
+	t = t.AddDate(now.Year(), 0, 0)
+	if t.After(now.Add(48 * time.Hour)) {
+		t = t.AddDate(-1, 0, 0)
+	}
+	return t
+}
+
+// digitLayouts / alphaLayouts 是按首字符（数字 / 字母）分开的时间格式；*Hint 是上一次成功的下标。
+var (
+	digitLayouts, alphaLayouts []string
+	digitHint, alphaHint       atomic.Int32
+)
+
+func init() {
+	for _, l := range timeLayouts {
+		if l[0] >= '0' && l[0] <= '9' {
+			digitLayouts = append(digitLayouts, l)
+		} else {
+			alphaLayouts = append(alphaLayouts, l)
+		}
+	}
 }
