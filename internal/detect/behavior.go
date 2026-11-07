@@ -51,6 +51,7 @@ type webWin struct {
 type fwWin struct {
 	start    time.Time
 	events   int
+	webOK    int // 被放行、目标有应答的 Web 端口连接
 	ports    map[int]struct{}
 	sweep    map[int]map[string]struct{}
 	auth     map[int]int    // 端口 → 同一主机上的最大连接数
@@ -315,8 +316,15 @@ func (b *Behavior) observeWeb(ev *model.Event, sig scanSignals) []model.Hit {
 		}
 	}
 	fire(bitCC, w.reqs >= b.th.CCRequests, func() model.Hit {
-		return model.Hit{RuleID: "bhv-cc", Name: "CC攻击/高频请求", Category: CatCC,
+		h := model.Hit{RuleID: "bhv-cc", Name: "CC攻击/高频请求", Category: CatCC,
 			Severity: model.SevHigh, Phase: model.PhaseImpact, Evidence: fmt.Sprintf("%s内请求 %d 次", win, w.reqs)}
+		if isPrivateIP(ev.SrcIP) {
+			// 内部来源的高频请求多是没有还原真实地址的反向代理、负载均衡健康检查、监控或内部扫描器：
+			// 照常提示，但只是弱证据（低危，不按分类底线抬升）
+			h.Severity, h.Weak = model.SevLow, true
+			h.Evidence += "；来源是内网地址，多为反向代理（未还原真实客户端地址）、监控或内部扫描器"
+		}
+		return h
 	})
 	fire(bitScan, w.n404 >= b.th.Scan404 && len(w.paths) >= b.th.ScanPaths, func() model.Hit {
 		return model.Hit{RuleID: "bhv-dirscan", Name: "目录/文件枚举扫描", Category: CatDirScan,
@@ -636,6 +644,9 @@ func (b *Behavior) observeFw(ev *model.Event) []model.Hit {
 	}
 	w.events++
 	internal := InternalSource(ev)
+	if ev.Action == model.ActionAllow && ev.Reply == model.ReplyYes && webPort(ev.DstPort) {
+		w.webOK++
+	}
 	highScan := b.th.PortScanPorts * 5
 	if ev.DstPort > 0 {
 		if len(w.ports) < highScan {
@@ -713,8 +724,10 @@ func (b *Behavior) observeFw(ev *model.Event) []model.Hit {
 	// 互联网扫描源（如 79.124.58.130）5 分钟内对上百个地址的随机端口各连一次，曾被判为高危的“流量洪泛/DoS”
 	// 内部来源的连接多是业务本身：反向代理、负载均衡回源、监控探活、内部漏洞扫描器打出的成千上万个会话，
 	// 判为“流量洪泛/DoS”会让这些主机在资产攻击链路里出现“横向 / 影响”。内部主机对外的异常流量由外发流量突增判断
-	if w.events >= b.th.FloodEvents && w.fired&bitFlood == 0 && (internal || b.scanLike(w)) {
-		w.fired |= bitFlood // 扫描窗口或内部来源：不判为洪泛，之后的事件也不再重复判断
+	// 九成以上是被放行、服务端正常应答的 Web 连接，或打向 Web 端口、而该来源同时出现在 Web 日志中（策略匹配日志没有应答信息）：
+	// 页面开着时不断重连的长连接、NAT 后面的大量用户都会这样，这些连接是不是攻击由 Web 日志的 CC 检测判断（防火墙只看得到连接数）
+	if w.events >= b.th.FloodEvents && w.fired&bitFlood == 0 && (internal || b.scanLike(w) || w.webOK*10 >= w.events*9 || webPort(ev.DstPort) && b.recentWeb(ev.SrcIP, ev.Time)) {
+		w.fired |= bitFlood // 扫描窗口、内部来源或正常的 Web 连接：不判为洪泛，之后的事件也不再重复判断
 	}
 	fire(bitFlood, w.events >= b.th.FloodEvents, func() model.Hit {
 		return model.Hit{RuleID: "bhv-flood", Name: "流量洪泛/DoS", Category: CatFlood,
@@ -864,4 +877,19 @@ func (b *Behavior) noteErr(ev *model.Event) {
 func (b *Behavior) outage(host string) bool {
 	e := b.errs[host]
 	return e != nil && len(e.ips) >= outageSources
+}
+
+// webPort 判断是否为常见的 Web 服务端口。
+func webPort(p int) bool {
+	switch p {
+	case 80, 443, 8080, 8443, 8000, 8888:
+		return true
+	}
+	return false
+}
+
+// recentWeb 判断来源在防火墙统计窗口内是否也出现在 Web 日志中（调用方持锁）。
+func (b *Behavior) recentWeb(ip string, t time.Time) bool {
+	w := b.web[ip]
+	return w != nil && !outside(t, w.start, b.th.FwWindow)
 }

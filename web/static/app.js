@@ -256,9 +256,10 @@ function switchTab(tab) {
   $$('#tabs [data-tab]').forEach((b) => b.classList.toggle('active', b.dataset.tab === tab));
   $$('.tab').forEach((s) => s.classList.toggle('active', s.id === 'tab-' + tab));
   renderNav(tab);
-  loaders[tab]?.();
+  const loading = loaders[tab]?.();
   // 等浏览器完成新标签页的布局后再校正尺寸；只处理可见图表，隐藏的图表保持原尺寸
   requestAnimationFrame(() => requestAnimationFrame(resizeCharts));
+  return Promise.resolve(loading); // 需要在数据加载后定位的调用方（如预填表单后滚动到表单）可以等待
 }
 
 // 导航分组：一级菜单为“态势总览 / 威胁分析 / 事件处置 / 风险管理 / 系统配置”，分组悬停展开下拉可直达；
@@ -2146,7 +2147,9 @@ async function openChain(id) {
   const path = c.path.map((v) => `<li class="st-${esc(v.stage)}"><span class="ch-stage st-${esc(v.stage)}">${esc(v.stage_name)}</span>
       <span class="muted nowrap">${esc(fmtShort(v.first))}</span> <b>${esc(v.name || v.category)}</b>
       <span class="muted">${v.self ? `${esc(v.src)}${v.peer ? ' → ' + esc(v.peer) : ''}` : `${esc(v.src)} → ${esc(v.target || v.asset)}`}</span></li>`).join('');
-  const sources = (c.source_list || []).map((x) => `<tr><td>${ipLink(x.ip)}${x.internal ? ' <span class="chip warn">内网主机</span>' : ''}</td><td class="muted">${esc(x.internal ? '' : x.location || '')}</td>
+  // 越过侦察的攻击都来自内网（常是内部漏洞扫描）：内网来源旁给出“登记为授权扫描”，预填后跳到登记表单
+  const asnBtn = (x) => (c.internal_only && x.internal && canOperate() ? ` <button type="button" class="btn sm" data-asn-ip="${esc(x.ip)}" title="确认是内部漏洞扫描后登记：时间窗内只记录、不告警，不计入链路">登记为授权扫描</button>` : '');
+  const sources = (c.source_list || []).map((x) => `<tr><td>${ipLink(x.ip)}${x.internal ? ' <span class="chip warn">内网主机</span>' : ''}${asnBtn(x)}</td><td class="muted">${esc(x.internal ? '' : x.location || '')}</td>
       <td>${chStrip(x.stages)}</td><td>${badge(x.severity)}</td><td class="num">${num(x.hits)}</td><td class="nowrap muted">${esc(fmtShort(x.first))} ~ ${esc(fmtShort(x.last))}</td></tr>`).join('');
   const members = (c.member_info || []).map((m) => `<tr><td class="mono">${esc(m.key)}</td><td>${esc(CH_KIND[m.kind] || m.kind)}${m.asset ? `（属于 ${esc(m.asset)}）` : ''}</td><td class="num">${num(m.hits)}</td>
       <td class="nowrap muted">${esc(fmtShort(m.first_seen))} ~ ${esc(fmtShort(m.last_seen))}</td></tr>`).join('');
@@ -2174,6 +2177,22 @@ $('#drawerBody').addEventListener('click', (e) => {
   if (f) {
     $$('#chFilter button').forEach((b) => b.classList.toggle('active', b === f));
     $$('#chSteps .ch-step').forEach((li) => { li.hidden = !!f.dataset.f && !li.classList.contains('st-' + f.dataset.f); });
+    return;
+  }
+  const asn = e.target.closest('[data-asn-ip]');
+  if (asn) { // 预填授权扫描登记表单（事件处置页），由分析员确认时间窗后提交
+    const name = chainCur.name;
+    const ip = asn.dataset.asnIp;
+    closeDrawer();
+    $('#asnIP').value = ip;
+    $('#asnNote').value = `内部漏洞扫描（资产攻击链路：${name}）`;
+    $('#asnMsg').textContent = '已预填扫描源，请确认时间窗与说明后提交';
+    $('#asnMsg').className = 'form-msg ok';
+    // 事件列表在表单上方异步加载，加载完再定位，否则表单会被挤出可视区域
+    switchTab('incidents').catch(() => {}).finally(() => {
+      $('#asnForm').scrollIntoView({ block: 'center' });
+      $('#asnEnd').focus({ preventScroll: true });
+    });
     return;
   }
   const inc = e.target.closest('[data-inc]');

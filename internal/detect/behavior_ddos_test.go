@@ -154,3 +154,27 @@ func TestMultiSourceDDoS(t *testing.T) {
 		t.Fatal("内网来源不应按 DDoS 告警")
 	}
 }
+
+// 单来源高频请求：外部来源高危；内网来源（未还原真实地址的反向代理、监控、内部扫描器）只是弱证据，低危提示。
+func TestCCInternalSource(t *testing.T) {
+	th := config.Default().Detect.Thresholds
+	b := NewBehavior(th)
+	t0 := time.Date(2026, 11, 6, 9, 0, 0, 0, time.UTC)
+	burst := func(ip string) model.Hit {
+		for i := range th.CCRequests + 5 {
+			for _, h := range b.Observe(&model.Event{Kind: model.KindWeb, SrcIP: ip, Host: "mg.example.com", Method: "GET", URI: fmt.Sprintf("/api/x?i=%d", i),
+				Status: 200, Time: t0.Add(time.Duration(i) * 20 * time.Millisecond)}) {
+				if h.RuleID == "bhv-cc" {
+					return h
+				}
+			}
+		}
+		return model.Hit{}
+	}
+	if h := burst("61.2.3.4"); h.RuleID == "" || h.Severity != model.SevHigh || h.Weak {
+		t.Fatalf("外部来源的高频请求应为高危: %+v", h)
+	}
+	if h := burst("10.34.45.31"); h.RuleID == "" || h.Severity != model.SevLow || !h.Weak {
+		t.Fatalf("内网来源的高频请求应为低危的弱证据: %+v", h)
+	}
+}

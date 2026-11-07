@@ -824,6 +824,8 @@ func (s *Store) weakLocked(g *chainGroup, st *chainStep) string {
 			return "来源是内网地址：多为反向代理、负载均衡、监控或内部扫描器的连接，不是拒绝服务"
 		case st.Rule == "bhv-flood" && s.scannerLocked(st.Src):
 			return "来源是端口扫描器：旧版本把高速扫描误判为流量洪泛"
+		case st.Rule == "bhv-flood" && webTarget(st.Target) && s.webClientLocked(st.Src):
+			return "该来源同时在 Web 日志中正常访问站点：防火墙只看得到连接数，是否为攻击以 Web 日志的 CC 检测为准"
 		case st.Rule == "bhv-timeout" && longLivedTarget(st.Target):
 			return "长连接（WebSocket / SockJS / SSE）本来就一直挂着：旧版本把页面的不断重连误判为慢请求攻击"
 		}
@@ -851,6 +853,26 @@ func (g *chainGroup) strongPeer(peer string) bool {
 		}
 	}
 	return false
+}
+
+// webTarget 判断防火墙步骤的目标（地址:端口/协议）是否为 Web 端口。
+func webTarget(target string) bool {
+	_, rest, ok := strings.Cut(target, ":")
+	if !ok {
+		return false
+	}
+	port, _, _ := strings.Cut(rest, "/")
+	switch port {
+	case "80", "443", "8080", "8443", "8000", "8888":
+		return true
+	}
+	return false
+}
+
+// webClientLocked 判断来源是否主要是正常的 Web 访问：Web 请求不少于 50 次，攻击命中不到一半（调用方持读锁）。
+func (s *Store) webClientLocked(ip string) bool {
+	p := s.ips[ip]
+	return p != nil && p.WebReqs >= 50 && p.Attacks*2 < p.WebReqs
 }
 
 // longLivedTarget 判断 Web 步骤的目标（站点 + 空格 + URI）是否为长连接接口。

@@ -323,10 +323,12 @@ func (s *Store) Load(path string) error {
 			}
 		}
 		for _, sv := range sf.Services {
-			sv.src = map[string]struct{}{}
+			sv.src = map[string]int32{}
 		}
-		sf.purgeSelfRFI() // 旧版本把本站的 pdf 预览地址记成了远程文件包含
-		sf.cleanLegacy()  // 旧版本把兜底页面登记成的敏感入口与敏感资源暴露
+		sf.purgeSelfRFI()      // 旧版本把本站的 pdf 预览地址记成了远程文件包含
+		sf.cleanLegacy()       // 旧版本把兜底页面登记成的敏感入口与敏感资源暴露
+		sf.purgeUnusedDevice() // 旧版本只凭策略匹配日志记下的防火墙管理服务
+		sf.reclassify()        // 规则收紧后旧版本误判的敏感入口
 		s.surf = sf
 	}
 	if len(snap.Scores) > maxScorePoints {

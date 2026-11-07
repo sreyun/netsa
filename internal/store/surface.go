@@ -1,6 +1,7 @@
 package store
 
 import (
+	"fmt"
 	"math"
 	"net/url"
 	"path"
@@ -145,17 +146,17 @@ func (sf *surface) hasHomeBaseline(host string) bool {
 
 // Service 是从防火墙日志中观测到的网络服务（目的 IP:端口）。
 type Service struct {
-	DstIP    string              `json:"dst_ip"`
-	Port     int                 `json:"port"`
-	Proto    string              `json:"proto"`
-	Name     string              `json:"name"`
-	Risk     model.Severity      `json:"risk"`
-	Allowed  int64               `json:"allowed"`
-	Denied   int64               `json:"denied"`
-	Sources  int                 `json:"sources"`
-	Exposed  bool                `json:"exposed"` // 存在来自公网的放行流量
-	LastSeen time.Time           `json:"last_seen"`
-	src      map[string]struct{} // 来源集合（有上限）
+	DstIP    string           `json:"dst_ip"`
+	Port     int              `json:"port"`
+	Proto    string           `json:"proto"`
+	Name     string           `json:"name"`
+	Risk     model.Severity   `json:"risk"`
+	Allowed  int64            `json:"allowed"`
+	Denied   int64            `json:"denied"`
+	Sources  int              `json:"sources"`
+	Exposed  bool             `json:"exposed"` // 存在来自公网的放行流量
+	LastSeen time.Time        `json:"last_seen"`
+	src      map[string]int32 // 来源 → 放行的连接数（有上限）
 }
 
 // Finding 是攻击面风险发现。
@@ -582,10 +583,28 @@ var sensitiveRules = []sensitiveRule{
 	// 同样属于对外暴露的运维入口，此前只能靠特征规则按低危背景扫描处理，会漏掉真正的暴露面。
 	{regexp.MustCompile(`^/(admin|manage|management|backend|dashboard|sysadmin|admincp|adminpanel)(/|$)`), "管理后台/运维入口对外暴露", model.SevMedium,
 		"管理后台应仅允许 VPN 或白名单访问，并启用强口令与多因素认证"},
-	{regexp.MustCompile(`/(phpmyadmin|pma|adminer[^/]*\.php|manager/html|host-manager|jmx-console|web-console|jenkins|kibana|grafana|nacos|xxl-job-admin|solr|swagger-ui(\.html)?|v2/api-docs|v3/api-docs|wp-login\.php|wp-admin|administrator|console)(/|$)`), "管理后台/运维入口对外暴露", model.SevMedium,
+	{regexp.MustCompile(`/(phpmyadmin|pma|adminer[^/]*\.php|manager/html|host-manager|jmx-console|web-console|jenkins|kibana|grafana|nacos|xxl-job-admin|solr|swagger-ui(\.html)?|v2/api-docs|v3/api-docs|wp-login\.php|wp-admin|administrator)(/|$)`), "管理后台/运维入口对外暴露", model.SevMedium,
+		"管理后台应仅允许 VPN 或白名单访问，并启用强口令与多因素认证"},
+	// console 只认第一、二级目录（/console、/nacos/console）：业务接口里常有这个词（/app/api/console/push-messages），不是管理后台
+	{regexp.MustCompile(`^(/[^/]+)?/console(/|$)`), "管理后台/运维入口对外暴露", model.SevMedium,
 		"管理后台应仅允许 VPN 或白名单访问，并启用强口令与多因素认证"},
 	{regexp.MustCompile(`/(logs?|storage/logs)/[^/]*\.(log|txt)$|/[^/]*(error|access|debug|laravel)[^/]*\.log$|/nohup\.out$`), "日志文件可公开访问", model.SevMedium,
 		"禁止通过 Web 访问日志目录，日志中可能包含会话、口令或内部路径"},
+}
+
+// reclassify 按当前的敏感资源规则重新核对已登记的敏感入口（快照恢复时调用，返回撤销的条数）：规则收紧后，
+// 旧版本误判的入口（如业务接口 /app/api/console/push-messages 被当成管理后台）不再列为敏感资源，对应的发现一并撤销。
+func (sf *surface) reclassify() int {
+	n := 0
+	for key, ep := range sf.Endpoints {
+		if ep.Sensitive == "" || classifySensitive(ep.Path) != nil {
+			continue
+		}
+		ep.Sensitive, ep.Severity, ep.sens, ep.classified = "", model.SevInfo, nil, true
+		delete(sf.Findings, "sens:"+key)
+		n++
+	}
+	return n
 }
 
 func classifySensitive(path string) *sensitiveRule {
@@ -631,23 +650,47 @@ func normPath(uri string) string {
 	if uri == "" {
 		return "/"
 	}
-	segs := strings.Split(strings.ToLower(uri), "/")
-	for i, s := range segs {
-		switch {
-		case s == "":
-		case isDigits(s):
-			segs[i] = "{id}"
-		case isUUID(s):
-			segs[i] = "{uuid}"
-		case len(s) >= 16 && isHex(s):
-			segs[i] = "{hash}"
+	// 每条 Web 日志都要归一一次（入口登记、成功复核）：逐段扫描，只有需要替换的段才分配新字符串
+	lower := strings.ToLower(uri)
+	var b strings.Builder
+	last := 0 // lower[last:] 尚未写入 b
+	for start := 0; start <= len(lower); {
+		end := strings.IndexByte(lower[start:], '/')
+		if end < 0 {
+			end = len(lower)
+		} else {
+			end += start
 		}
+		if rep := segPlaceholder(lower[start:end]); rep != "" {
+			if b.Len() == 0 {
+				b.Grow(len(lower))
+			}
+			b.WriteString(lower[last:start])
+			b.WriteString(rep)
+			last = end
+		}
+		start = end + 1
 	}
-	p := strings.Join(segs, "/")
-	if len(p) > 200 {
-		p = p[:200]
+	p := lower
+	if last > 0 {
+		b.WriteString(lower[last:])
+		p = b.String()
 	}
-	return p
+	return truncate(p, 200)
+}
+
+// segPlaceholder 返回路径段的占位符（数字 ID、UUID、哈希），不需要替换时返回空。
+func segPlaceholder(s string) string {
+	switch {
+	case s == "":
+	case isDigits(s):
+		return "{id}"
+	case isUUID(s):
+		return "{uuid}"
+	case len(s) >= 16 && isHex(s):
+		return "{hash}"
+	}
+	return ""
 }
 
 func isDigits(s string) bool {
@@ -795,14 +838,17 @@ func (sf *surface) observeWeb(ev *model.Event, hits []model.Hit, attacked bool) 
 			f.Host, f.Bytes = host, ev.Bytes
 		}
 	}
+	// WAF 防护效果只统计外部来源：内网来源（内部漏洞扫描器、运维）不经过边界的 WAF，计入会把拦截率拉到接近 0
+	outside := !geo.IsPrivate(ev.SrcIP)
 	for _, h := range hits {
 		if h.TagOnly || h.Phase == model.PhaseRecon {
 			continue
 		}
-		switch h.Result {
-		case model.ResultBlocked:
+		switch {
+		case !outside:
+		case h.Result == model.ResultBlocked:
 			sf.ExploitBlocked++
-		case model.ResultSuccess, model.ResultPassed, model.ResultError:
+		case h.Result == model.ResultSuccess || h.Result == model.ResultPassed || h.Result == model.ResultError:
 			sf.ExploitPassed++
 		}
 		if h.Result == model.ResultSuccess && h.Severity >= model.SevHigh {
@@ -846,8 +892,16 @@ func (sf *surface) observeFw(ev *model.Event, published bool) {
 			return
 		}
 		name, risk := serviceInfo(ev.DstPort)
-		sv = &Service{DstIP: ev.DstIP, Port: ev.DstPort, Proto: ev.Proto, Name: name, Risk: risk, src: map[string]struct{}{}}
+		sv = &Service{DstIP: ev.DstIP, Port: ev.DstPort, Proto: ev.Proto, Name: name, Risk: risk, src: map[string]int32{}}
 		sf.Services[key] = sv
+	}
+	if _, ok := sv.src[ev.SrcIP]; ok || len(sv.src) < maxSetSize {
+		if ev.Action == model.ActionAllow && sv.src[ev.SrcIP] < 1<<30 {
+			sv.src[ev.SrcIP]++
+		} else if !ok {
+			sv.src[ev.SrcIP] = 0
+		}
+		sv.Sources = max(sv.Sources, len(sv.src))
 	}
 	switch ev.Action {
 	case model.ActionAllow:
@@ -855,17 +909,7 @@ func (sf *surface) observeFw(ev *model.Event, published bool) {
 		if published && !geo.IsPrivate(ev.SrcIP) {
 			sv.Exposed = true
 			if ev.Reach == model.ReachDevice {
-				// 防火墙自身的服务：管理服务对公网放行是可直接处置的风险；VPN / 路由协议本就面向外部，不作为风险
-				if name, sev := exposure.DeviceRisk(ev.DstPort, ev.Proto); sev > model.SevInfo {
-					by := ""
-					if ev.Policy != "" {
-						by = "按策略「" + ev.Policy + "」"
-					}
-					sf.finding("dev:"+key, "防火墙管理服务对公网放行: "+name, "服务暴露", sev, key,
-						"防火墙"+by+"放行了来自公网 "+ev.SrcIP+" 到设备自身（local 安全域）的连接",
-						"在防火墙上把管理服务限制为内网或运维堡垒机地址访问（华为：local 安全域策略与接口 service-manage），"+
-							"关闭 Telnet / HTTP / SNMP v1、v2c 等明文管理协议，改用 SSH / HTTPS / SNMPv3", ev.SrcIP, ev.Time)
-				}
+				sf.deviceExposure(ev, sv, key)
 			} else if sv.Risk >= model.SevMedium {
 				sf.finding("svc:"+key, "高危服务对公网开放: "+sv.Name, "服务暴露", sv.Risk, key,
 					"防火墙放行了来自公网 "+ev.SrcIP+" 的连接", "通过安全组/防火墙将该端口限制为内网或白名单访问，必要时修改默认端口并启用认证", ev.SrcIP, ev.Time)
@@ -874,13 +918,72 @@ func (sf *surface) observeFw(ev *model.Event, published bool) {
 	case model.ActionDeny:
 		sv.Denied++
 	}
-	if len(sv.src) < maxSetSize {
-		sv.src[ev.SrcIP] = struct{}{}
-		sv.Sources = max(sv.Sources, len(sv.src))
-	}
 	if ev.Time.After(sv.LastSeen) {
 		sv.LastSeen = ev.Time
 	}
+}
+
+// purgeUnusedDevice 撤销旧版本只凭策略匹配日志记下的“防火墙管理服务对公网放行”（快照恢复时调用，返回撤销的条数）：
+// 每个来源的连接数没有保存，按平均每个来源不到 deviceUseMin 次判断为扫描器的探测。新的访问照常按 deviceExposure 记录。
+func (sf *surface) purgeUnusedDevice() int {
+	n := 0
+	for id := range sf.Findings {
+		if !strings.HasPrefix(id, "dev:") {
+			continue
+		}
+		sv := sf.Services[strings.TrimPrefix(id, "dev:")]
+		if sv == nil || sv.Allowed < int64(deviceUseMin*max(1, sv.Sources)) {
+			delete(sf.Findings, id)
+			n++
+		}
+	}
+	return n
+}
+
+// deviceUseMin 是同一来源对防火墙自身同一端口放行的连接数：达到它说明端口上确实有服务在应答。
+// 互联网扫描器对一个端口只连一两次；端口没有服务时，暴力破解工具也不会一直重连。
+const deviceUseMin = 10
+
+// deviceExposure 记录公网到防火墙自身（local 安全域）的放行访问。
+//
+// 华为 / H3C 的策略匹配日志（POLICYPERMIT）只说明策略放行，没有会话与应答：默认策略（或范围过大的策略）放行了
+// untrust → local 时，扫描器探测的每个端口都会记一条“放行”，把它们都当成“管理服务对公网放行”会在每个公网地址上
+// 报出 NETCONF、HTTP 管理等一大串并不存在的服务。所以：
+//   - 有证据表明服务在应答（会话有应答、或同一来源反复连接）时，按端口记“防火墙管理服务对公网放行”；
+//   - 否则按策略合并记一条“防火墙策略放行公网访问设备自身”：这才是需要处置的配置问题。
+func (sf *surface) deviceExposure(ev *model.Event, sv *Service, key string) {
+	name, sev := exposure.DeviceRisk(ev.DstPort, ev.Proto)
+	if sev <= model.SevInfo {
+		return // VPN / 路由协议本就面向外部，不作为风险
+	}
+	by := ""
+	if ev.Policy != "" {
+		by = "按策略「" + ev.Policy + "」"
+	}
+	if ev.Reply == model.ReplyYes || sv.src[ev.SrcIP] >= deviceUseMin {
+		why := "目标有应答"
+		if ev.Reply != model.ReplyYes {
+			why = fmt.Sprintf("该来源已连接 %d 次", sv.src[ev.SrcIP])
+		}
+		sf.finding("dev:"+key, "防火墙管理服务对公网放行: "+name, "服务暴露", sev, key,
+			"防火墙"+by+"放行了来自公网 "+ev.SrcIP+" 到设备自身（local 安全域）的连接（"+why+"）",
+			"在防火墙上把管理服务限制为内网或运维堡垒机地址访问（华为：local 安全域策略与接口 service-manage），"+
+				"关闭 Telnet / HTTP / SNMP v1、v2c 等明文管理协议，改用 SSH / HTTPS / SNMPv3", ev.SrcIP, ev.Time)
+		return
+	}
+	policy := ev.Policy
+	if policy == "" {
+		policy = "未记录策略名"
+	}
+	psev := model.SevMedium
+	if strings.EqualFold(ev.Policy, "default") {
+		psev = model.SevHigh // 默认策略放行：所有端口都对公网放开了
+	}
+	sf.finding("devpol:"+ev.Source+"|"+policy, "防火墙策略放行公网访问设备自身: "+policy, "服务暴露", psev, ev.Source,
+		"防火墙"+by+"放行了来自公网 "+ev.SrcIP+" 到设备自身 "+ev.DstIP+":"+strconv.Itoa(ev.DstPort)+"（"+name+"）的连接；"+
+			"日志只记录了策略匹配，看不出端口上是否有服务，但该策略对公网放开了设备自身",
+		"把默认安全策略改为拒绝，到 local 安全域的策略只放行确需的协议与来源（运维地址、VPN 对端）；"+
+			"检查范围为 any 的策略是否同时匹配了公网到设备自身的流量", ev.SrcIP, ev.Time)
 }
 
 func (sf *surface) finding(id, title, cat string, sev model.Severity, asset, evidence, remediation, ip string, t time.Time) {
