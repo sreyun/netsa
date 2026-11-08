@@ -288,14 +288,15 @@ func TestFakeSiteHost(t *testing.T) {
 		"169.254.169.254.nip.io", "10.0.0.1.sslip.io", "btjwyof9eg9c4bvk.invalid", "test.example", "localhost", "a.localhost",
 		"test.s3.amazonaws.com", "bucket.s3.us-east-1.amazonaws.com", "s3.amazonaws.com", "169.254.169.254", "127.0.0.1", "::1", "0.0.0.0",
 		"100.100.100.200", "metadata.google.internal", "metadata", "${jndi:ldap://x}", "a b.com", "\"evil.com", "x.com:evil",
-		"3lbsinmd3vziujssjm1ngdwhh8h.tld", "3lbsitxdhywmaerqm5xkm6tq59q.com", "foo.test"} {
+		"3lbsinmd3vziujssjm1ngdwhh8h.tld", "3lbsitxdhywmaerqm5xkm6tq59q.com", "foo.tld"} {
 		if !FakeSiteHost(h) {
 			t.Errorf("%q 应判为虚构的站点名", h)
 		}
 	}
 	for _, h := range []string{"mg.hc-yun.com", "www.example.com", "MG.Example.COM", "mg-prd-nginx", "api_gw", "43.242.97.38", "10.34.44.88",
 		"2001:db8::1", "my-elb-123.us-east-1.elb.amazonaws.com", "中文.cn", "",
-		"verylongcompanynamewebsites.com", "cdn01.img2026.example.cn"} {
+		"verylongcompanynamewebsites.com", "cdn01.img2026.example.cn",
+		"app.test", "staging.corp.test"} { // .test 是保留的测试顶级域，预发环境与端到端测试都在用
 		if FakeSiteHost(h) {
 			t.Errorf("%q 是真实的站点名或地址", h)
 		}

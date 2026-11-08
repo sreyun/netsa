@@ -34,7 +34,7 @@ var dynDomains = domainSet("duckdns.org", "no-ip.com", "no-ip.org", "no-ip.biz",
 
 // 不会是真实站点的 Host 头后缀：通配 DNS（任意地址都能写成域名）、保留 / 测试用的顶级域名。
 var fakeSiteSuffix = domainSet("nip.io", "sslip.io", "xip.io", "nip.direct", "traefik.me", "localtest.me", "lvh.me", "vcap.me",
-	"invalid", "example", "localhost", "test", "tld", "bxss.me", "requestrepo.com", "canarytokens.com", "pipedream.net",
+	"invalid", "example", "localhost", "tld", "bxss.me", "requestrepo.com", "canarytokens.com", "pipedream.net",
 	"metadata.google.internal", "metadata.tencentyun.com", "metadata.azure.com")
 
 // FakeSiteHost 判断 Web 日志里的 Host 头是不是虚构的站点名（已归一为小写、不含端口）：扫描器把带外探测平台（OAST、DNSLog）、
