@@ -808,6 +808,13 @@ func escalatedByAuto(a *model.Alert) bool {
 	return strings.Contains(a.Evidence, "已被自动确认为攻击源") && strings.Contains(a.Evidence, "等级上调一级")
 }
 
+// 回溯时对一条告警的处理：整条撤销（不计入事件等级）、撤销其中的一级升级。
+const (
+	retractNone = iota
+	retractFull
+	retractEsc
+)
+
 // Retract 在自学习撤销了自己学到的东西之后，回溯修正仍在处置的事件（返回调整的事件数）：
 //   - rule 非空：观察规则被停用（被业务接口的轮询触发、或管理员停用），它生成的告警标记为已撤销、不再计入事件等级；
 //   - ip 非空：只凭模型判断确认的攻击源被撤销（站点常客），该来源因此升级过一级的告警按原等级计算。
@@ -818,27 +825,64 @@ func (s *Store) Retract(rule, ip, why string) int {
 	if rule == "" && ip == "" {
 		return 0
 	}
+	return s.retractWhere(why, func(a *model.Alert) int {
+		switch {
+		case rule != "" && a.RuleID == rule:
+			return retractFull
+		case ip != "" && a.SrcIP == ip && escalatedByAuto(a):
+			return retractEsc
+		}
+		return retractNone
+	})
+}
+
+// RetractLegacyCC 修正旧版本把长连接 / 轮询传输（SockJS xhr_send、SSE、WebSocket 降级）上的消息请求判成的 CC 告警
+// （启动时调用，幂等）：页面实时通道每条消息一个请求，聊天类业务一分钟几百次是正常的。
+func (s *Store) RetractLegacyCC() int {
+	return s.retractWhere("长连接 / 轮询传输（SockJS、SSE、WebSocket 降级）上的高频请求是页面实时通道的消息请求，旧版本判为 CC 攻击",
+		func(a *model.Alert) int {
+			if a.RuleID == "bhv-cc" && a.Severity > model.SevLow && longLivedTarget(a.Target) {
+				return retractFull
+			}
+			return retractNone
+		})
+}
+
+// retractWhere 按 match 撤销告警（或其中的升级）并重新计算涉及的、仍在处置的事件的等级。
+// 告警按下标收集，标记撤销时写入副本（写时复制）：事件详情、攻击源详情在解锁后序列化的仍是原来的告警对象，不会读写冲突。
+func (s *Store) retractWhere(why string, match func(*model.Alert) int) int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	byInc := map[uint64][]*model.Alert{}
+	byInc := map[uint64][]int{}
 	for _, a := range s.alerts {
-		if a == nil || a.IncidentID == 0 {
-			continue
-		}
-		if (rule != "" && a.RuleID == rule) || (ip != "" && a.SrcIP == ip) {
+		if a != nil && a.IncidentID != 0 && match(a) != retractNone {
 			byInc[a.IncidentID] = nil // 先记下涉及的事件，下面再收集它们的全部告警
 		}
 	}
 	if len(byInc) == 0 {
 		return 0
 	}
-	for _, a := range s.alerts {
+	for idx, a := range s.alerts {
 		if a != nil {
 			if _, ok := byInc[a.IncidentID]; ok {
-				byInc[a.IncidentID] = append(byInc[a.IncidentID], a)
+				byInc[a.IncidentID] = append(byInc[a.IncidentID], idx)
 			}
 		}
 	}
+	mark := func(idx int, reason string) {
+		old := s.alerts[idx]
+		c := *old
+		c.Retracted = reason
+		s.alerts[idx] = &c
+		if p := s.ips[old.SrcIP]; p != nil { // 攻击源详情里的最近告警同样换成副本（读者拷贝切片后各自持有旧对象）
+			for k, r := range p.Recent {
+				if r == old {
+					p.Recent[k] = &c
+				}
+			}
+		}
+	}
+	const escPrefix = "升级已撤销："
 	now := time.Now()
 	n := 0
 	for id, list := range byInc {
@@ -847,19 +891,24 @@ func (s *Store) Retract(rule, ip, why string) int {
 			continue
 		}
 		sev, kept := model.SevInfo, 0
-		for _, a := range list {
+		for _, idx := range list {
+			a := s.alerts[idx]
 			as := a.Severity
-			switch {
-			case rule != "" && a.RuleID == rule:
-				a.Retracted = why
-				continue
-			case ip != "" && a.SrcIP == ip && escalatedByAuto(a):
+			switch m := match(a); {
+			case m == retractFull:
 				if a.Retracted == "" {
-					a.Retracted = "升级已撤销：" + why
+					mark(idx, why)
+				}
+				continue
+			case m == retractEsc:
+				if a.Retracted == "" {
+					mark(idx, escPrefix+why)
 				}
 				as = max(as-1, model.SevInfo)
-			case a.Retracted != "" && strings.HasPrefix(a.RuleID, "learn-"):
-				continue // 此前已撤销的观察规则告警
+			case strings.HasPrefix(a.Retracted, escPrefix):
+				as = max(as-1, model.SevInfo) // 此前已撤销升级
+			case a.Retracted != "":
+				continue // 此前已整条撤销
 			}
 			kept++
 			sev = max(sev, as)

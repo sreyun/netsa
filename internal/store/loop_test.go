@@ -1,6 +1,7 @@
 package store
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 	"time"
@@ -117,5 +118,63 @@ func TestAutoArchive(t *testing.T) {
 	}
 	if s.AutoArchive(now, 0) != nil {
 		t.Fatal("天数为 0 时不归档")
+	}
+}
+
+// 回溯修正与读者并发：事件详情、攻击源详情返回的告警在解锁后序列化，回溯只能写副本，不能改写共享的告警对象（-race 下验证）。
+func TestRetractConcurrentReaders(t *testing.T) {
+	s := newTestStore()
+	now := time.Now().Add(-time.Hour)
+	for i := range 50 {
+		s.Record(&model.Event{Kind: model.KindWeb, SrcIP: "198.51.100.70", Host: "mg.example.com", Method: "GET", URI: "/uaa/api/ht/sid?i=" + itoa(i), Status: 200, Time: now},
+			[]model.Hit{hit("learn-race", "未知攻击（自学习）", model.PhaseExploit, model.SevMedium, model.ResultUnknown)})
+	}
+	id := incOf(t, s, "198.51.100.70").ID
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for range 200 {
+			if d := s.Incident(id); d != nil {
+				if _, err := json.Marshal(d); err != nil {
+					t.Error(err)
+				}
+			}
+			if p := s.IPDetail("198.51.100.70"); p != nil {
+				_, _ = json.Marshal(p)
+			}
+		}
+	}()
+	for range 3 {
+		s.Retract("learn-race", "", "观察规则已停用")
+	}
+	<-done
+	if d := s.Incident(id); d == nil || len(d.AlertList) == 0 || d.AlertList[0].Retracted == "" {
+		t.Fatal("事件详情中的告警应标记为已撤销")
+	}
+}
+
+// 线上实例：员工浏览器的 SockJS 实时通道（/websocket/{server}/{session}/xhr_send）一分钟 600 次被判为高危 CC，
+// 事件 #355 因此一直是高危。启动时修正：这类旧告警整条撤销、事件重新定级；普通接口上的 CC 照常保留。
+func TestRetractLegacyCC(t *testing.T) {
+	s := newTestStore()
+	now := time.Now().Add(-time.Hour)
+	web := func(ip, uri string) *model.Event {
+		return &model.Event{Kind: model.KindWeb, SrcIP: ip, Host: "mg.example.com", Method: "POST", URI: uri, Status: 200, Time: now}
+	}
+	s.Record(web("101.231.58.190", "/websocket/783/vpqq4rcl/xhr_send?t=1793873532511"), []model.Hit{hit("bhv-cc", "CC攻击", model.PhaseImpact, model.SevHigh, model.ResultUnknown)})
+	s.Record(web("101.231.58.190", "/x"), []model.Hit{hit("bhv-dirscan", "目录扫描", model.PhaseRecon, model.SevMedium, model.ResultFailed)})
+	s.Record(web("198.51.100.80", "/search?q=1"), []model.Hit{hit("bhv-cc", "CC攻击", model.PhaseImpact, model.SevHigh, model.ResultUnknown)})
+	before := incOf(t, s, "101.231.58.190").Severity
+	if n := s.RetractLegacyCC(); n != 1 {
+		t.Fatalf("应只修正长连接上的旧 CC: %d", n)
+	}
+	if got := incOf(t, s, "101.231.58.190").Severity; got >= before {
+		t.Fatalf("事件应重新定级: %v → %v", before, got)
+	}
+	if incOf(t, s, "198.51.100.80").Severity != model.SevHigh {
+		t.Fatal("普通接口上的 CC 不应撤销")
+	}
+	if s.RetractLegacyCC() != 0 {
+		t.Fatal("应幂等")
 	}
 }

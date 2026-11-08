@@ -59,6 +59,8 @@ type webWin struct {
 	// 才开始记录的不同路径（有上限，正常访客不分配）
 	static  int
 	ccPaths map[string]struct{}
+	// 请求数过半阈值后：其中长连接 / 轮询传输（SockJS xhr_send、SSE、WebSocket 降级）的请求数与请求总数
+	ccLL, ccSeen int
 }
 
 // 高频请求中静态资源占七成以上、且访问了 ccPageLoadPaths 个以上不同路径时，是页面资源加载：
@@ -298,6 +300,12 @@ func (b *Behavior) observeWeb(ev *model.Event, sig scanSignals) []model.Hit {
 	if !miss && ev.Status < 400 && StaticAsset(path) {
 		w.static++
 	}
+	if w.reqs*2 >= b.th.CCRequests && w.fired&bitCC == 0 {
+		w.ccSeen++
+		if LongLivedURI(ev.URI) {
+			w.ccLL++
+		}
+	}
 	if w.reqs*2 >= b.th.CCRequests && w.fired&bitCC == 0 && len(w.ccPaths) < ccPageLoadPaths {
 		if w.ccPaths == nil {
 			w.ccPaths = make(map[string]struct{}, ccPageLoadPaths)
@@ -351,6 +359,9 @@ func (b *Behavior) observeWeb(ev *model.Event, sig scanSignals) []model.Hit {
 			// 照常提示，但只是弱证据（低危，不按分类底线抬升）
 			h.Severity, h.Weak = model.SevLow, true
 			h.Evidence += "；来源是内网地址，多为反向代理（未还原真实客户端地址）、监控或内部扫描器"
+		case w.ccSeen > 0 && w.ccLL*10 >= w.ccSeen*7:
+			h.Severity, h.Weak = model.SevLow, true
+			h.Evidence += fmt.Sprintf("；其中 %d%% 是长连接 / 轮询传输（SockJS、SSE、WebSocket 降级）的消息请求，是页面的实时通道，不是 CC 攻击", w.ccLL*100/w.ccSeen)
 		case w.static*10 >= w.reqs*7 && len(w.ccPaths) >= ccPageLoadPaths:
 			h.Severity, h.Weak = model.SevLow, true
 			h.Evidence += fmt.Sprintf("；其中静态资源（脚本、样式、图片）占 %d%%，访问了 %d 个以上不同路径，是页面资源加载"+

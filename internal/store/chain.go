@@ -830,6 +830,8 @@ func (s *Store) weakLocked(g *chainGroup, st *chainStep) string {
 			return "长连接（WebSocket / SockJS / SSE）本来就一直挂着：旧版本把页面的不断重连误判为慢请求攻击"
 		case st.Rule == "bhv-cc" && st.Severity < model.SevMedium:
 			return "高频请求以页面资源加载为主：App 内嵌页面不缓存、出口 NAT 后的多个用户同样会这样，说明不了拒绝服务"
+		case st.Rule == "bhv-cc" && longLivedTarget(st.Target):
+			return "高频请求在长连接 / 轮询传输（SockJS、SSE、WebSocket 降级）上：是页面实时通道的消息请求，旧版本只按请求数判为 CC 攻击"
 		case st.Rule == "bhv-cc" && staticTarget(st.Target) && s.webClientLocked(st.Src):
 			return "高频请求停在静态资源（脚本、样式、图片）上：多为 App 内嵌页面或出口 NAT 后多个用户的页面加载，旧版本只按请求数判为 CC 攻击"
 		}

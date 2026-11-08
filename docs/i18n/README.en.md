@@ -4,13 +4,16 @@
 
 **Open-source network security situational awareness and attack surface analysis platform**
 
-Turn web, firewall / IDS, network flow, host authentication and process, and DNS logs into a security picture you can trace, act on, and that keeps learning.<br>
-A single binary that works out of the box, including on isolated networks.
+**One binary turns web, firewall / IDS, flow, host and DNS logs into a security picture you can trace, act on — and that corrects its own mistakes.**<br>
+No Elasticsearch, Kafka or database required. Works fully offline. Up and running in 5 minutes.
 
 [![CI](https://github.com/sreyun/netsa/actions/workflows/ci.yml/badge.svg)](https://github.com/sreyun/netsa/actions/workflows/ci.yml)
-[![Release](https://img.shields.io/github/v/tag/sreyun/netsa?label=release)](https://github.com/sreyun/netsa/tags)
+[![Release](https://img.shields.io/github/v/tag/sreyun/netsa?label=release&color=36cfc9)](https://github.com/sreyun/netsa/tags)
+[![License](https://img.shields.io/badge/license-Apache--2.0-blue)](../../LICENSE)
 ![Go](https://img.shields.io/badge/Go-1.25%2B-00ADD8?logo=go&logoColor=white)
 ![Docker](https://img.shields.io/badge/docker-amd64%20%7C%20arm64-2496ED?logo=docker&logoColor=white)
+[![Stars](https://img.shields.io/github/stars/sreyun/netsa?style=flat&logo=github&color=yellow)](https://github.com/sreyun/netsa/stargazers)
+[![Last commit](https://img.shields.io/github/last-commit/sreyun/netsa)](https://github.com/sreyun/netsa/commits/master)
 
 [简体中文](../../README.md) · **English** · [繁體中文](README.zh-TW.md) · [日本語](README.ja.md) · [한국어](README.ko.md) · [Español](README.es.md) · [Français](README.fr.md) · [Deutsch](README.de.md) · [Русский](README.ru.md)
 
@@ -19,6 +22,14 @@ A single binary that works out of the box, including on isolated networks.
 </div>
 
 ![Situation overview: attack map, live alerts and threat index](../images/overview.png)
+
+<div align="center">
+
+| 50+ | 87 + libinjection | 261 | ~460k events/s | 0 |
+|:---:|:---:|:---:|:---:|:---:|
+| log formats auto-detected | signature rules + syntax analysis | Chinese OA / middleware vulnerability signatures | end-to-end on one machine | external components |
+
+</div>
 
 ## Why netsa
 
@@ -29,7 +40,7 @@ A single binary that works out of the box, including on isolated networks.
 - **Intelligence that is accurate, not just large**: IP, domain, TLS fingerprint and file hash intelligence (STIX / TAXII / MISP / text lists), graded by category (C2, malware, phishing, mining, attack source), with abused public platforms filtered out automatically. Each feed's accuracy is measured against analysts' verdicts, and feeds with persistent false positives are downgraded automatically.
 - **Firewall and web logs linked together**: an internal host that, after a web attack, connects to the attacker or to a callback address written in the attack payload is flagged as compromised; a connection to an address from the payload proves the payload was executed.
 - **Trace to the city, link to the group**: recovers the real IP behind CDNs and proxies, and detects XFF spoofing and direct-to-origin connections that bypass the CDN. Multiple geolocation sources are cross-checked and given a confidence level. Same-origin correlation and campaign grouping find the rotating exit addresses of one attacker (same tool fingerprint, same OAST correlation ID, TLS fingerprint, same decoy token). A hit on a [decoy](../detection.md#诱饵) (decoy path, token, account or honeypot) identifies an attacker with high confidence. The asset attack chain lays out, in time order, how a server was scanned, exploited, controlled and used for lateral movement.
-- **Gets more accurate with use**: learns from analysts' verdicts. Rules and endpoints with repeated false positives are downgraded automatically, and confirmed attackers are escalated automatically when they return. No manual allowlist curation: it learns each parameter's normal values from normal traffic and passively identifies the products and frontend frameworks each site uses, so plain text typed into a search box, or probes for a product the site does not run, no longer raise high-severity alerts. AI triage supports both OpenAI and Anthropic APIs, so on-premises vLLM and cloud models can both connect. It adapts to model differences automatically and uses analysts' verdicts to assess how far each model can be trusted.
+- **Gets more accurate with use — and corrects itself**: learns from analysts' verdicts. Without any analyst verdict it also checks its own and the AI model's conclusions against objective evidence (proven exploitation, call-backs after an attack, decoy hits, registered authorized scans): what it learned wrong is revoked automatically, incidents it already produced are re-graded, and finished low-risk incidents are archived so the queue only holds what needs attention. Rules and endpoints with repeated false positives are downgraded automatically, and confirmed attackers are escalated automatically when they return. No manual allowlist curation: it learns each parameter's normal values from normal traffic and passively identifies the products and frontend frameworks each site uses, so plain text typed into a search box, or probes for a product the site does not run, no longer raise high-severity alerts. AI triage supports both OpenAI and Anthropic APIs, so on-premises vLLM and cloud models can both connect. It adapts to model differences automatically and uses analysts' verdicts to assess how far each model can be trusted.
 - **A complete security operations loop**: incident aggregation with handling deadlines, false-positive suppression, DingTalk / WeCom / Feishu notifications, asset and vulnerability correlation, raw log retention with one-click evidence packages, weekly and monthly reports, MLPS 2.0 (China's Multi-Level Protection Scheme) self-assessment, and a tamper-evident audit chain.
 - **Fast on a single machine**: about 460,000 events per second end to end on a development machine (i7-10700, 16 threads). Aho-Corasick prefiltering means normal requests rarely need a regex, at about 3µs per event.
 
@@ -198,7 +209,9 @@ Issues and pull requests are welcome, especially:
 
 Please pass the checks above before submitting code. CI also runs race tests and `govulncheck`.
 
-If netsa is useful to you, please give it a **Star** so more people who need it can find it.
+If netsa helped you catch a real attack — or saved you running a whole log platform — please give it a **Star** so more people who need it can find it.
+
+[![Star History Chart](https://api.star-history.com/svg?repos=sreyun/netsa&type=Date)](https://star-history.com/#sreyun/netsa&Date)
 
 ## License
 

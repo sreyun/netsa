@@ -216,3 +216,30 @@ func TestCCPageLoad(t *testing.T) {
 		t.Fatalf("变换参数请求同一接口仍是 CC: %+v", h)
 	}
 }
+
+// SockJS / SSE 实时通道的消息请求（xhr_send、eventsource）一分钟几百次是正常的：低危弱证据；普通接口照常高危。
+func TestCCLongLivedTransport(t *testing.T) {
+	th := config.Default().Detect.Thresholds
+	b := NewBehavior(th)
+	t0 := time.Date(2026, 11, 5, 18, 12, 0, 0, time.UTC)
+	burst := func(ip string, uri func(i int) string) model.Hit {
+		for i := range th.CCRequests + 5 {
+			for _, h := range b.Observe(&model.Event{Kind: model.KindWeb, SrcIP: ip, Host: "mg.example.com", Method: "POST", URI: uri(i), Status: 204,
+				Time: t0.Add(time.Duration(i) * 80 * time.Millisecond)}) {
+				if h.RuleID == "bhv-cc" {
+					return h
+				}
+			}
+		}
+		return model.Hit{}
+	}
+	sock := func(i int) string {
+		return fmt.Sprintf("/websocket/%03d/vpqq4rcl/xhr_send?t=%d", i%999, 1793873532511+i)
+	}
+	if h := burst("101.231.58.190", sock); h.Severity != model.SevLow || !h.Weak || !strings.Contains(h.Evidence, "实时通道") {
+		t.Fatalf("实时通道的消息请求应为低危弱证据: %+v", h)
+	}
+	if h := burst("198.51.100.81", func(i int) string { return fmt.Sprintf("/api/order/submit?i=%d", i) }); h.Severity != model.SevHigh || h.Weak {
+		t.Fatalf("普通接口仍为高危: %+v", h)
+	}
+}

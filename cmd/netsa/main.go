@@ -63,7 +63,7 @@ import (
 
 // version 是构建版本号。默认值用于本地构建；镜像构建通过
 // -ldflags "-X main.version=<tag>" 注入，`netsa version` 与 /api/meta 都会显示注入后的值。
-var version = "1.10.8"
+var version = "1.10.9"
 
 func usage() {
 	fmt.Fprintf(os.Stderr, `netsa %s —— 网络安全态势感知与攻击面分析系统
@@ -502,6 +502,10 @@ func cmdServe(args []string) error {
 	}
 	// 已停用的观察规则、已撤销的自动确认：对仍在处置的事件补做纠错回溯（幂等，旧版本撤销时还没有回溯）
 	a.learn.ReplayRetractions()
+	// 旧版本把长连接 / 轮询传输上的消息请求判成的 CC 告警：修正仍在处置的事件（幂等）
+	if n := a.store.RetractLegacyCC(); n > 0 {
+		a.learn.RecordLoop("retract", n, fmt.Sprintf("回溯修正 %d 个仍在处置的事件：长连接 / 轮询传输上的高频请求是页面实时通道的消息请求，旧版本判为 CC 攻击", n))
+	}
 	// 快照中的定位结果可能来自旧版定位库或旧的自定义网段，按当前库重新定位
 	if n := a.store.RefreshGeo(a.geo.Relocate); n > 0 {
 		log.Printf("[geo] 已按当前定位库更新 %d 个历史攻击源的归属地", n)
