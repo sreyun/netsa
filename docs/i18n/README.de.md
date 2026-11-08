@@ -171,7 +171,7 @@ Die folgenden ausführlichen Dokumente sind in vereinfachtem Chinesisch verfasst
 
 ## Entwicklung
 
-Benötigt Go 1.25 oder neuer (Release-Builds verwenden Go 1.27). Reines Go, kein CGO.
+Benötigt Go 1.26 oder neuer (Release-Builds verwenden Go 1.27). Reines Go, kein CGO.
 
 ```bash
 go build -o bin/netsa ./cmd/netsa

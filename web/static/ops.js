@@ -1107,7 +1107,7 @@ $('#auVerify').addEventListener('click', () => ntBusy($('#auVerify'), async () =
 // ---------------- 自学习 ----------------
 const LN_CHANGE = { calibrate: '自动下调', restore: '恢复', calibrate_ctx: '目标级下调', restore_ctx: '目标级恢复', pin: '锁定', unpin: '解锁', apply: '采纳建议', dismiss: '忽略建议', policy: '策略调整',
   intranet: '识别内网网段', confirm_auto: '自动确认攻击源', revoke_auto: '撤销自动确认', discover: '发现未知攻击', discover_disable: '停用观察规则', discover_enable: '启用观察规则',
-  discover_auto_off: '自动停用观察规则', ai_gate: '收紧模型自动确认', ai_gate_off: '恢复模型自动确认', retract: '纠错回溯', auto_archive: '自动归档' };
+  discover_auto_off: '自动停用观察规则', ai_gate: '收紧模型自动确认', ai_gate_off: '恢复模型自动确认', retract: '纠错回溯', unretract: '撤销纠错', auto_archive: '自动归档' };
 let lnPolicy = null;
 const LN_ANOM = { new_net: '新地址登录', odd_hour: '非常用时段', login_fail: '登录失败暴增', bulk_export: '批量导出', sensitive: '高危变更' };
 // 近 8 周人工结论中的误报占比（从早到晚）：持续下降说明检测在变准
@@ -1142,7 +1142,7 @@ async function loadLearn() {
     ['自动生效', num(r.applied.rule + r.applied.target + (r.applied.feed || 0) + r.applied.escalated),
       enabled ? `下调 ${num(r.applied.rule + r.applied.target + (r.applied.feed || 0))} · 升级 ${num(r.applied.escalated)} 次（${esc(fmtShort(r.applied.since))} 启动以来）` : '未启用自学习'],
     ['自我纠错 · 自动处置', num(loop.revoked + loop.rules_off + loop.retracted + loop.archived),
-      `撤销确认 ${num(loop.revoked)} · 停用规则 ${num(loop.rules_off)} · 回溯事件 ${num(loop.retracted)} · 自动归档 ${num(loop.archived)}`],
+      `撤销确认 ${num(loop.revoked)} · 停用规则 ${num(loop.rules_off)} · 回溯事件 ${num(loop.retracted)}${loop.restored ? ` · 撤销纠错 ${num(loop.restored)}` : ''} · 自动归档 ${num(loop.archived)}`],
     ['待确认建议', num(r.suggestions.length), '采纳后创建误报抑制'],
     ['平台安全异常', num(r.anomalies.length), r.options.sentinel ? '最近 100 条' : '已关闭'],
     ['合规符合率', lastComp ? Math.round(lastComp.rate * 100) + '%' : '-', lastComp ? `不符合 ${num(lastComp.fail)} 项 · ${esc(fmtShort(lastComp.time))}` : (r.options.compliance ? '启动后约 2 分钟首次自检' : '已关闭')],

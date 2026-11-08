@@ -63,7 +63,7 @@ import (
 
 // version 是构建版本号。默认值用于本地构建；镜像构建通过
 // -ldflags "-X main.version=<tag>" 注入，`netsa version` 与 /api/meta 都会显示注入后的值。
-var version = "1.10.9"
+var version = "1.11.0"
 
 func usage() {
 	fmt.Fprintf(os.Stderr, `netsa %s —— 网络安全态势感知与攻击面分析系统
@@ -256,6 +256,11 @@ func build(cfg *config.Config) (*app, error) {
 	a.learn.OnRetract = func(rule, ip, why string) { // 自学习撤销学到的东西后，回溯修正仍在处置的事件
 		if n := a.store.Retract(rule, ip, why); n > 0 {
 			a.learn.RecordLoop("retract", n, fmt.Sprintf("回溯修正 %d 个仍在处置的事件：%s", n, why))
+		}
+	}
+	a.learn.OnRestore = func(rule, ip, why string) { // 纠错本身被纠正：撤销的告警恢复计入事件等级
+		if n := a.store.Restore(rule, ip, why); n > 0 {
+			a.learn.RecordLoop("unretract", n, fmt.Sprintf("撤销纠错，恢复 %d 个事件的等级：%s", n, why))
 		}
 	}
 	a.store.Calibrate = a.learn.Calibrate  // 状态库生成的情报命中同样按情报源的准确率校准

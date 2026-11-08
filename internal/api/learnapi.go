@@ -231,7 +231,7 @@ func (s *Server) learnTick(now time.Time) {
 	}
 }
 
-func firstN(list []string, n int) []string {
+func firstN[T any](list []T, n int) []T {
 	if len(list) > n {
 		return list[:n]
 	}

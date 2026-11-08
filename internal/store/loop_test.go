@@ -178,3 +178,120 @@ func TestRetractLegacyCC(t *testing.T) {
 		t.Fatal("应幂等")
 	}
 }
+
+// 纠错本身也可以被纠正：观察规则重新启用后，撤销的告警恢复计入事件等级，因纠错标为误报的事件重新打开；
+// 被撤销自动确认的来源出现攻击证据后，撤销的升级恢复。分析员已关闭的事件保持原状；恢复是幂等的。
+func TestRestoreUndoesRetraction(t *testing.T) {
+	s := newTestStore()
+	now := time.Now().Add(-time.Hour)
+	web := func(ip, uri string) *model.Event {
+		return &model.Event{Kind: model.KindWeb, SrcIP: ip, Host: "mg.example.com", Method: "GET", URI: uri, Status: 200, Time: now}
+	}
+	learned := hit("learn-4b5c24a2", "未知攻击（自学习）", model.PhaseExploit, model.SevMedium, model.ResultUnknown)
+	s.Record(web("198.51.100.7", "/uaa/api/ht/sid"), []model.Hit{learned})
+	s.Record(web("198.51.100.7", "/.env"), []model.Hit{hit("bhv-dirscan", "目录扫描", model.PhaseRecon, model.SevLow, model.ResultUnknown)})
+	s.Record(web("198.51.100.8", "/uaa/api/ht/sid"), []model.Hit{learned})
+	s.Record(web("198.51.100.11", "/uaa/api/ht/sid"), []model.Hit{learned})
+	esc := hit("sens-vcs", "敏感文件探测", model.PhaseRecon, model.SevMedium, model.ResultFailed)
+	esc.Evidence += "；自学习：该来源已被自动确认为攻击源（模型 m 以 95% 置信度判为攻击（事件 #1）），等级上调一级"
+	esc.Learned = 1
+	s.Record(web("198.51.100.9", "/.git/HEAD"), []model.Hit{esc})
+
+	a, b, c := incOf(t, s, "198.51.100.7"), incOf(t, s, "198.51.100.8"), incOf(t, s, "198.51.100.9")
+	if n := s.Retract("learn-4b5c24a2", "", "观察规则已停用"); n != 3 {
+		t.Fatalf("应修正 3 个事件，实际 %d", n)
+	}
+	s.Retract("", "198.51.100.9", "撤销了自动确认（站点常客）")
+	// 分析员之后手工处理了 198.51.100.11：恢复时不应重新打开
+	d := incOf(t, s, "198.51.100.11")
+	if _, err := s.UpdateIncidents([]uint64{d.ID}, "alice", IncidentUpdate{Status: IncIgnored, Note: "确认是业务轮询"}); err != nil {
+		t.Fatal(err)
+	}
+
+	if s.Restore("", "", "x") != 0 || s.Restore("learn-other", "", "x") != 0 {
+		t.Fatal("没有匹配的撤销时不应调整")
+	}
+	if n := s.Restore("learn-4b5c24a2", "", "观察规则已重新启用"); n != 2 {
+		t.Fatalf("应恢复 A、B 两个事件，实际 %d", n)
+	}
+	a2, b2 := incOf(t, s, "198.51.100.7"), incOf(t, s, "198.51.100.8")
+	if a2.Severity != a.Severity || !strings.Contains(a2.Notes[len(a2.Notes)-1].Action, "撤销自学习纠错：观察规则已重新启用") {
+		t.Fatalf("A 的等级应恢复: %v → %v %+v", a.Severity, a2.Severity, a2.Notes[len(a2.Notes)-1])
+	}
+	if !b2.active() || b2.Severity != b.Severity || !b2.Closed.IsZero() || b2.Due.Before(time.Now()) {
+		t.Fatalf("因纠错标为误报的 B 应重新打开: %+v", b2)
+	}
+	if d2 := incOf(t, s, "198.51.100.11"); d2.Status != IncIgnored {
+		t.Fatalf("分析员关闭的事件应保持原状: %s", d2.Status)
+	}
+	s.mu.RLock()
+	for _, al := range s.alerts {
+		if al != nil && al.RuleID == "learn-4b5c24a2" && al.Retracted != "" {
+			t.Errorf("观察规则的告警应清除撤销标记: %+v", al)
+		}
+	}
+	s.mu.RUnlock()
+	if s.Restore("learn-4b5c24a2", "", "观察规则已重新启用") != 0 {
+		t.Fatal("重复恢复不应再次调整")
+	}
+
+	if n := s.Restore("", "198.51.100.9", "出现攻击证据"); n != 1 {
+		t.Fatalf("应恢复 C 的升级，实际 %d", n)
+	}
+	if c2 := incOf(t, s, "198.51.100.9"); c2.Severity != c.Severity {
+		t.Fatalf("C 的等级应恢复为升级后的等级: %v → %v", c.Severity, c2.Severity)
+	}
+	// 撤销与恢复之后再次撤销：仍按保留的告警计算（整条撤销覆盖此前的升级撤销）
+	if s.Retract("learn-4b5c24a2", "", "再次停用") != 2 {
+		t.Fatal("恢复后应可以再次撤销")
+	}
+}
+
+// 恢复与读取并发：恢复写入告警副本，读者持有的旧对象不被修改（go test -race）。
+func TestRestoreConcurrentReaders(t *testing.T) {
+	s := newTestStore()
+	at := time.Now().Add(-time.Hour)
+	for i := 0; i < 50; i++ {
+		ip := "198.51.100." + itoa(i+1)
+		s.Record(&model.Event{Kind: model.KindWeb, SrcIP: ip, Host: "mg.example.com", Method: "GET", URI: "/p", Status: 200, Time: at},
+			[]model.Hit{hit("learn-x", "未知攻击（自学习）", model.PhaseExploit, model.SevMedium, model.ResultUnknown)})
+	}
+	s.Retract("learn-x", "", "停用")
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for i := 0; i < 200; i++ {
+			for _, a := range s.Alerts(AlertQuery{Limit: 100}) {
+				_, _ = json.Marshal(a)
+			}
+		}
+	}()
+	s.Restore("learn-x", "", "重新启用")
+	<-done
+}
+
+// 只撤销了升级的告警，所属观察规则之后被停用：改为整条撤销，不再按降一级计入事件等级。
+func TestRetractEscThenFull(t *testing.T) {
+	s := newTestStore()
+	at := time.Now().Add(-time.Hour)
+	h := hit("learn-esc", "未知攻击（自学习）", model.PhaseExploit, model.SevMedium, model.ResultUnknown)
+	h.Evidence += "；自学习：该来源已被自动确认为攻击源（模型 m 以 95% 置信度判为攻击（事件 #1）），等级上调一级"
+	h.Learned = 1
+	s.Record(&model.Event{Kind: model.KindWeb, SrcIP: "198.51.100.60", Host: "mg.example.com", Method: "GET", URI: "/p", Status: 200, Time: at}, []model.Hit{h})
+	if s.Retract("", "198.51.100.60", "撤销了自动确认（站点常客）") != 1 {
+		t.Fatal("应撤销升级")
+	}
+	if s.Retract("learn-esc", "", "观察规则已停用") != 1 {
+		t.Fatal("观察规则停用后应再次修正")
+	}
+	if inc := incOf(t, s, "198.51.100.60"); inc.Status != IncFalsePositive {
+		t.Fatalf("告警已整条撤销，事件应标为误报: %+v", inc)
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for _, a := range s.alerts {
+		if a != nil && a.SrcIP == "198.51.100.60" && strings.HasPrefix(a.Retracted, escPrefix) {
+			t.Fatalf("应改为整条撤销: %q", a.Retracted)
+		}
+	}
+}

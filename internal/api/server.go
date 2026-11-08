@@ -138,6 +138,7 @@ func (s *Server) Handler() http.Handler {
 		writeJSON(w, s.Store.Timeline(clamp(qint(r, "minutes", 60), 1, 31*24*60)))
 	}))
 	mux.HandleFunc("GET /api/attackers", cached(time.Second, s.attackers))
+	mux.HandleFunc("GET /api/search", cached(time.Second, s.search)) // 全局搜索：输入时连续请求，短时缓存合并重复的关键字
 	mux.HandleFunc("GET /api/campaigns", func(w http.ResponseWriter, r *http.Request) { writeJSON(w, s.Store.Campaigns()) })
 	mux.HandleFunc("GET /api/chains", cached(2*time.Second, s.chainList))
 	mux.HandleFunc("GET /api/chains/detail", cached(2*time.Second, s.chainDetail))

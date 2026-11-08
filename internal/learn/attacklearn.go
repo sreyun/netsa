@@ -192,8 +192,14 @@ func (l *Learner) ConfirmSource(ip, kind, reason string, at time.Time) bool {
 		at = time.Now()
 	}
 	l.mu.Lock()
+	unrevoke := false
 	if kind != "ai" { // 成功证据、回连、诱饵、同一攻击活动：客观结论是攻击者（模型的判断据此评估）
+		// 此前判为站点常客、撤销过自动确认并回溯修正过事件：纠错本身错了，撤销的升级恢复
+		unrevoke = regularOutcome(l.outcomes[ip])
 		l.noteOutcomeLocked(ip, true, reason, at)
+	}
+	if unrevoke {
+		defer l.restore("", ip, ip+" 此前被判为站点常客，现已出现攻击的客观证据（"+clipNote(reason)+"）")
 	}
 	old := l.auto[ip]
 	if old != nil {
@@ -512,6 +518,8 @@ func (l *Learner) SetLearnedRule(id, user string, enabled bool) bool {
 	l.emit([]Change{c})
 	if !enabled { // 管理员认定学错了：它生成的告警不再计入仍在处置的事件
 		l.retract(id, "", "管理员 "+user+" 停用了观察规则 "+clipShape(shape))
+	} else { // 管理员认定没学错（如被轮询误停用后重新启用）：此前撤销的告警恢复计入
+		l.restore(id, "", "管理员 "+user+" 重新启用了观察规则 "+clipShape(shape))
 	}
 	return true
 }

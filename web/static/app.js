@@ -2031,7 +2031,7 @@ async function loadCampaigns() {
     ? `${num(r.total)} 个攻击活动 · 涉及 ${num(r.members)} 个攻击源（参与归并 ${num(r.scanned)} 个） · ${fmtTime(r.generated)} 计算`
     : `参与归并 ${num(r.scanned)} 个攻击源，暂未发现由多个攻击源构成的攻击活动`;
   const row = (k, v) => (v ? `<div><span class="k">${k}</span>${v}</div>` : '');
-  $('#campList').innerHTML = (r.campaigns || []).map((c, i) => `<div class="panel camp" style="border-left-color:${LV_COLOR[c.level] || 'var(--border-hi)'}">
+  $('#campList').innerHTML = (r.campaigns || []).map((c, i) => `<div class="panel camp" data-camp="${esc(c.id)}" style="border-left-color:${LV_COLOR[c.level] || 'var(--border-hi)'}">
       <div class="camp-head">${badge(c.level)}<b>攻击活动 #${i + 1}</b><span class="muted">${num(c.size)} 个攻击源 · ${num(c.attacks)} 次攻击 · ${esc(fmtShort(c.first_seen))} ~ ${esc(fmtShort(c.last_seen))}</span></div>
       <div class="camp-grid">
         ${row('关联依据', (c.reasons || []).map(esc).join('；'))}
@@ -2272,6 +2272,184 @@ function openFromHash() {
   if (/^[0-9a-fA-F.:]{2,45}$/.test(ip)) openIP(ip);
 }
 window.addEventListener('hashchange', openFromHash);
+
+// ---------------- 全局搜索（Ctrl+K / “/”） ----------------
+// 输入 IP、事件编号、资产、站点、规则或攻击类型，结果按类别分组，键盘选择后直达详情；
+// 列表末尾附“在攻击溯源 / 告警 / 原始日志中搜索”的入口，搜不到时也有去处
+const GS_KIND = { ip: '攻击源', incident: '事件', chain: '攻击链路', asset: '资产', campaign: '攻击活动', rule: '规则' };
+const gs = { items: [], cur: -1, seq: 0, timer: 0, run: null };
+const isIP = (s) => /^[0-9a-fA-F.:]{2,45}$/.test(s) && (s.includes('.') || s.includes(':'));
+function openSearch() {
+  if (!$('#gsModal').hidden) return;
+  rememberFocus();
+  $('#gsModal').hidden = false;
+  const inp = $('#gsInput');
+  inp.focus();
+  inp.select();
+  gs.run = gsRun();
+}
+function closeSearch() { $('#gsModal').hidden = true; }
+// gsActions 是与关键字相关的通用入口（总在结果之后）
+function gsActions(q) {
+  if (!q) return [];
+  const out = [{ act: 'attackers', title: `在攻击溯源中搜索“${q}”`, sub: 'IP、归属地、运营商、攻击类型、标签' },
+    { act: 'alerts', title: `在实时告警中搜索“${q}”`, sub: '规则、目标、载荷、IP' }];
+  if (canOperate() && meta.rawlog) out.push({ act: 'rawlog', title: isIP(q) ? `在原始日志中检索 ${q}` : `在原始日志中检索关键字“${q}”`, sub: '按时间、IP、关键字回溯原始日志' });
+  return out;
+}
+async function gsRun() {
+  const q = $('#gsInput').value.trim();
+  const seq = ++gs.seq;
+  if (!q) {
+    // 没有输入时列出最近的搜索（只保存在本浏览器）
+    gs.items = gsRecent().map((t) => ({ type: 'recent', title: t }));
+    $('#gsStat').textContent = '';
+    $('#gsList').innerHTML = gs.items.length
+      ? '<div class="gs-group" role="presentation"><b>最近搜索</b><span class="spacer"></span><button type="button" class="gs-clear" id="gsClear">清除</button></div>'
+        + gs.items.map((it, i) => `<button type="button" class="gs-item gs-act" role="option" id="gs-${i}" data-i="${i}"><span class="gs-dot" aria-hidden="true">↺</span><span class="gs-main"><span class="gs-title">${esc(it.title)}</span></span></button>`).join('')
+      : '<div class="gs-empty">输入关键字开始搜索<p>例如 <span class="mono">203.0.113.7</span>、<span class="mono">#12</span>、官网、SQL注入、nuclei、learn-</p></div>';
+    gsSelect(-1);
+    return;
+  }
+  let r;
+  try { r = await api('/api/search?q=' + encodeURIComponent(q)); } catch (e) { if (seq === gs.seq) $('#gsList').innerHTML = `<div class="gs-empty">${esc(e.message || '搜索失败')}</div>`; return; }
+  if (seq !== gs.seq || $('#gsModal').hidden) return; // 输入已变化：丢弃过期的结果
+  gs.items = [];
+  let html = '';
+  let total = 0;
+  for (const g of r.groups) {
+    total += g.total;
+    html += `<div class="gs-group" role="presentation"><b>${esc(g.label)}</b><span>${g.total > g.items.length ? `前 ${g.items.length} 项 / 共 ${num(g.total)} 项` : `${num(g.total)} 项`}</span></div>`;
+    for (const it of g.items) {
+      const i = gs.items.push(it) - 1;
+      const mono = it.type === 'ip' || it.type === 'rule' && /^[\w.-]+$/.test(it.title);
+      html += `<button type="button" class="gs-item" role="option" id="gs-${i}" data-i="${i}"><span class="gs-dot" style="background:${LV_COLOR[it.level] || 'var(--border-hi)'}"></span>`
+        + `<span class="gs-main"><span class="gs-title${mono ? ' mono' : ''}">${esc(it.title)}</span>${it.sub ? `<span class="gs-sub">${esc(it.sub)}</span>` : ''}</span><span class="gs-kind">${esc(GS_KIND[it.type] || '')}</span></button>`;
+    }
+  }
+  if (!r.groups.length) html = `<div class="gs-empty">没有找到与“${esc(q)}”匹配的攻击源、事件、资产或规则</div>`;
+  const acts = gsActions(q);
+  if (acts.length) html += '<div class="gs-group" role="presentation"><b>更多</b></div>';
+  for (const a of acts) {
+    const i = gs.items.push({ type: 'act', ...a }) - 1;
+    html += `<button type="button" class="gs-item gs-act" role="option" id="gs-${i}" data-i="${i}"><span class="gs-dot" aria-hidden="true">›</span><span class="gs-main"><span class="gs-title">${esc(a.title)}</span><span class="gs-sub">${esc(a.sub)}</span></span></button>`;
+  }
+  $('#gsList').innerHTML = html;
+  $('#gsStat').textContent = r.groups.length ? `共 ${num(total)} 项匹配` : '';
+  gsSelect(gs.items.length ? 0 : -1);
+}
+function gsSelect(i) {
+  gs.cur = i;
+  $$('#gsList .gs-item').forEach((b) => b.classList.toggle('on', +b.dataset.i === i));
+  const el = $('#gs-' + i);
+  $('#gsInput').setAttribute('aria-activedescendant', el ? el.id : '');
+  el?.scrollIntoView({ block: 'nearest' });
+}
+// 最近搜索：本浏览器的便利功能，存储不可用（隐私模式、禁用站点数据）时不影响搜索
+const GS_RECENT = 'netsa.search.recent';
+function gsRecent() {
+  try {
+    const v = JSON.parse(localStorage.getItem(GS_RECENT) || '[]');
+    return Array.isArray(v) ? v.filter((x) => typeof x === 'string').slice(0, 6) : [];
+  } catch (_) { return []; }
+}
+function gsRemember(q) {
+  if (!q) return;
+  try { localStorage.setItem(GS_RECENT, JSON.stringify([q, ...gsRecent().filter((x) => x !== q)].slice(0, 6))); } catch (_) { /* 存储不可用 */ }
+}
+async function gsOpenItem(it) {
+  if (!it) return;
+  if (it.type === 'recent') { // 选中最近的搜索：填入并重新搜索，留在搜索框中
+    $('#gsInput').value = it.title;
+    gs.run = gsRun();
+    return;
+  }
+  const q = $('#gsInput').value.trim();
+  gsRemember(q);
+  closeSearch();
+  switch (it.type) {
+    case 'ip': openIP(it.key); break;
+    case 'chain': openChain(it.key); break;
+    case 'incident':
+      hashParams = new URLSearchParams({ incident: it.key });
+      closeDrawer();
+      switchTab('incidents');
+      break;
+    case 'asset':
+      closeDrawer();
+      if (typeof av !== 'undefined' && av.view !== 'assets') $('#avView button[data-v="assets"]')?.click();
+      $('#avSearch').value = it.title;
+      switchTab('assets');
+      break;
+    case 'campaign': {
+      closeDrawer();
+      await switchTab('campaigns');
+      const card = $(`#campList [data-camp="${CSS.escape(it.key)}"]`);
+      if (card) { card.scrollIntoView({ block: 'center', behavior: 'smooth' }); card.classList.remove('gs-flash'); void card.offsetWidth; card.classList.add('gs-flash'); }
+      break;
+    }
+    case 'rule': drillTo('alerts', { native: { q: it.title }, label: '' }); break;
+    case 'act':
+      if (it.act === 'rawlog') {
+        closeDrawer();
+        await switchTab('rawlog');
+        rlRange(1440); // 从搜索进入时看最近 24 小时
+        if (isIP(q)) { $('#rlIP').value = q; if ($('#rlQ')) $('#rlQ').value = ''; } else if ($('#rlQ')) { $('#rlQ').value = q; $('#rlIP').value = ''; }
+        $('#rlForm').requestSubmit();
+      } else {
+        drillTo(it.act, { native: { q }, label: '' });
+      }
+      break;
+  }
+}
+$('#gsOpen').addEventListener('click', openSearch);
+if (/Mac|iPhone|iPad/.test(navigator.userAgentData?.platform || navigator.platform || '')) $('#gsOpen kbd').textContent = '⌘K';
+$('#gsInput').addEventListener('input', () => {
+  clearTimeout(gs.timer);
+  gs.timer = setTimeout(() => { gs.timer = 0; gs.run = gsRun(); }, 180);
+});
+$('#gsInput').addEventListener('keydown', (e) => {
+  if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+    e.preventDefault();
+    if (!gs.items.length) return;
+    const n = gs.items.length;
+    gsSelect(((gs.cur < 0 ? (e.key === 'ArrowDown' ? -1 : 0) : gs.cur) + (e.key === 'ArrowDown' ? 1 : -1) + n) % n);
+  } else if (e.key === 'Enter') {
+    e.preventDefault();
+    // 输入后还没来得及搜索、或结果还在路上：先等这次搜索完成，回车打开的是当前关键字的结果
+    if (gs.timer) { clearTimeout(gs.timer); gs.timer = 0; gs.run = gsRun(); }
+    Promise.resolve(gs.run).then(() => gsOpenItem(gs.items[gs.cur]));
+  }
+});
+$('#gsList').addEventListener('click', (e) => {
+  if (e.target.id === 'gsClear') {
+    try { localStorage.removeItem(GS_RECENT); } catch (_) { /* 存储不可用 */ }
+    gs.run = gsRun();
+    $('#gsInput').focus();
+    return;
+  }
+  const b = e.target.closest('.gs-item');
+  if (b) gsOpenItem(gs.items[+b.dataset.i]);
+});
+$('#gsList').addEventListener('mousemove', (e) => {
+  const b = e.target.closest('.gs-item');
+  if (b && +b.dataset.i !== gs.cur) gsSelect(+b.dataset.i);
+});
+$('#gsModal').addEventListener('mousedown', (e) => { if (e.target === e.currentTarget) closeSearch(); });
+// 捕获阶段：搜索框打开时 Esc 只关闭搜索，不关闭其下的抽屉与对话框
+document.addEventListener('keydown', (e) => {
+  const open = !$('#gsModal').hidden;
+  if (open && e.key === 'Escape') { e.stopImmediatePropagation(); e.preventDefault(); closeSearch(); return; }
+  const editing = e.target.closest?.('input, textarea, select, [contenteditable="true"]');
+  if ((e.ctrlKey || e.metaKey) && !e.altKey && e.key.toLowerCase() === 'k') {
+    if (openDialog() && !open) return; // 其他对话框打开时不叠加
+    e.preventDefault();
+    if (open) $('#gsInput').select(); else openSearch();
+  } else if (e.key === '/' && !editing && !open && !openDialog() && !e.ctrlKey && !e.metaKey && !e.altKey) {
+    e.preventDefault();
+    openSearch();
+  }
+}, true);
 
 // 定时刷新不叠加：上一轮没有返回时跳过这一轮，接口变慢时请求不会越积越多。60 秒后不再等待，避免一个卡住的请求让刷新永远停止
 const polling = new Set();

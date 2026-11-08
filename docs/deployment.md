@@ -6,7 +6,7 @@
 
 | 镜像 | 用途 |
 |---|---|
-| `swr.cn-east-3.myhuaweicloud.com/sreyun/netsa:latest` | netsa 主程序（默认）；也可使用版本号标签，如 `:1.10.9` |
+| `swr.cn-east-3.myhuaweicloud.com/sreyun/netsa:latest` | netsa 主程序（默认）；也可使用版本号标签，如 `:1.11.0` |
 | `swr.cn-east-3.myhuaweicloud.com/sreyun/pgvector:pg18` | 可选的告警归档数据库（PostgreSQL 18），只在启用归档时拉取 |
 
 ## 生产部署（Docker Compose）
@@ -82,14 +82,14 @@ docker compose up -d
 
 ```bash
 # 联网机器：按服务器架构拉取（arm64 服务器用 --platform linux/arm64），不启用归档可不拉取 pgvector
-docker pull --platform linux/amd64 swr.cn-east-3.myhuaweicloud.com/sreyun/netsa:1.10.9
+docker pull --platform linux/amd64 swr.cn-east-3.myhuaweicloud.com/sreyun/netsa:1.11.0
 docker pull --platform linux/amd64 swr.cn-east-3.myhuaweicloud.com/sreyun/pgvector:pg18
-docker save -o netsa-images.tar swr.cn-east-3.myhuaweicloud.com/sreyun/netsa:1.10.9 \
+docker save -o netsa-images.tar swr.cn-east-3.myhuaweicloud.com/sreyun/netsa:1.11.0 \
   swr.cn-east-3.myhuaweicloud.com/sreyun/pgvector:pg18
 
 # 服务器：导入后直接启动（不要执行 docker compose pull），.env 中写入相同的镜像标签
 docker load -i netsa-images.tar
-echo 'NETSA_IMAGE=swr.cn-east-3.myhuaweicloud.com/sreyun/netsa:1.10.9' >> .env
+echo 'NETSA_IMAGE=swr.cn-east-3.myhuaweicloud.com/sreyun/netsa:1.11.0' >> .env
 docker compose up -d
 ```
 
@@ -162,7 +162,7 @@ docker build -t netsa:dev .
 ## 不用 Docker 运行
 
 ```bash
-# 编译（需要 Go 1.25+；纯 Go 实现，无 CGO）
+# 编译（需要 Go 1.26+；纯 Go 实现，无 CGO）
 go build -o bin/netsa ./cmd/netsa
 
 # 生成 6 小时演示日志并启动，浏览器打开 http://localhost:8080（账号 admin / Netsa@demo2026）

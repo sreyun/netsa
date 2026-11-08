@@ -256,6 +256,9 @@ type Learner struct {
 	AttackerLike func(ip string) bool
 	// OnRetract 在撤销自动确认、停用观察规则后调用（异步），由状态库回溯修正仍在处置的事件。
 	OnRetract func(rule, ip, why string)
+	// OnRestore 在纠错本身被纠正后调用（异步）：管理员重新启用观察规则、被撤销自动确认的来源出现了攻击的客观证据，
+	// 由状态库恢复撤销的告警。
+	OnRestore func(rule, ip, why string)
 
 	// PriorAttacks 返回来源此前的攻击次数（业务接口学习只用此前没有攻击记录的访客），为空时视为 0。
 	PriorAttacks func(ip string) int64

@@ -489,3 +489,64 @@ func TestMigrateLoopFromChanges(t *testing.T) {
 		t.Fatalf("只补齐一次: %+v changes %d/%d", r2.Loop, len(r2.Changes), len(r.Changes))
 	}
 }
+
+// 纠错本身可以被纠正：管理员重新启用被停用的观察规则、被判为站点常客而撤销确认的来源之后出现攻击的客观证据，
+// 都通知状态库恢复撤销的告警；启动时对重新启用的规则补做恢复。只凭模型判断的再次确认不触发恢复。
+func TestRestoreAfterCorrection(t *testing.T) {
+	l := attackLearner(t, "")
+	now := time.Now()
+	restored := make(chan string, 8)
+	l.OnRetract = func(rule, ip, why string) {}
+	l.OnRestore = func(rule, ip, why string) { restored <- rule + ip + "|" + why }
+	wait := func(want, about string) string {
+		t.Helper()
+		select {
+		case s := <-restored:
+			if !strings.HasPrefix(s, want+"|") || !strings.Contains(s, about) {
+				t.Fatalf("恢复通知 %q，期望 %s / %s", s, want, about)
+			}
+			return s
+		case <-time.After(2 * time.Second):
+			t.Fatalf("应通知状态库恢复 %s", want)
+		}
+		return ""
+	}
+	none := func() {
+		t.Helper()
+		select {
+		case s := <-restored:
+			t.Fatalf("不应恢复: %q", s)
+		case <-time.After(100 * time.Millisecond):
+		}
+	}
+
+	l.atk.mu.Lock()
+	l.atk.rules["GET /x"] = &LearnedRule{ID: "learn-1", Shape: "GET /x", Time: now}
+	l.atk.mu.Unlock()
+	l.SetLearnedRule("learn-1", "admin", false)
+	none()
+	l.SetLearnedRule("learn-1", "admin", true)
+	wait("learn-1", "重新启用了观察规则")
+	l.ReplayRetractions() // 启动时：重新启用（Kept）的规则补做恢复（幂等）
+	wait("learn-1", "已重新启用")
+
+	// 站点常客：模型确认后被撤销
+	ip := "101.231.58.190"
+	l.RecordAI(1, AIRecord{Verdict: "attack", Confidence: 95, Model: "m", Source: ip, Time: now})
+	l.RegularUser = func(s string) bool { return s == ip }
+	l.Refresh(now)
+	if r := l.Report(); r.Loop.Revoked != 1 {
+		t.Fatalf("应撤销自动确认: %+v", r.Loop)
+	}
+	l.RegularUser = nil
+	l.RecordAI(2, AIRecord{Verdict: "attack", Confidence: 95, Model: "m", Source: ip, Time: now})
+	none() // 模型再次判为攻击不是客观证据
+	l.ConfirmSource(ip, "callback", "攻击之后内网主机回连", now)
+	wait(ip, "现已出现攻击的客观证据")
+	l.ConfirmSource(ip, "evidence", "攻击成功且有证据", now)
+	none() // 客观结论已经是攻击，不重复恢复
+	l.RecordLoop("unretract", 2, "撤销纠错，恢复 2 个事件的等级")
+	if r := l.Report(); r.Loop.Restored != 2 || r.Changes[0].Kind != "unretract" {
+		t.Fatalf("应统计撤销纠错: %+v %+v", r.Loop, r.Changes[0])
+	}
+}

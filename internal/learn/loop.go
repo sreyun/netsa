@@ -40,6 +40,7 @@ type LoopStats struct {
 	Revoked   int             `json:"revoked"`            // 撤销的自动确认攻击源
 	RulesOff  int             `json:"rules_off"`          // 停用的观察规则（被业务接口轮询自动停用、管理员停用）
 	Retracted int             `json:"retracted"`          // 回溯修正的事件
+	Restored  int             `json:"restored,omitempty"` // 纠错被纠正、恢复等级的事件（重新启用观察规则、被撤销的来源出现攻击证据）
 	Archived  int             `json:"archived"`           // 自动归档的事件
 	Migrated  bool            `json:"migrated,omitempty"` // 已从进化日志补齐旧版本的数据
 	Gated     map[string]bool `json:"gated,omitempty"`
@@ -132,6 +133,8 @@ func (l *Learner) RecordLoop(kind string, n int, detail string) {
 	switch kind {
 	case "retract":
 		l.loop.Retracted += n
+	case "unretract":
+		l.loop.Restored += n
 	case "auto_archive":
 		l.loop.Archived += n
 	}
@@ -147,6 +150,18 @@ func (l *Learner) retract(rule, ip, why string) {
 	if f := l.OnRetract; f != nil {
 		go f(rule, ip, why)
 	}
+}
+
+// restore 通知状态库撤销纠错（异步，同 retract）。
+func (l *Learner) restore(rule, ip, why string) {
+	if f := l.OnRestore; f != nil {
+		go f(rule, ip, why)
+	}
+}
+
+// regularOutcome 判断客观结论是否为“站点常客”（自动确认因此被撤销、告警因此回溯修正过）。
+func regularOutcome(o *Outcome) bool {
+	return o != nil && !o.Attack && strings.HasPrefix(o.Reason, "站点常客")
 }
 
 // ArchivePolicy 返回是否自动归档已结束的低风险事件，以及多少天没有活动后归档。
@@ -236,8 +251,8 @@ func ipAfter(s, prefix string) string {
 	return s
 }
 
-// ReplayRetractions 对已停用的观察规则、已撤销的自动确认（站点常客）补做纠错回溯（启动时、状态库加载后调用）。
-// 状态库的回溯是幂等的：已经修正过的事件不会再次调整。
+// ReplayRetractions 对已停用的观察规则、已撤销的自动确认（站点常客）补做纠错回溯，对重新启用的观察规则补做恢复
+// （启动时、状态库加载后调用）。状态库的回溯与恢复都是幂等的：已经修正过的事件不会再次调整。
 func (l *Learner) ReplayRetractions() {
 	if l == nil || l.OnRetract == nil {
 		return
@@ -245,17 +260,20 @@ func (l *Learner) ReplayRetractions() {
 	l.mu.Lock()
 	var ips []string
 	for ip, o := range l.outcomes {
-		if !o.Attack && strings.HasPrefix(o.Reason, "站点常客") {
+		if regularOutcome(o) {
 			ips = append(ips, ip)
 		}
 	}
 	l.mu.Unlock()
 	st := &l.atk
 	st.mu.Lock()
-	var rules [][2]string
+	var rules, kept [][2]string
 	for shape, r := range st.rules {
-		if r.Disabled {
+		switch {
+		case r.Disabled:
 			rules = append(rules, [2]string{r.ID, shape})
+		case r.Kept: // 管理员重新启用（或确认保留）的规则：此前若被回溯撤销过，补做恢复（撤销纠错只在内存中，可能没来得及保存）
+			kept = append(kept, [2]string{r.ID, shape})
 		}
 	}
 	st.mu.Unlock()
@@ -265,5 +283,8 @@ func (l *Learner) ReplayRetractions() {
 	}
 	for _, r := range rules {
 		l.retract(r[0], "", "观察规则 "+clipShape(r[1])+" 已停用")
+	}
+	for _, r := range kept {
+		l.restore(r[0], "", "观察规则 "+clipShape(r[1])+" 已重新启用")
 	}
 }

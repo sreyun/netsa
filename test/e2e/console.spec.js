@@ -153,6 +153,14 @@ test('所有页面渲染攻击者控制的内容都不会产生注入', async ({
     await checkNoInjection(page, `攻击源 ${i.key}`, issues);
     await page.keyboard.press('Escape');
   }
+  // 全局搜索：结果的标题与说明来自日志（攻击类型、站点、归属地），同样只能作为文字显示
+  await page.click('#gsOpen');
+  await page.waitForSelector('#gsModal:not([hidden])');
+  await page.fill('#gsInput', '203.0.113.1');
+  await expect(page.locator('#gsList')).toContainText('203.0.113.1');
+  await checkNoInjection(page, '全局搜索', issues);
+  await page.keyboard.press('Escape');
+  await expect(page.locator('#gsModal')).toBeHidden();
 });
 
 test('处置事件：写入记录、状态变化，刷新后保留', async ({ page }) => {

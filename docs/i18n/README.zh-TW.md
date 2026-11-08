@@ -171,7 +171,7 @@ go build -o bin/netsa ./cmd/netsa
 
 ## 開發
 
-需要 Go 1.25 以上（發布版本使用 Go 1.27 建置），純 Go 實作，無 CGO。
+需要 Go 1.26 以上（發布版本使用 Go 1.27 建置），純 Go 實作，無 CGO。
 
 ```bash
 go build -o bin/netsa ./cmd/netsa

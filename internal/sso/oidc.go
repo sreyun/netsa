@@ -293,8 +293,12 @@ func (j jwk) publicKey() (crypto.PublicKey, error) {
 		if err1 != nil || err2 != nil {
 			return nil, errors.New("EC 密钥格式错误")
 		}
-		pk := &ecdsa.PublicKey{Curve: elliptic.P256(), X: new(big.Int).SetBytes(x), Y: new(big.Int).SetBytes(y)}
-		if !pk.Curve.IsOnCurve(pk.X, pk.Y) { //nolint:staticcheck
+		if len(x) != 32 || len(y) != 32 { // RFC 7518 6.2.1.2：P-256 的坐标固定 32 字节
+			return nil, errors.New("EC 密钥长度错误")
+		}
+		// 按未压缩点解析，同时校验点在曲线上（取代已弃用的 IsOnCurve）
+		pk, err := ecdsa.ParseUncompressedPublicKey(elliptic.P256(), append(append([]byte{4}, x...), y...))
+		if err != nil {
 			return nil, errors.New("EC 公钥不在曲线上")
 		}
 		return pk, nil

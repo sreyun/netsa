@@ -51,6 +51,7 @@
   </nav>
   <nav class="subnav" id="subnav" aria-label="二级菜单" hidden></nav>
   <div class="status">
+    <button type="button" class="gs-btn" id="gsOpen" title="全局搜索：IP、事件编号、资产、站点、规则、攻击类型（Ctrl+K 或 /）" aria-haspopup="dialog"><span class="gs-ico" aria-hidden="true">⌕</span><span class="gs-ph">搜索</span><kbd>Ctrl K</kbd></button>
     <span class="threat" id="threatBadge">威胁等级 --</span>
     <span class="live" id="liveDot" title="实时推送连接状态">● 实时</span>
     <span class="clock" id="clock"></span>
@@ -67,6 +68,15 @@
 </header>
 
 <div class="conn-banner" id="connBanner" role="status" hidden>与服务器的连接已中断，正在自动重试…</div>
+
+<!-- 全局搜索：输入 IP、事件编号、资产、站点、规则或攻击类型，结果按类别分组，回车直达详情 -->
+<div class="modal-mask gs-mask" id="gsModal" hidden>
+  <div class="gs-box" role="dialog" aria-modal="true" aria-label="全局搜索">
+    <div class="gs-input"><span class="gs-ico" aria-hidden="true">⌕</span><input id="gsInput" type="search" spellcheck="false" autocomplete="off" maxlength="100" placeholder="搜索 IP、事件编号（#12）、资产、站点、规则、攻击类型…" aria-controls="gsList" aria-autocomplete="list"><kbd>Esc</kbd></div>
+    <div class="gs-list" id="gsList" role="listbox"></div>
+    <div class="gs-foot"><span><kbd>↑</kbd><kbd>↓</kbd> 选择</span><span><kbd>Enter</kbd> 打开</span><span><kbd>Esc</kbd> 关闭</span><span class="spacer"></span><span id="gsStat"></span></div>
+  </div>
+</div>
 
 <main>
   <!-- 态势总览 -->

@@ -52,6 +52,7 @@
 | `GET /api/attackers?level=&q=&sort=&limit=&offset=` | 攻击源列表；下钻条件 `country`、`city`、`net_type`、`isp`、`world`、`province`、`city_map`、`place`、`category`、`phase`、`technique`（ATT&CK 技术编号） |
 | `GET /api/ip/{ip}` / `GET /api/ip/{ip}/rdap` | IP 溯源详情（含 `related` 同源关联分析）/ WHOIS 注册信息 |
 | `GET /api/campaigns` | 攻击活动：多个攻击源之间的强关联归并的活动，含成员、关联依据、来源网段、OAST 关联标识（`oast`）与建议封禁网段（缓存 1 分钟） |
+| `GET /api/search?q=` | 全局搜索：按攻击源、安全事件、资产攻击链路、资产台账、攻击活动、检测规则分组，每组 `total` 为匹配总数、`items` 为前 6 项（`type`、`key`、`title`、`sub`、`level`）；`#12` 只返回编号为 12 的事件。关键字最长 100 个字符，结果缓存 1 秒 |
 | `GET /api/chains?q=&stage=&compromised=1&limit=` | 资产攻击链路列表：每个资产推进到的阶段（`reached`）、最深阶段、失陷研判（`confidence`：high / medium）、合并的标识与结论；`stage` 只看推进到该阶段之后的（如 `exploit` 表示越过侦察），`limit` 默认 100、最多 500 |
 | `GET /api/chains/detail?asset=` | 一个资产的完整攻击链路：八个阶段的统计与 ATT&CK 技术、关键路径、时间线（每一步的来源、目标、证据、告警与事件编号）、攻击来源、合并依据与处置建议；`asset` 可以是台账资产名称、站点域名或主机地址 |
 | `GET /api/alerts?severity=&category=&result=&kind=&ip=&q=` | 告警查询；下钻条件 `phase`、`target`、`from` / `to`（Unix 秒或 RFC3339）、`technique`、`asset`（目标资产）、`incident`（所属事件） |

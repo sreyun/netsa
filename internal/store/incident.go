@@ -869,20 +869,6 @@ func (s *Store) retractWhere(why string, match func(*model.Alert) int) int {
 			}
 		}
 	}
-	mark := func(idx int, reason string) {
-		old := s.alerts[idx]
-		c := *old
-		c.Retracted = reason
-		s.alerts[idx] = &c
-		if p := s.ips[old.SrcIP]; p != nil { // 攻击源详情里的最近告警同样换成副本（读者拷贝切片后各自持有旧对象）
-			for k, r := range p.Recent {
-				if r == old {
-					p.Recent[k] = &c
-				}
-			}
-		}
-	}
-	const escPrefix = "升级已撤销："
 	now := time.Now()
 	n := 0
 	for id, list := range byInc {
@@ -893,25 +879,20 @@ func (s *Store) retractWhere(why string, match func(*model.Alert) int) int {
 		sev, kept := model.SevInfo, 0
 		for _, idx := range list {
 			a := s.alerts[idx]
-			as := a.Severity
-			switch m := match(a); {
-			case m == retractFull:
-				if a.Retracted == "" {
-					mark(idx, why)
+			switch match(a) {
+			case retractFull: // 此前只撤销了升级的告警同样改为整条撤销
+				if a.Retracted == "" || strings.HasPrefix(a.Retracted, escPrefix) {
+					s.markAlertLocked(idx, why)
 				}
-				continue
-			case m == retractEsc:
+			case retractEsc:
 				if a.Retracted == "" {
-					mark(idx, escPrefix+why)
+					s.markAlertLocked(idx, escPrefix+why)
 				}
-				as = max(as-1, model.SevInfo)
-			case strings.HasPrefix(a.Retracted, escPrefix):
-				as = max(as-1, model.SevInfo) // 此前已撤销升级
-			case a.Retracted != "":
-				continue // 此前已整条撤销
 			}
-			kept++
-			sev = max(sev, as)
+			if as, ok := countedSev(s.alerts[idx]); ok {
+				kept++
+				sev = max(sev, as)
+			}
 		}
 		if kept > 0 && sev >= inc.Severity {
 			continue
@@ -929,6 +910,130 @@ func (s *Store) retractWhere(why string, match func(*model.Alert) int) int {
 		n++
 	}
 	return n
+}
+
+// escPrefix 是“只撤销其中一级升级”的撤销说明前缀：告警按原等级计入事件，而不是整条撤销。
+const escPrefix = "升级已撤销："
+
+// markAlertLocked 写时复制地修改告警的撤销说明（reason 为空表示恢复）：事件详情、攻击源详情在解锁后序列化的
+// 仍是原来的告警对象，不会读写冲突。攻击源详情里的最近告警同样换成副本。调用方持写锁。
+func (s *Store) markAlertLocked(idx int, reason string) {
+	old := s.alerts[idx]
+	c := *old
+	c.Retracted = reason
+	s.alerts[idx] = &c
+	if p := s.ips[old.SrcIP]; p != nil {
+		for k, r := range p.Recent {
+			if r == old {
+				p.Recent[k] = &c
+			}
+		}
+	}
+}
+
+// countedSev 返回告警计入事件等级的值：整条撤销的不计入（ok 为 false），撤销了升级的按原等级。
+func countedSev(a *model.Alert) (model.Severity, bool) {
+	switch {
+	case a.Retracted == "":
+		return a.Severity, true
+	case strings.HasPrefix(a.Retracted, escPrefix):
+		return max(a.Severity-1, model.SevInfo), true
+	}
+	return 0, false
+}
+
+// closedByRetract 判断事件是否因自学习纠错撤销了全部告警而被标为误报（之后没有人工处理过）。
+func closedByRetract(i *Incident) bool {
+	if i.Status != IncFalsePositive || len(i.Notes) == 0 {
+		return false
+	}
+	n := i.Notes[len(i.Notes)-1]
+	return n.User == "自学习" && strings.HasPrefix(n.Action, "自学习纠错：") && strings.Contains(n.Action, "标为误报")
+}
+
+// Restore 撤销自学习的纠错（返回调整的事件数），与 Retract 对称，纠错本身也可以被纠正：
+//   - rule 非空：管理员重新启用了被停用的观察规则，它生成的告警恢复计入事件等级；
+//   - ip 非空：被撤销自动确认（站点常客）的来源之后出现了攻击的客观证据（成功利用、回连、诱饵），
+//     它因自动确认升级过一级的告警恢复为升级后的等级。
+//
+// 事件等级只会上调；因纠错全部撤销而标为误报、之后没有人工处理过的事件重新打开（仍是该来源当前的事件时）。
+// 分析员已经关闭的事件保持原状，只清除告警上的撤销标记；被模型下调过的事件以下调记录为准。
+func (s *Store) Restore(rule, ip, why string) int {
+	if rule == "" && ip == "" {
+		return 0
+	}
+	match := func(a *model.Alert) bool {
+		if a == nil || a.Retracted == "" || a.IncidentID == 0 {
+			return false
+		}
+		esc := strings.HasPrefix(a.Retracted, escPrefix)
+		return rule != "" && a.RuleID == rule && !esc || ip != "" && a.SrcIP == ip && esc
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	byInc := map[uint64][]int{}
+	for _, a := range s.alerts {
+		if match(a) {
+			byInc[a.IncidentID] = nil
+		}
+	}
+	if len(byInc) == 0 {
+		return 0
+	}
+	for idx, a := range s.alerts {
+		if a != nil {
+			if _, ok := byInc[a.IncidentID]; ok {
+				byInc[a.IncidentID] = append(byInc[a.IncidentID], idx)
+			}
+		}
+	}
+	now := time.Now()
+	var touched []*Incident
+	for id, list := range byInc {
+		for _, idx := range list {
+			if match(s.alerts[idx]) {
+				s.markAlertLocked(idx, "")
+			}
+		}
+		inc := s.incidents[id]
+		if inc == nil || inc.AIFrom != 0 {
+			continue
+		}
+		reopen := closedByRetract(inc) && s.incByKey[inc.Key] == inc.ID
+		if !inc.active() && !reopen {
+			continue
+		}
+		sev, kept := model.SevInfo, 0
+		for _, idx := range list {
+			if as, ok := countedSev(s.alerts[idx]); ok {
+				kept++
+				sev = max(sev, as)
+			}
+		}
+		if kept == 0 {
+			continue
+		}
+		old := inc.Severity
+		switch {
+		case reopen:
+			inc.Status, inc.Closed, inc.ClosedSev = IncOpen, time.Time{}, 0
+			inc.Severity = sev
+			inc.Due, inc.Reminded = now.Add(slaFor(sev, inc.AssetLevel)), false
+			inc.Notes = appendNote(inc.Notes, IncidentNote{Time: now, User: "自学习", Action: "撤销自学习纠错：" + why + "，告警重新计入，事件重新打开（" + sev.Label() + "）"})
+		case sev > old:
+			inc.Severity = sev
+			if due := inc.Created.Add(slaFor(sev, inc.AssetLevel)); due.Before(inc.Due) {
+				inc.Due, inc.Reminded = due, false
+			}
+			inc.Notes = appendNote(inc.Notes, IncidentNote{Time: now, User: "自学习", Action: "撤销自学习纠错：" + why + "，事件等级由" + old.Label() + "恢复为" + sev.Label()})
+		default:
+			continue
+		}
+		inc.touch(now)
+		touched = append(touched, inc)
+	}
+	s.journalLocked(touched...) // 恢复很少发生且不能从日志重新推导，与人工处置一样先落盘
+	return len(touched)
 }
 
 // archivePhases 是自动归档允许的攻击阶段：只有侦察与口令尝试、没有越过这一步的事件。

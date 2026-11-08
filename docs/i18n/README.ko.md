@@ -171,7 +171,7 @@ go build -o bin/netsa ./cmd/netsa
 
 ## 개발
 
-Go 1.25 이상이 필요합니다(릴리스 버전은 Go 1.27로 빌드). 순수 Go 구현이며 CGO를 사용하지 않습니다.
+Go 1.26 이상이 필요합니다(릴리스 버전은 Go 1.27로 빌드). 순수 Go 구현이며 CGO를 사용하지 않습니다.
 
 ```bash
 go build -o bin/netsa ./cmd/netsa
