@@ -632,6 +632,8 @@
       <label class="field"><span class="flabel">有效天数</span><input id="lpDays" type="number" min="1" max="365" step="1"></label>
       <label class="field"><span class="flabel">学习窗口（天）</span><input id="lpWindow" type="number" min="0" max="3650" step="1"></label>
       <div class="hint">更早的人工结论不再参与校准与建议，业务变化后旧结论自动失效，相应的校准自动撤销；0 表示不限。</div>
+      <label class="inline"><input type="checkbox" id="lpArchive"> 自动归档已结束的低风险事件：只有侦察或口令尝试、没有疑似成功、中危及以下、不涉及核心资产、无人处理过的事件，在下面的天数内没有新的活动后自动归档为“已处置”（同一来源再出现会作为新事件）</label>
+      <label class="field"><span class="flabel">归档天数</span><input id="lpArchiveDays" type="number" min="1" max="90" step="1"></label>
       <div class="hint">保存后立即生效，变化记入进化日志与审计链，并优先于配置文件 learn 段。误报抑制会隐藏告警，始终需要人工采纳，不会自动生效。</div>
       <div class="form-msg" id="lpMsg" role="status"></div>
     </div>

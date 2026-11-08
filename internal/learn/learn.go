@@ -49,6 +49,9 @@ type Options struct {
 	EscalateDays int  `json:"escalate_days"` // 默认 30
 	// WindowDays 学习窗口（天）：更早的结论不再参与校准与建议，环境变化后旧结论自动失效。0 取默认 180，负数不限
 	WindowDays int `json:"window_days"`
+	// ArchiveOff 关闭自动归档已结束的低风险事件；ArchiveDays 事件多少天没有活动后归档（0 取默认 3）
+	ArchiveOff  bool `json:"archive_off,omitempty"`
+	ArchiveDays int  `json:"archive_days,omitempty"`
 }
 
 // Policy 是可在 Web 管理页面调整的自学习策略，保存在学习状态中，优先于配置文件。
@@ -58,7 +61,9 @@ type Policy struct {
 	MaxPrecision float64   `json:"max_precision"`
 	Escalate     bool      `json:"escalate"`
 	EscalateDays int       `json:"escalate_days"`
-	WindowDays   int       `json:"window_days"` // 0 表示不限
+	WindowDays   int       `json:"window_days"`            // 0 表示不限
+	ArchiveOff   bool      `json:"archive_off,omitempty"`  // 关闭自动归档（零值为开启：旧版本保存的策略没有这一项）
+	ArchiveDays  int       `json:"archive_days,omitempty"` // 0 取默认 3 天
 	UpdatedBy    string    `json:"updated_by,omitempty"`
 	Updated      time.Time `json:"updated,omitzero"`
 }
@@ -73,6 +78,8 @@ func (p Policy) check() error {
 		return errors.New("确认攻击源的有效天数应在 1 ~ 365 之间")
 	case p.WindowDays < 0 || (p.WindowDays > 0 && p.WindowDays < 7) || p.WindowDays > 3650:
 		return errors.New("学习窗口应为 0（不限）或 7 ~ 3650 天")
+	case p.ArchiveDays < 0 || p.ArchiveDays > 90:
+		return errors.New("自动归档的天数应在 1 ~ 90 之间")
 	}
 	return nil
 }
@@ -84,6 +91,7 @@ func (o *Options) apply(p Policy) {
 	if o.WindowDays == 0 {
 		o.WindowDays = -1
 	}
+	o.ArchiveOff, o.ArchiveDays = p.ArchiveOff, p.ArchiveDays
 	o.CtxMinFP = max(3, o.MinVerdicts-2)
 }
 
@@ -195,6 +203,7 @@ type Change struct {
 	Time   time.Time `json:"time"`
 	Kind   string    `json:"kind"` // calibrate / restore / calibrate_ctx / restore_ctx / pin / unpin / apply / dismiss
 	Rule   string    `json:"rule,omitempty"`
+	IP     string    `json:"ip,omitempty"` // 涉及的来源（撤销自动确认等）
 	Detail string    `json:"detail"`
 	User   string    `json:"user"`
 }
@@ -225,6 +234,8 @@ type Learner struct {
 	nets       map[string]*LearnedNet // 从防火墙日志自动学习的内网网段（见 netlearn.go）
 	netPending map[string]*netObs
 	auto       map[string]*AutoSource // 自动确认的攻击源（见 attacklearn.go）
+	outcomes   map[string]*Outcome    // 来源的客观结论（见 loop.go）
+	loop       LoopStats              // 自我纠错与自动处置的统计
 	autoSnap   atomic.Pointer[map[string]AutoSource]
 	atk        attackState
 	prof       profileState // 参数的正常取值与站点产品（见 profile.go、site.go）
@@ -241,6 +252,11 @@ type Learner struct {
 
 	// OnChange 在产生进化日志时调用（写入审计链），调用时不持锁。
 	OnChange func(Change)
+	// AttackerLike 判断来源的行为本身像攻击者（模型判断经核实误判较多时，只自动确认这样的来源）。为空时视为否。
+	AttackerLike func(ip string) bool
+	// OnRetract 在撤销自动确认、停用观察规则后调用（异步），由状态库回溯修正仍在处置的事件。
+	OnRetract func(rule, ip, why string)
+
 	// PriorAttacks 返回来源此前的攻击次数（业务接口学习只用此前没有攻击记录的访客），为空时视为 0。
 	PriorAttacks func(ip string) int64
 	// RegularUser 判断来源是否为站点的常客（大量正常访问、攻击命中占比很低）。模型只看到告警、看不到这些正常访问，
@@ -263,6 +279,8 @@ type state struct {
 	Intranet  []LearnedNet         `json:"intranet,omitempty"`
 	Attack    *attackPersist       `json:"attack,omitempty"`
 	Profile   *profilePersist      `json:"profile,omitempty"`
+	Outcomes  []Outcome            `json:"outcomes,omitempty"`
+	Loop      *LoopStats           `json:"loop,omitempty"`
 }
 
 // Load 读取学习状态（文件不存在时从零开始）。
@@ -281,7 +299,7 @@ func Load(opt Options) (*Learner, error) {
 	}
 	opt.CtxMinFP = max(3, opt.MinVerdicts-2)
 	l := &Learner{opt: opt, cases: map[uint64]*Case{}, pinned: map[string]bool{}, handled: map[string]string{},
-		users: map[string]*userBase{}, comp: map[string]string{}, ai: map[uint64]*AIRecord{}, nets: map[string]*LearnedNet{}, netPending: map[string]*netObs{}, auto: map[string]*AutoSource{},
+		users: map[string]*userBase{}, comp: map[string]string{}, ai: map[uint64]*AIRecord{}, nets: map[string]*LearnedNet{}, netPending: map[string]*netObs{}, auto: map[string]*AutoSource{}, outcomes: map[string]*Outcome{},
 		atk: attackState{campaigns: map[string]*Campaign{}, cand: map[string]*candidate{}, rules: map[string]*LearnedRule{}}}
 	l.applied.since = time.Now()
 	if opt.Path != "" {
@@ -327,6 +345,14 @@ func Load(opt Options) (*Learner, error) {
 				l.loadAttackLocked(*st.Attack)
 			}
 			l.loadProfileLocked(st.Profile)
+			for i := range st.Outcomes {
+				if o := st.Outcomes[i]; o.IP != "" {
+					l.outcomes[o.IP] = &o
+				}
+			}
+			if st.Loop != nil {
+				l.loop = *st.Loop
+			}
 			if p := st.Policy; p != nil && p.check() == nil { // 界面设置的策略优先于配置文件
 				l.policy = p
 				l.opt.apply(*p)
@@ -336,6 +362,10 @@ func Load(opt Options) (*Learner, error) {
 	n := len(l.changes)
 	l.recomputeLocked(time.Now(), "")
 	l.changes, l.dirty = l.changes[:n], false // 启动时重建快照，不重复记录进化日志
+	if l.migrateLoopLocked() {
+		// 从进化日志补齐的客观结论可能让模型的自动确认收紧：这次变化写入进化日志
+		l.refreshAIStatsLocked(time.Now())
+	}
 	return l, nil
 }
 
@@ -356,6 +386,9 @@ func (l *Learner) Save() error {
 	ap := l.attackPersistLocked()
 	st.Attack = &ap
 	st.Profile = l.profilePersistLocked()
+	st.Outcomes = l.outcomeListLocked()
+	loop := l.loop
+	st.Loop = &loop
 	for _, c := range l.cases {
 		st.Cases = append(st.Cases, c)
 	}
@@ -644,7 +677,7 @@ func (l *Learner) recomputeLocked(now time.Time, user string) []Change {
 		l.logLocked(c)
 	}
 
-	l.aiStats = l.aiStatsLocked()
+	changes = append(changes, l.refreshAIStatsLocked(now)...) // 客观结论变化后，模型的评估与自动确认的收紧状态随之更新
 
 	// 建议：同一规则在同一目标上多次被研判为误报、且从未确认为攻击；同一来源多次被整体研判为误报
 	var sugs []Suggestion
@@ -995,6 +1028,7 @@ type Report struct {
 	Attack      AttackReport  `json:"attack"`    // 从日志与 AI 研判中自动学习的攻击行为
 	Profile     ProfileReport `json:"profile"`   // 从正常流量学习的参数取值与站点产品
 	Feeds       []FeedStat    `json:"feeds"`     // 威胁情报源的研判统计与自动校准
+	Loop        LoopReport    `json:"loop"`      // 自我纠错与自动处置
 }
 
 // Report 返回自学习状态概览。
@@ -1021,6 +1055,7 @@ func (l *Learner) Report() Report {
 	r.Attack = l.attackReportLocked()
 	r.Profile = l.profileReportLocked()
 	r.Feeds = append([]FeedStat{}, l.feedStats...)
+	r.Loop = l.loopReportLocked()
 	r.Cases = len(l.cases)
 	now := time.Now()
 	r.Trend = weekTrend(l.cases, now)

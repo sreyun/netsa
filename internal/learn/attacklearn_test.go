@@ -1,6 +1,8 @@
 package learn
 
 import (
+	"encoding/json"
+	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -314,5 +316,176 @@ func TestRequestShape(t *testing.T) {
 		if got != c.want {
 			t.Errorf("%s %s: %q，期望 %q", c.method, c.uri, got, c.want)
 		}
+	}
+}
+
+// 自我进化闭环：模型把三个员工出口地址判为攻击并被自动确认，之后它们被核实为站点常客而撤销 ——
+// 这是模型误判的客观结论：模型被评估为“判为攻击的结论误判 3 / 3 次”，自动收紧按模型判断的自动确认
+// （只确认行为本身也像攻击者的来源），撤销同时通知状态库回溯修正事件；状态重启后保留、不重复记日志。
+func TestSelfCorrectionLoop(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "learn.json")
+	l := attackLearner(t, path)
+	now := time.Now()
+	office := []string{"101.231.58.190", "180.169.235.202", "180.169.235.203"}
+	for i, ip := range office {
+		l.RecordAI(uint64(i+1), AIRecord{Verdict: "attack", Confidence: 95, Model: "m", Source: ip, Time: now})
+	}
+	got := make(chan string, 10)
+	l.OnRetract = func(rule, ip, why string) { got <- ip + "|" + why }
+	regular := map[string]bool{office[0]: true, office[1]: true, office[2]: true}
+	l.RegularUser = func(ip string) bool { return regular[ip] }
+	l.Refresh(now)
+
+	r := l.Report()
+	if len(r.AI) != 1 || !r.AI[0].Gated || r.AI[0].AtkJudged != 3 || r.AI[0].AtkWrong != 3 || r.AI[0].ObjOvercall != 3 || r.AI[0].Pending != 0 {
+		t.Fatalf("模型应按客观结论评估并收紧: %+v", r.AI)
+	}
+	if r.Loop.Revoked != 3 || r.Loop.Outcomes != 3 || !r.Loop.Gated["m"] {
+		t.Fatalf("闭环统计: %+v", r.Loop)
+	}
+	kinds := map[string]int{}
+	for _, c := range r.Changes {
+		kinds[c.Kind]++
+	}
+	if kinds["ai_gate"] != 1 || kinds["revoke_auto"] != 3 {
+		t.Fatalf("进化日志: %v", kinds)
+	}
+	for range office {
+		select {
+		case s := <-got:
+			if !strings.Contains(s, "站点常客") {
+				t.Fatalf("回溯原因: %q", s)
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatal("撤销后应通知状态库回溯修正")
+		}
+	}
+
+	// 收紧后：行为不像攻击者的来源不再凭模型判断确认，像攻击者的照常确认
+	attacker := map[string]bool{"79.124.58.130": true}
+	l.AttackerLike = func(ip string) bool { return attacker[ip] }
+	l.RecordAI(10, AIRecord{Verdict: "attack", Confidence: 95, Model: "m", Source: "203.0.113.9", Time: now})
+	l.RecordAI(11, AIRecord{Verdict: "attack", Confidence: 95, Model: "m", Source: "79.124.58.130", Time: now})
+	if _, ok := l.confirmedSource("203.0.113.9", now); ok {
+		t.Fatal("收紧后行为不像攻击者的来源不应凭模型判断确认")
+	}
+	if _, ok := l.confirmedSource("79.124.58.130", now); !ok {
+		t.Fatal("行为像攻击者的来源照常确认")
+	}
+	// 有证据的成功利用是攻击的客观结论：模型判对的次数增加，误判比例降到三成以下（3/11）后自动恢复
+	for i, ip := range []string{"198.51.100.31", "198.51.100.32", "198.51.100.33", "198.51.100.34", "198.51.100.35", "198.51.100.36", "198.51.100.37", "198.51.100.38"} {
+		l.ConfirmSource(ip, "evidence", "攻击成功且有证据", now)
+		l.RecordAI(uint64(20+i), AIRecord{Verdict: "attack", Confidence: 90, Model: "m", Source: ip, Time: now})
+	}
+	r = l.Report()
+	if r.AI[0].Gated || r.Loop.Gated["m"] || r.AI[0].ObjAgree != 8 {
+		t.Fatalf("误判比例降到 3/11（三成以下）应恢复: %+v %+v", r.AI[0], r.Loop)
+	}
+	// 登记为授权扫描同样是客观结论
+	l.RecordAI(40, AIRecord{Verdict: "attack", Confidence: 90, Model: "m", Source: "10.20.0.5", Time: now})
+	l.NoteOutcome("10.20.0.5", false, "登记为授权扫描：每周漏扫")
+	l.NoteOutcome("10.20.0.0/24", false, "网段不记")
+	if r = l.Report(); r.AI[0].ObjOvercall != 4 || r.Loop.Outcomes != 12 {
+		t.Fatalf("授权扫描应计为模型误判: %+v outcomes=%d", r.AI[0], r.Loop.Outcomes)
+	}
+
+	if err := l.Save(); err != nil {
+		t.Fatal(err)
+	}
+	l2 := attackLearner(t, path)
+	r2 := l2.Report()
+	if r2.Loop.Revoked != 3 || r2.Loop.Outcomes != 12 || r2.AI[0].ObjOvercall != 4 || len(r2.Changes) != len(r.Changes) {
+		t.Fatalf("重启后应保留闭环状态且不重复记日志: %+v changes %d/%d", r2.Loop, len(r2.Changes), len(r.Changes))
+	}
+}
+
+// 停用观察规则（自动或管理员）后通知状态库回溯；自动归档策略默认开启（旧版本保存的策略没有这一项），可关闭。
+func TestRuleOffRetractAndArchivePolicy(t *testing.T) {
+	l := attackLearner(t, "")
+	got := make(chan string, 4)
+	l.OnRetract = func(rule, ip, why string) { got <- rule }
+	l.atk.mu.Lock()
+	l.atk.rules["GET /x"] = &LearnedRule{ID: "learn-1", Shape: "GET /x", Time: time.Now()}
+	l.atk.mu.Unlock()
+	l.SetLearnedRule("learn-1", "admin", false)
+	select {
+	case rule := <-got:
+		if rule != "learn-1" {
+			t.Fatalf("回溯的规则: %q", rule)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("停用观察规则后应通知回溯")
+	}
+	if l.Report().Loop.RulesOff != 1 {
+		t.Fatal("应统计停用的观察规则")
+	}
+	if on, days := l.ArchivePolicy(); !on || days != 3 {
+		t.Fatalf("自动归档默认开启、3 天: %v %d", on, days)
+	}
+	p, _ := l.Policy()
+	p.ArchiveOff, p.ArchiveDays = true, 7
+	if err := l.SetPolicy(p, "admin"); err != nil {
+		t.Fatal(err)
+	}
+	if on, days := l.ArchivePolicy(); on || days != 7 {
+		t.Fatalf("关闭后: %v %d", on, days)
+	}
+	p.ArchiveDays = 100
+	if l.SetPolicy(p, "admin") == nil {
+		t.Fatal("归档天数超出范围应拒绝")
+	}
+}
+
+// 从旧版本升级：1.10.6 / 1.10.7 撤销自动确认、停用观察规则时还没有客观结论。加载时从进化日志补齐，
+// 模型据此评估（3 次判为攻击全部误判 → 收紧，写入进化日志），并对仍在处置的事件补做回溯；只补齐一次。
+func TestMigrateLoopFromChanges(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "learn.json")
+	at := time.Date(2026, 11, 8, 9, 7, 0, 0, time.Local)
+	st := state{
+		AI: map[uint64]*AIRecord{
+			68:  {Verdict: "attack", Confidence: 95, Model: "Qwen", Source: "101.231.58.190", Time: at.Add(-96 * time.Hour)},
+			126: {Verdict: "attack", Confidence: 95, Model: "Qwen", Source: "180.169.235.203", Time: at.Add(-96 * time.Hour)},
+			425: {Verdict: "attack", Confidence: 85, Model: "Qwen", Source: "180.169.235.202", Time: at.Add(-48 * time.Hour)},
+		},
+		Changes: []Change{
+			{Time: at, Kind: "revoke_auto", User: "自学习", Detail: "撤销自动确认的攻击源 180.169.235.203（模型 Qwen 以 95% 置信度判为攻击（事件 #126））：该来源是站点的常客"},
+			{Time: at, Kind: "revoke_auto", User: "自学习", Detail: "撤销自动确认的攻击源 180.169.235.202（模型 Qwen 以 85% 置信度判为攻击（事件 #425））：该来源是站点的常客"},
+			{Time: at, Kind: "revoke_auto", User: "自学习", Detail: "撤销自动确认的攻击源 101.231.58.190（模型 Qwen 以 95% 置信度判为攻击（事件 #68））：该来源是站点的常客"},
+			{Time: at.Add(3 * time.Minute), Kind: "discover_auto_off", Rule: "learn-4b5c24a2", User: "自学习", Detail: "自动停用观察规则 GET /uaa/api/ht/sid"},
+		},
+		Attack: &attackPersist{Rules: []LearnedRule{{ID: "learn-4b5c24a2", Shape: "GET /uaa/api/ht/sid", Disabled: true, AutoOff: "轮询"}}},
+	}
+	data, _ := json.Marshal(st)
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	l := attackLearner(t, path)
+	r := l.Report()
+	if r.Loop.Revoked != 3 || r.Loop.RulesOff != 1 || r.Loop.Outcomes != 3 || len(r.AI) != 1 || !r.AI[0].Gated {
+		t.Fatalf("应从进化日志补齐: %+v %+v", r.Loop, r.AI)
+	}
+	if r.Changes[0].Kind != "ai_gate" {
+		t.Fatalf("补齐后收紧应写入进化日志: %+v", r.Changes[0])
+	}
+	got := make(chan string, 8)
+	l.OnRetract = func(rule, ip, why string) { got <- rule + ip }
+	l.ReplayRetractions()
+	seen := map[string]bool{}
+	for range 4 {
+		select {
+		case s := <-got:
+			seen[s] = true
+		case <-time.After(2 * time.Second):
+			t.Fatalf("应补做回溯: %v", seen)
+		}
+	}
+	if !seen["learn-4b5c24a2"] || !seen["101.231.58.190"] {
+		t.Fatalf("回溯范围: %v", seen)
+	}
+	if err := l.Save(); err != nil {
+		t.Fatal(err)
+	}
+	if r2 := attackLearner(t, path).Report(); r2.Loop.Revoked != 3 || len(r2.Changes) != len(r.Changes) {
+		t.Fatalf("只补齐一次: %+v changes %d/%d", r2.Loop, len(r2.Changes), len(r.Changes))
 	}
 }

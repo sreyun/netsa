@@ -10,6 +10,7 @@ import (
 
 	"netsa/internal/audit"
 	"netsa/internal/auth"
+	"netsa/internal/authscan"
 	"netsa/internal/learn"
 	"netsa/internal/model"
 	"netsa/internal/suppress"
@@ -61,6 +62,48 @@ func TestLearnFeedbackAPI(t *testing.T) {
 	s.learnTick(time.Now())
 	if len(s.Learn.Report().Compliance) != 1 {
 		t.Fatal("应记录一次合规自检")
+	}
+}
+
+// 学习后的自动处置：后台任务按策略自动归档已结束的低风险事件，写入进化日志；登记授权扫描成为模型评估的客观结论；
+// 自动归档的事件不作为分析员的研判样本。
+func TestLearnTickAutoArchiveAndOutcome(t *testing.T) {
+	s, st := testServer(t, "", "")
+	s.Learn, _ = learn.Load(learn.Options{Calibrate: true})
+	old := time.Now().Add(-5 * 24 * time.Hour)
+	st.Record(&model.Event{Kind: model.KindWeb, SrcIP: "198.51.100.40", Host: "shop.example.com", Method: "GET", URI: "/.env", Status: 404, Time: old},
+		[]model.Hit{{RuleID: "bhv-dirscan", Name: "目录扫描", Category: "目录扫描", Severity: model.SevLow, Phase: model.PhaseRecon, Result: model.ResultFailed}})
+	st.Record(&model.Event{Kind: model.KindWeb, SrcIP: "198.51.100.41", Host: "shop.example.com", Method: "GET", URI: "/x?id=1'", Status: 200, Time: old},
+		[]model.Hit{{RuleID: "sqli-bool", Name: "SQL注入", Category: "SQL注入", Severity: model.SevHigh, Phase: model.PhaseExploit, Result: model.ResultPassed}})
+	s.learnTick(time.Now())
+	r := s.Learn.Report()
+	if r.Loop.Archived != 1 || r.Cases != 0 {
+		t.Fatalf("应归档 1 个侦察事件且不作为研判样本: %+v cases=%d", r.Loop, r.Cases)
+	}
+	if r.Changes[0].Kind != "auto_archive" || !strings.Contains(r.Changes[0].Detail, "#1") {
+		t.Fatalf("进化日志: %+v", r.Changes[0])
+	}
+	h := s.Handler()
+	rec := do(h, http.MethodGet, "/api/incidents?status=active", "", nil)
+	if !strings.Contains(rec.Body.String(), "198.51.100.41") || strings.Contains(rec.Body.String(), "198.51.100.40") {
+		t.Fatalf("待处置列表应只剩越过侦察的事件: %s", rec.Body.String())
+	}
+	// 登记授权扫描：成为该来源“不是攻击者”的客观结论，模型此前的判断据此评估
+	s.AuthScan, _ = authscan.Load("")
+	if rec := do(h, http.MethodPost, "/api/authscans", `{"ip":"10.20.0.5","hours":24,"note":"每周漏扫"}`, nil); rec.Code != 200 {
+		t.Fatalf("登记授权扫描: %d %s", rec.Code, rec.Body.String())
+	}
+	if n := s.Learn.Report().Loop.Outcomes; n != 1 {
+		t.Fatalf("登记授权扫描应记为客观结论: %d", n)
+	}
+	// 关闭自动归档后不再归档
+	p, _ := s.Learn.Policy()
+	p.ArchiveOff = true
+	if err := s.Learn.SetPolicy(p, "admin"); err != nil {
+		t.Fatal(err)
+	}
+	if on, _ := s.Learn.ArchivePolicy(); on {
+		t.Fatal("策略关闭后不应归档")
 	}
 }
 

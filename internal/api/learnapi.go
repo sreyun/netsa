@@ -197,6 +197,21 @@ func (s *Server) learnTick(now time.Time) {
 	if now.Sub(s.lastLearn) >= time.Hour { // 样本超过学习窗口后，相应的校准自动撤销
 		s.lastLearn = now
 		s.Learn.Refresh(now)
+		// 学习后的自动处置：已经结束的低风险事件自动归档，待处置列表留给真正需要处置的事件
+		if on, days := s.Learn.ArchivePolicy(); on && s.Store != nil {
+			if list := s.Store.AutoArchive(now, time.Duration(days)*24*time.Hour); len(list) > 0 {
+				ids := make([]string, 0, min(len(list), 10))
+				for _, v := range list[:min(len(list), 10)] {
+					ids = append(ids, "#"+strconv.FormatUint(v.ID, 10))
+				}
+				more := ""
+				if len(list) > 10 {
+					more = " 等"
+				}
+				s.Learn.RecordLoop("auto_archive", len(list), fmt.Sprintf("自动归档 %d 个已结束的低风险事件（只有侦察或口令尝试、没有疑似成功、中危及以下、%d 天没有新的活动）：%s%s",
+					len(list), days, strings.Join(ids, "、"), more))
+			}
+		}
 	}
 	if s.Cfg.Learn.ComplianceOn() && (s.lastComp.IsZero() || now.Sub(s.lastComp) >= time.Hour) {
 		s.lastComp = now

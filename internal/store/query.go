@@ -941,6 +941,15 @@ func (s *Store) RegularUser(ip string) bool {
 	return p != nil && p.WebReqs >= 1000 && p.Attacks*10 < p.WebReqs
 }
 
+// AttackerLike 判断来源的行为本身像攻击者：攻击命中不少于 20 次，且占其 Web 请求的三成以上
+// （只有防火墙日志的来源，如端口扫描器，只看攻击次数）。模型的判断经核实误判较多时，只自动确认这样的来源。
+func (s *Store) AttackerLike(ip string) bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	p := s.ips[ip]
+	return p != nil && p.Attacks >= 20 && (p.WebReqs == 0 || p.Attacks*10 >= p.WebReqs*3)
+}
+
 // Blocklist 返回达到指定等级的攻击者（不含内网地址），按评分降序。
 func (s *Store) Blocklist(min model.Severity) []AttackerSummary {
 	list, _ := s.Attackers(AttackerQuery{MinLevel: min, Sort: "score"})

@@ -396,9 +396,13 @@ type Alert struct {
 	Lat        float64   `json:"lat,omitempty"`
 	Lon        float64   `json:"lon,omitempty"`
 	IncidentID uint64    `json:"incident_id,omitempty"` // 所属安全事件
-	Asset      string    `json:"asset,omitempty"`       // 目标资产名称
-	AssetLevel string    `json:"asset_level,omitempty"` // 目标资产重要性：core / important / normal
-	Owner      string    `json:"owner,omitempty"`       // 资产负责人
-	Vuln       string    `json:"vuln,omitempty"`        // 关联的未修复漏洞
-	Proven     bool      `json:"proven,omitempty"`      // 有响应码之外的第二份成功证据
+	// Learned 是自学习对等级的调整（+1：来源被确认为攻击后升级一级；-1：按误报结论下调一级）；
+	// Retracted 是自学习纠错后撤销这条告警（或其中的升级）的原因：观察规则已停用、自动确认的来源被撤销
+	Learned    int8   `json:"learned,omitempty"`
+	Retracted  string `json:"retracted,omitempty"`
+	Asset      string `json:"asset,omitempty"`       // 目标资产名称
+	AssetLevel string `json:"asset_level,omitempty"` // 目标资产重要性：core / important / normal
+	Owner      string `json:"owner,omitempty"`       // 资产负责人
+	Vuln       string `json:"vuln,omitempty"`        // 关联的未修复漏洞
+	Proven     bool   `json:"proven,omitempty"`      // 有响应码之外的第二份成功证据
 }

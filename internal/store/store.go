@@ -700,7 +700,7 @@ func (s *Store) newAlert(ev *model.Event, h *model.Hit, p *IPProfile) *model.Ale
 	a := &model.Alert{
 		ID: s.nextID, Time: ev.Time, Kind: ev.Kind, SrcIP: ev.SrcIP, RuleID: h.RuleID, Name: h.Name,
 		Category: h.Category, Severity: h.Severity, Phase: h.Phase, Result: h.Result, Target: truncate(ev.Target(), 300),
-		Method: ev.Method, Status: ev.Status, Evidence: h.Evidence, UA: truncate(ev.UA, 200), Source: ev.Source, Proven: h.Proven,
+		Method: ev.Method, Status: ev.Status, Evidence: h.Evidence, UA: truncate(ev.UA, 200), Source: ev.Source, Proven: h.Proven, Learned: h.Learned,
 	}
 	if r := ev.Asset; r != nil {
 		a.Asset, a.AssetLevel, a.Owner = r.Name, r.Level, r.Owner

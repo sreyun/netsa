@@ -975,7 +975,7 @@ async function loadAlerts() {
     <td><b>${esc(a.name)}</b><div class="muted">${esc(a.category)} · ${esc(PHASE[a.phase] || a.phase)}</div></td>
     <td>${ipLink(a.src_ip)}<div class="muted">${esc(a.location || '')}</div></td>
     <td class="mono">${a.method ? esc(a.method) + ' ' : ''}${esc(a.target)}${a.status ? ` <span class="muted">[${a.status}]</span>` : ''}${assetLine(a)}</td>
-    <td>${resTag(a.result, a.proven)}</td><td class="evidence"><div class="ev-clamp" title="${esc(a.evidence)}">${esc(a.evidence)}</div></td>
+    <td>${resTag(a.result, a.proven)}${a.retracted ? ` <span class="chip" title="${esc(a.retracted)}">已撤销</span>` : ''}</td><td class="evidence"><div class="ev-clamp" title="${esc(a.evidence)}">${esc(a.evidence)}</div></td>
     <td class="nowrap">${a.incident_id ? `<button type="button" class="btn link" data-al="inc" data-i="${i}" title="打开所属的安全事件">事件 #${a.incident_id}</button>` : ''}
       ${ops ? `<button type="button" class="btn" data-al="fp" data-i="${i}" title="生成误报抑制规则，之后同类命中不再告警">标记误报</button>` : ''}
       ${ops && meta.rawlog ? `<button type="button" class="btn" data-al="raw" data-i="${i}" title="检索该来源前后 5 分钟的原始日志">原始日志</button>` : ''}</td></tr>`).join('');

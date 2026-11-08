@@ -192,6 +192,9 @@ func (l *Learner) ConfirmSource(ip, kind, reason string, at time.Time) bool {
 		at = time.Now()
 	}
 	l.mu.Lock()
+	if kind != "ai" { // 成功证据、回连、诱饵、同一攻击活动：客观结论是攻击者（模型的判断据此评估）
+		l.noteOutcomeLocked(ip, true, reason, at)
+	}
 	old := l.auto[ip]
 	if old != nil {
 		if at.After(old.Time) {
@@ -208,7 +211,7 @@ func (l *Learner) ConfirmSource(ip, kind, reason string, at time.Time) bool {
 	l.auto[ip] = &AutoSource{IP: ip, Kind: kind, Reason: reason, Time: at}
 	l.dirty = true
 	l.publishAutoLocked()
-	c := Change{Time: time.Now(), Kind: "confirm_auto", User: "自学习", Detail: "自动确认攻击源 " + ip + "：" + reason}
+	c := Change{Time: time.Now(), Kind: "confirm_auto", User: "自学习", IP: ip, Detail: "自动确认攻击源 " + ip + "：" + reason}
 	l.logLocked(c)
 	l.mu.Unlock()
 	l.emit([]Change{c})
@@ -301,12 +304,15 @@ func (l *Learner) ObserveAttack(ev *model.Event, hits []model.Hit) []model.Hit {
 			r.AutoOff = fmt.Sprintf("%s 在一小时内请求了 %d 次，是在轮询业务接口（心跳、会话保活、页面刷新），不是攻击探测", ev.SrcIP, n)
 			c := Change{Time: time.Now(), Kind: "discover_auto_off", Rule: r.ID, User: "自学习",
 				Detail: "自动停用观察规则 " + clipShape(shape) + "：" + r.AutoOff}
+			id := r.ID
 			st.mu.Unlock()
 			l.mu.Lock()
 			l.dirty = true
+			l.loop.RulesOff++
 			l.logLocked(c)
 			l.mu.Unlock()
 			l.emit([]Change{c})
+			l.retract(id, "", "观察规则 "+clipShape(shape)+" 已自动停用（被同一来源反复轮询，是业务接口）")
 			return hits
 		}
 		r.Hits++
@@ -498,8 +504,15 @@ func (l *Learner) SetLearnedRule(id, user string, enabled bool) bool {
 		Detail: verb + "自学习发现的观察规则 " + clipShape(shape)}
 	l.mu.Lock()
 	l.logLocked(c)
+	l.dirty = true
+	if !enabled {
+		l.loop.RulesOff++
+	}
 	l.mu.Unlock()
 	l.emit([]Change{c})
+	if !enabled { // 管理员认定学错了：它生成的告警不再计入仍在处置的事件
+		l.retract(id, "", "管理员 "+user+" 停用了观察规则 "+clipShape(shape))
+	}
 	return true
 }
 

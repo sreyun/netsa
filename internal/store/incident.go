@@ -797,3 +797,132 @@ func (i *Incident) migrateGrade(now time.Time) {
 	i.Notes = appendNote(i.Notes, IncidentNote{Time: now, User: "系统", Action: "定级规则升级：严重需要响应码之外的证据，等级由严重调整为高危；出现有证据的告警时自动升回"})
 	i.touch(now)
 }
+
+// ---------------- 自学习纠错回溯与自动归档 ----------------
+
+// escalatedByAuto 判断告警是否因来源被自动确认为攻击源而升级过一级（旧版本没有 Learned 字段，按证据中的说明识别）。
+func escalatedByAuto(a *model.Alert) bool {
+	if a.Learned > 0 {
+		return !strings.Contains(a.Evidence, "曾被分析员确认为攻击")
+	}
+	return strings.Contains(a.Evidence, "已被自动确认为攻击源") && strings.Contains(a.Evidence, "等级上调一级")
+}
+
+// Retract 在自学习撤销了自己学到的东西之后，回溯修正仍在处置的事件（返回调整的事件数）：
+//   - rule 非空：观察规则被停用（被业务接口的轮询触发、或管理员停用），它生成的告警标记为已撤销、不再计入事件等级；
+//   - ip 非空：只凭模型判断确认的攻击源被撤销（站点常客），该来源因此升级过一级的告警按原等级计算。
+//
+// 事件等级按保留的告警重新计算，只会下调；全部告警都被撤销的事件标为误报（之后出现更高等级的告警会自动重新打开）。
+// 告警已被淘汰、无从核对的事件不动；被模型下调过的事件以下调记录为准，不重复调整。
+func (s *Store) Retract(rule, ip, why string) int {
+	if rule == "" && ip == "" {
+		return 0
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	byInc := map[uint64][]*model.Alert{}
+	for _, a := range s.alerts {
+		if a == nil || a.IncidentID == 0 {
+			continue
+		}
+		if (rule != "" && a.RuleID == rule) || (ip != "" && a.SrcIP == ip) {
+			byInc[a.IncidentID] = nil // 先记下涉及的事件，下面再收集它们的全部告警
+		}
+	}
+	if len(byInc) == 0 {
+		return 0
+	}
+	for _, a := range s.alerts {
+		if a != nil {
+			if _, ok := byInc[a.IncidentID]; ok {
+				byInc[a.IncidentID] = append(byInc[a.IncidentID], a)
+			}
+		}
+	}
+	now := time.Now()
+	n := 0
+	for id, list := range byInc {
+		inc := s.incidents[id]
+		if inc == nil || !inc.active() || inc.AIFrom != 0 {
+			continue
+		}
+		sev, kept := model.SevInfo, 0
+		for _, a := range list {
+			as := a.Severity
+			switch {
+			case rule != "" && a.RuleID == rule:
+				a.Retracted = why
+				continue
+			case ip != "" && a.SrcIP == ip && escalatedByAuto(a):
+				if a.Retracted == "" {
+					a.Retracted = "升级已撤销：" + why
+				}
+				as = max(as-1, model.SevInfo)
+			case a.Retracted != "" && strings.HasPrefix(a.RuleID, "learn-"):
+				continue // 此前已撤销的观察规则告警
+			}
+			kept++
+			sev = max(sev, as)
+		}
+		if kept > 0 && sev >= inc.Severity {
+			continue
+		}
+		old := inc.Severity
+		if kept == 0 {
+			inc.Status, inc.Closed, inc.ClosedSev = IncFalsePositive, now, old
+			inc.Notes = appendNote(inc.Notes, IncidentNote{Time: now, User: "自学习", Action: "自学习纠错：" + why + "，事件的告警全部撤销，标为误报（之后出现更高等级的告警会自动重新打开）"})
+		} else {
+			inc.Severity = sev
+			inc.Due, inc.Reminded = inc.Created.Add(slaFor(sev, inc.AssetLevel)), false
+			inc.Notes = appendNote(inc.Notes, IncidentNote{Time: now, User: "自学习", Action: "自学习纠错：" + why + "，事件等级由" + old.Label() + "调整为" + sev.Label() + "，处置时限相应放宽"})
+		}
+		inc.touch(now)
+		n++
+	}
+	return n
+}
+
+// archivePhases 是自动归档允许的攻击阶段：只有侦察与口令尝试、没有越过这一步的事件。
+var archivePhases = map[string]bool{"recon": true, "credential": true}
+
+// AutoArchive 自动归档已经结束的低风险事件（返回归档的事件）：只有侦察（端口扫描、目录扫描、漏洞探测）与口令尝试、
+// 没有疑似成功、中危及以下、不涉及核心资产、没有指派也没有人工备注，且 idle 时间内没有新的活动。
+// 互联网上的背景扫描每天产生大量这样的事件，待处置列表被它们淹没后，真正需要处置的事件反而被忽略。
+// 归档为“已处置”并写明原因；之后同一来源再出现会作为新事件，不会被归档吞掉。
+func (s *Store) AutoArchive(now time.Time, idle time.Duration) []IncidentView {
+	if idle <= 0 {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var out []IncidentView
+	for _, inc := range s.incidents {
+		if !inc.active() || inc.Assignee != "" || inc.Success > 0 || inc.Proven > 0 || inc.Severity > model.SevMedium ||
+			assetRank(inc.AssetLevel) >= assetRank("core") || now.Sub(inc.LastSeen) < idle || len(inc.Phases) == 0 {
+			continue
+		}
+		ok := true
+		for ph, c := range inc.Phases {
+			if c > 0 && !archivePhases[ph] {
+				ok = false
+				break
+			}
+		}
+		for _, nt := range inc.Notes {
+			if nt.User != "系统" && nt.User != "自学习" && !strings.HasPrefix(nt.User, "AI") {
+				ok = false // 有人处理过（写了备注、改过状态或指派）；系统说明与 AI 研判记录不算
+				break
+			}
+		}
+		if !ok {
+			continue
+		}
+		days := int(idle.Hours() / 24)
+		inc.Status, inc.Closed, inc.ClosedSev = IncResolved, now, inc.Severity
+		inc.Notes = appendNote(inc.Notes, IncidentNote{Time: now, User: "自学习", Action: fmt.Sprintf("自动归档：只有侦察或口令尝试、没有疑似成功、%s，且 %d 天没有新的活动；同一来源之后再出现会作为新事件", inc.Severity.Label(), days)})
+		inc.touch(now)
+		out = append(out, inc.view(now))
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
+	return out
+}

@@ -447,6 +447,9 @@ type Info struct {
 
 // Info 返回所有机器人及最近的推送记录（新的在前）。
 func (n *Notifier) Info() Info {
+	if n == nil { // 未配置推送（测试与嵌入使用）：没有机器人
+		return Info{Robots: []RobotView{}, History: []Record{}}
+	}
 	n.mu.Lock()
 	defer n.mu.Unlock()
 	info := Info{Persist: n.path != "", File: n.path, BaseURL: n.baseURL, DedupWindow: n.dedup.String(), Robots: []RobotView{}, History: []Record{}}

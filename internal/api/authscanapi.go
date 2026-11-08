@@ -78,6 +78,9 @@ func (s *Server) authScanCreate(w http.ResponseWriter, r *http.Request) {
 		detail += "，时间 " + e.Start.Format("2006-01-02 15:04") + " ~ " + e.End.Format("2006-01-02 15:04")
 	}
 	s.audit(r, "登记授权扫描", detail, err)
+	if err == nil && s.Learn != nil { // 客观结论：授权扫描不是攻击者，模型此前的“攻击”判断据此评估
+		s.Learn.NoteOutcome(strings.TrimSpace(f.IP), false, "登记为授权扫描："+strings.TrimSpace(f.Note))
+	}
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return

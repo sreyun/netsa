@@ -63,7 +63,7 @@ import (
 
 // version 是构建版本号。默认值用于本地构建；镜像构建通过
 // -ldflags "-X main.version=<tag>" 注入，`netsa version` 与 /api/meta 都会显示注入后的值。
-var version = "1.10.7"
+var version = "1.10.8"
 
 func usage() {
 	fmt.Fprintf(os.Stderr, `netsa %s —— 网络安全态势感知与攻击面分析系统
@@ -250,11 +250,17 @@ func build(cfg *config.Config) (*app, error) {
 		Escalate: cfg.Learn.EscalateOn(), EscalateDays: cfg.Learn.EscalateDays, WindowDays: cfg.Learn.WindowDays}); err != nil {
 		return nil, err
 	}
-	a.learn.PriorAttacks = a.store.AttackCount // 业务接口学习只用此前没有攻击记录的访客
-	a.learn.RegularUser = a.store.RegularUser  // 站点常客不凭模型判断自动确认为攻击源
-	a.store.Calibrate = a.learn.Calibrate      // 状态库生成的情报命中同样按情报源的准确率校准
-	a.store.OASTLinks = a.learn.OASTLinks      // 同一 OAST 关联标识的来源归入同一攻击活动
-	a.store.DecoyLinks = a.deception.Links     // 使用同一诱饵线索、诱饵账号的来源互相关联
+	a.learn.PriorAttacks = a.store.AttackCount       // 业务接口学习只用此前没有攻击记录的访客
+	a.learn.RegularUser = a.store.RegularUser        // 站点常客不凭模型判断自动确认为攻击源
+	a.learn.AttackerLike = a.store.AttackerLike      // 模型判断经核实误判较多时，只自动确认行为本身像攻击者的来源
+	a.learn.OnRetract = func(rule, ip, why string) { // 自学习撤销学到的东西后，回溯修正仍在处置的事件
+		if n := a.store.Retract(rule, ip, why); n > 0 {
+			a.learn.RecordLoop("retract", n, fmt.Sprintf("回溯修正 %d 个仍在处置的事件：%s", n, why))
+		}
+	}
+	a.store.Calibrate = a.learn.Calibrate  // 状态库生成的情报命中同样按情报源的准确率校准
+	a.store.OASTLinks = a.learn.OASTLinks  // 同一 OAST 关联标识的来源归入同一攻击活动
+	a.store.DecoyLinks = a.deception.Links // 使用同一诱饵线索、诱饵账号的来源互相关联
 	if added := geo.AddInternalNetworks(a.learn.LearnedNets()); len(added) > 0 {
 		log.Printf("[learn] 载入自动识别的内网网段: %s", strings.Join(added, ", "))
 	}
@@ -494,6 +500,8 @@ func cmdServe(args []string) error {
 			log.Printf("[store] 已从处置记录日志恢复 %d 次事件变更", n)
 		}
 	}
+	// 已停用的观察规则、已撤销的自动确认：对仍在处置的事件补做纠错回溯（幂等，旧版本撤销时还没有回溯）
+	a.learn.ReplayRetractions()
 	// 快照中的定位结果可能来自旧版定位库或旧的自定义网段，按当前库重新定位
 	if n := a.store.RefreshGeo(a.geo.Relocate); n > 0 {
 		log.Printf("[geo] 已按当前定位库更新 %d 个历史攻击源的归属地", n)

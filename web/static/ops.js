@@ -186,7 +186,7 @@ async function openIncident(id) {
   const notes = (d.notes_list || []).slice().reverse().map((n) => `<li><span class="muted nowrap">${esc(fmtShort(n.time))}</span> <b>${esc(n.user)}</b>
     ${n.action ? `<span class="tl-act">${esc(n.action)}</span>` : ''}${n.text ? `<div class="tl-text">${esc(n.text)}</div>` : ''}</li>`).join('');
   const alerts = (d.alert_list || []).map((a, k) => `<tr><td class="nowrap muted">${esc(fmtShort(a.time))}</td><td>${badge(a.severity)} ${esc(a.name)}</td>
-    <td class="mono">${a.method ? esc(a.method) + ' ' : ''}${esc(a.target)}${assetLine(a)}</td><td>${resTag(a.result, a.proven)}</td><td class="evidence"><div class="ev-clamp" title="${esc(a.evidence)}">${esc(a.evidence)}</div></td>
+    <td class="mono">${a.method ? esc(a.method) + ' ' : ''}${esc(a.target)}${assetLine(a)}</td><td>${resTag(a.result, a.proven)}${a.retracted ? ` <span class="chip" title="${esc(a.retracted)}">已撤销</span>` : ''}</td><td class="evidence"><div class="ev-clamp" title="${esc(a.evidence)}">${esc(a.evidence)}</div></td>
     <td class="nowrap">${canOperate() ? `<button type="button" class="btn" data-ia="fp" data-k="${k}">标记误报</button>` : ''}${canOperate() && meta.rawlog ? ` <button type="button" class="btn" data-ia="raw" data-k="${k}">原始日志</button>` : ''}</td></tr>`).join('');
   $('#incBody').innerHTML = `
     <div class="inc-head"><b>${esc(d.title)}</b></div>
@@ -1107,7 +1107,7 @@ $('#auVerify').addEventListener('click', () => ntBusy($('#auVerify'), async () =
 // ---------------- 自学习 ----------------
 const LN_CHANGE = { calibrate: '自动下调', restore: '恢复', calibrate_ctx: '目标级下调', restore_ctx: '目标级恢复', pin: '锁定', unpin: '解锁', apply: '采纳建议', dismiss: '忽略建议', policy: '策略调整',
   intranet: '识别内网网段', confirm_auto: '自动确认攻击源', revoke_auto: '撤销自动确认', discover: '发现未知攻击', discover_disable: '停用观察规则', discover_enable: '启用观察规则',
-  discover_auto_off: '自动停用观察规则' };
+  discover_auto_off: '自动停用观察规则', ai_gate: '收紧模型自动确认', ai_gate_off: '恢复模型自动确认', retract: '纠错回溯', auto_archive: '自动归档' };
 let lnPolicy = null;
 const LN_ANOM = { new_net: '新地址登录', odd_hour: '非常用时段', login_fail: '登录失败暴增', bulk_export: '批量导出', sensitive: '高危变更' };
 // 近 8 周人工结论中的误报占比（从早到晚）：持续下降说明检测在变准
@@ -1131,6 +1131,7 @@ async function loadLearn() {
   const lastComp = (r.compliance || []).slice(-1)[0];
   const nets = r.intranet || [];
   const atk = r.attack || { auto_sources: [], auto_total: 0, campaigns: [], learned_rules: [], candidates: 0 };
+  const loop = r.loop || { revoked: 0, rules_off: 0, retracted: 0, archived: 0, outcomes: 0, archive_on: false, archive_days: 3 };
   const prof = r.profile || { params: 0, mature: 0, free_text: 0, strict: 0, samples: [], sites: [], site_total: 0, weak: 0, anomaly: 0, inapplicable: 0 };
   const products = prof.sites.reduce((n, s) => n + s.products.length, 0);
   $('#lnKpis').innerHTML = [
@@ -1140,6 +1141,8 @@ async function loadLearn() {
       `内网网段 ${num(nets.length)} · 攻击源 ${num(atk.auto_total)} · 攻击活动 ${num(atk.campaigns.length)} · 观察规则 ${num(atk.learned_rules.length)} · 参数 ${num(prof.mature)} · 站点产品 ${num(products)}`],
     ['自动生效', num(r.applied.rule + r.applied.target + (r.applied.feed || 0) + r.applied.escalated),
       enabled ? `下调 ${num(r.applied.rule + r.applied.target + (r.applied.feed || 0))} · 升级 ${num(r.applied.escalated)} 次（${esc(fmtShort(r.applied.since))} 启动以来）` : '未启用自学习'],
+    ['自我纠错 · 自动处置', num(loop.revoked + loop.rules_off + loop.retracted + loop.archived),
+      `撤销确认 ${num(loop.revoked)} · 停用规则 ${num(loop.rules_off)} · 回溯事件 ${num(loop.retracted)} · 自动归档 ${num(loop.archived)}`],
     ['待确认建议', num(r.suggestions.length), '采纳后创建误报抑制'],
     ['平台安全异常', num(r.anomalies.length), r.options.sentinel ? '最近 100 条' : '已关闭'],
     ['合规符合率', lastComp ? Math.round(lastComp.rate * 100) + '%' : '-', lastComp ? `不符合 ${num(lastComp.fail)} 项 · ${esc(fmtShort(lastComp.time))}` : (r.options.compliance ? '启动后约 2 分钟首次自检' : '已关闭')],
@@ -1207,6 +1210,7 @@ async function loadLearn() {
   $('#lnPolicy').innerHTML = `自动生效策略：自动校准 <b>${pol.calibrate ? '开启' : '关闭'}</b>（规则级 ${num(r.calibrated)} 条：样本 ≥ ${num(pol.min_verdicts)}、准确率 ≤ ${Math.round(pol.max_precision * 100)}%；目标级 ${num(r.ctx_total)} 处：误报 ≥ ${num(r.options.ctx_min_fp)} 次）`
     + ` · 确认攻击源复现升级 <b>${pol.escalate ? '开启' : '关闭'}</b>（${num(pol.escalate_days)} 天内，当前 ${num(r.confirmed)} 个来源）`
     + ` · 学习窗口 <b>${pol.window_days ? `${num(pol.window_days)} 天` : '不限'}</b>${r.expired ? `（${num(r.expired)} 个样本已过期）` : ''}`
+    + ` · 自动归档 <b>${loop.archive_on ? '开启' : '关闭'}</b>（${num(loop.archive_days)} 天没有活动的低风险事件，累计 ${num(loop.archived)} 个）`
     + ` · <span>${r.policy_ui ? `界面设置（${esc(pol.updated_by)}，${esc(fmtShort(pol.updated))}）` : '来自配置文件 learn 段'}</span>`
     + lnTrendText(r.trend);
   const pct = (s) => (s.precision < 0 ? '-' : Math.round(s.precision * 100) + '%');
@@ -1238,10 +1242,10 @@ async function loadLearn() {
   const a = meta.ai || {};
   const pctOf = (n, d) => (d ? Math.round((n / d) * 100) + '%' : '-');
   const trust = (r.ai || []).length
-    ? `<table class="table ln-trust"><thead><tr><th>模型</th><th title="以分析员的处置结论为准">一致率</th><th>已评估</th><th title="模型判为误报、分析员确认是攻击">漏判</th><th title="模型判为攻击、分析员判为误报">误判为攻击</th><th title="置信度 ≥ 80% 的结论">高置信一致率</th><th>待处置</th></tr></thead><tbody>${r.ai.map((s) => `<tr>
-        <td class="mono">${esc(s.model)}</td><td>${s.rate < 0 ? `<span class="muted">样本不足</span>` : `<b>${Math.round(s.rate * 100)}%</b>`}</td><td>${num(s.judged)}</td>
-        <td>${s.missed ? `<span class="lv-high">${num(s.missed)}</span>` : '0'}</td><td>${num(s.overcall)}</td><td>${pctOf(s.high_agree, s.high_conf)}</td><td>${num(s.pending)}</td></tr>`).join('')}</tbody></table>
-        <div class="muted">分析员把事件处置为已处置 / 误报后，自动与模型当时的结论比对；模型结论不作为学习样本。已评估满 5 个事件后，AI 研判记录中会附上该模型的一致率。</div>`
+    ? `<table class="table ln-trust"><thead><tr><th>模型</th><th title="以分析员的处置结论为准">一致率</th><th>已评估</th><th title="模型判为误报、分析员确认是攻击">漏判</th><th title="模型判为攻击、分析员判为误报">误判为攻击</th><th title="置信度 ≥ 80% 的结论">高置信一致率</th><th title="尚无分析员结论、但系统掌握了来源客观结论（成功证据、回连、诱饵 / 站点常客、授权扫描）的研判">客观核实</th><th>待处置</th></tr></thead><tbody>${r.ai.map((s) => `<tr>
+        <td class="mono">${esc(s.model)}${s.gated ? ` <span class="chip warn" title="判为攻击的结论经核实误判 ${num(s.atk_wrong)} / ${num(s.atk_judged)} 次：只自动确认行为本身也像攻击者的来源">自动确认已收紧</span>` : ''}</td><td>${s.rate < 0 ? `<span class="muted">样本不足</span>` : `<b>${Math.round(s.rate * 100)}%</b>`}</td><td>${num(s.judged)}</td>
+        <td>${s.missed ? `<span class="lv-high">${num(s.missed)}</span>` : '0'}</td><td>${num(s.overcall)}</td><td>${pctOf(s.high_agree, s.high_conf)}</td><td>${s.obj_judged ? `${num(s.obj_agree)} / ${num(s.obj_judged)}` : '-'}${s.obj_overcall ? ` <span class="muted">误判为攻击 ${num(s.obj_overcall)}</span>` : ''}</td><td>${num(s.pending)}</td></tr>`).join('')}</tbody></table>
+        <div class="muted">分析员把事件处置为已处置 / 误报后，自动与模型当时的结论比对；没有人工结论时，用系统掌握的客观结论核实（成功证据、攻击后回连、命中诱饵是攻击；站点常客、授权扫描不是）。模型结论不作为学习样本；判为攻击的结论经核实误判达到三成时，自动收紧按模型判断自动确认攻击源。</div>`
     : '';
   $('#lnAI').innerHTML = (a.enabled
     ? `<div class="kv"><div class="k">模型</div><div class="mono">${esc(a.model)} <span class="muted">${esc(a.endpoint)}</span></div>
@@ -1277,6 +1281,8 @@ $('#lnPolicyEdit').addEventListener('click', () => {
   $('#lpEsc').checked = !!p.escalate;
   $('#lpDays').value = p.escalate_days || 30;
   $('#lpWindow').value = p.window_days ?? 180;
+  $('#lpArchive').checked = !p.archive_off;
+  $('#lpArchiveDays').value = p.archive_days || 3;
   setMsg('#lpMsg', '');
   openModal('lpModal');
   $('#lpCalib').focus();
@@ -1287,6 +1293,7 @@ $('#lpForm').addEventListener('submit', (e) => {
     calibrate: $('#lpCalib').checked, min_verdicts: parseInt($('#lpMin').value, 10) || 0,
     max_precision: (parseFloat($('#lpPrec').value) || 0) / 100, escalate: $('#lpEsc').checked, escalate_days: parseInt($('#lpDays').value, 10) || 0,
     window_days: parseInt($('#lpWindow').value, 10) || 0,
+    archive_off: !$('#lpArchive').checked, archive_days: parseInt($('#lpArchiveDays').value, 10) || 0,
   };
   ntBusy($('#lpSave'), async () => {
     try {

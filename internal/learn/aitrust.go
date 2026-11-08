@@ -34,6 +34,15 @@ type AIStat struct {
 	HighAgree int     `json:"high_agree"` // 其中与分析员一致的次数
 	Uncertain int     `json:"uncertain"`  // 模型无法判断
 	Pending   int     `json:"pending"`    // 尚无分析员结论
+	// 客观核实：尚无分析员结论、但系统掌握了来源的客观结论（见 loop.go）的研判
+	ObjJudged   int `json:"obj_judged"`
+	ObjAgree    int `json:"obj_agree"`
+	ObjOvercall int `json:"obj_overcall"` // 判为攻击、客观结论不是攻击（站点常客、授权扫描）
+	ObjMissed   int `json:"obj_missed"`   // 判为误报、客观结论是攻击（成功利用、回连、诱饵）
+	// 判为攻击的结论中经核实（分析员结论或客观结论）的次数与误判次数；误判达到三成时 Gated，收紧按模型判断自动确认
+	AtkJudged int  `json:"atk_judged"`
+	AtkWrong  int  `json:"atk_wrong"`
+	Gated     bool `json:"gated"`
 }
 
 const (
@@ -72,10 +81,18 @@ func (l *Learner) RecordAI(incident uint64, r AIRecord) {
 	l.mu.Unlock()
 	l.emit(changes)
 	// 模型高置信判为攻击：自动确认来源（只会让该来源之后的命中升级，学错的代价是多几条告警）
-	// 站点的常客除外：模型看到的只是告警，长连接重连、浏览器插件探测 /.git/HEAD 这类误报会让它把员工的出口地址判为攻击
-	if r.Source != "" && r.Verdict == "attack" && r.Confidence >= aiConfirmConfidence && (l.RegularUser == nil || !l.RegularUser(r.Source)) {
-		l.ConfirmSource(r.Source, "ai", fmt.Sprintf("模型 %s 以 %d%% 置信度判为攻击（事件 #%d）", r.Model, r.Confidence, incident), r.Time)
+	// 站点的常客除外：模型看到的只是告警，长连接重连、浏览器插件探测 /.git/HEAD 这类误报会让它把员工的出口地址判为攻击。
+	// 该模型判为攻击的结论经核实误判较多时（自学习自动收紧），还要求来源本身的行为像攻击者
+	if r.Source == "" || r.Verdict != "attack" || r.Confidence < aiConfirmConfidence || (l.RegularUser != nil && l.RegularUser(r.Source)) {
+		return
 	}
+	l.mu.Lock()
+	gated := l.aiGatedLocked(r.Model)
+	l.mu.Unlock()
+	if gated && (l.AttackerLike == nil || !l.AttackerLike(r.Source)) {
+		return
+	}
+	l.ConfirmSource(r.Source, "ai", fmt.Sprintf("模型 %s 以 %d%% 置信度判为攻击（事件 #%d）", r.Model, r.Confidence, incident), r.Time)
 }
 
 // revokeRegularAI 撤销只凭模型判断确认、实际是站点常客的攻击源（不持锁调用：RegularUser 查询状态库）。
@@ -103,21 +120,30 @@ func (l *Learner) revokeRegularAI(now time.Time) {
 	sort.Strings(drop)
 	l.mu.Lock()
 	var cs []Change
+	var revoked []string
 	for _, ip := range drop {
 		if a := l.auto[ip]; a != nil && a.Kind == "ai" {
 			delete(l.auto, ip)
-			c := Change{Time: now, Kind: "revoke_auto", User: "自学习",
+			c := Change{Time: now, Kind: "revoke_auto", User: "自学习", IP: ip,
 				Detail: "撤销自动确认的攻击源 " + ip + "（" + a.Reason + "）：该来源是站点的常客，大量正常访问、攻击命中占比很低，模型的判断多半来自业务请求触发的误报"}
 			l.logLocked(c)
 			cs = append(cs, c)
+			// 客观结论：不是攻击者。模型据此被评估，误判多了自动收紧按模型判断的自动确认
+			l.noteOutcomeLocked(ip, false, "站点常客：大量正常访问、攻击命中不到一成", now)
+			l.loop.Revoked++
+			revoked = append(revoked, ip)
 		}
 	}
 	if len(cs) > 0 {
 		l.dirty = true
 		l.publishAutoLocked()
+		cs = append(cs, l.refreshAIStatsLocked(now)...)
 	}
 	l.mu.Unlock()
 	l.emit(cs)
+	for _, ip := range revoked { // 因自动确认而升级的告警按原等级重新计算事件等级
+		l.retract("", ip, "撤销了对 "+ip+" 的自动确认（站点常客）")
+	}
 }
 
 // Refresh 按当前时间重新计算校准结果（由后台任务定期调用）：样本超过学习窗口后，相应的校准自动撤销。
@@ -338,10 +364,35 @@ func (l *Learner) aiStatsLocked() []AIStat {
 		case r.Verdict != "attack" && r.Verdict != "false_positive":
 			st.Uncertain++
 		case c == nil:
-			st.Pending++
+			o := l.outcomes[r.Source]
+			if r.Source == "" || o == nil {
+				st.Pending++
+				break
+			}
+			st.ObjJudged++
+			switch attack := r.Verdict == "attack"; {
+			case attack == o.Attack:
+				st.ObjAgree++
+			case attack:
+				st.ObjOvercall++
+			default:
+				st.ObjMissed++
+			}
+			if r.Verdict == "attack" {
+				st.AtkJudged++
+				if !o.Attack {
+					st.AtkWrong++
+				}
+			}
 		default:
 			st.Judged++
 			agree := (r.Verdict == "attack") == (c.Verdict == VerdictTP)
+			if r.Verdict == "attack" {
+				st.AtkJudged++
+				if c.Verdict != VerdictTP {
+					st.AtkWrong++
+				}
+			}
 			switch {
 			case agree:
 				st.Agree++
