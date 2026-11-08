@@ -607,6 +607,35 @@ func (sf *surface) reclassify() int {
 	return n
 }
 
+// purgeFakeHosts 删除旧版本按虚构的 Host 头登记的入口与对应的发现（快照恢复时调用，返回删除的入口数）：
+// 扫描器把 OAST 子域名、随机串域名写进 Host 头，攻击面的“识别到的站点”里因此列出几十个并不存在的站点。
+func (sf *surface) purgeFakeHosts() int {
+	n := 0
+	for key, ep := range sf.Endpoints {
+		if ep.Host == "" || ep.Host == "-" || !detect.FakeSiteHost(ep.Host) {
+			continue
+		}
+		delete(sf.Endpoints, key)
+		delete(sf.Findings, "sens:"+key)
+		n++
+	}
+	return n
+}
+
+// stripNUL 清理旧版本写入发现的 NUL（快照恢复时调用）：华为防火墙直接发送的 syslog 末尾带 NUL，旧版本把它连同句号
+// 带进了策略名，证据里显示为「default.\x00」，界面上是一个乱码字符。
+func (sf *surface) stripNUL() {
+	clean := func(s string) string {
+		if !strings.Contains(s, "\x00") {
+			return s
+		}
+		return strings.ReplaceAll(strings.ReplaceAll(s, ".\x00", ""), "\x00", "")
+	}
+	for _, f := range sf.Findings {
+		f.Title, f.Evidence = clean(f.Title), clean(f.Evidence)
+	}
+}
+
 func classifySensitive(path string) *sensitiveRule {
 	p := strings.ToLower(path)
 	for i := range sensitiveRules {
@@ -750,8 +779,8 @@ func serviceInfo(port int) (string, model.Severity) {
 // observeWeb 更新 Web 资产与风险发现（调用方持锁）。
 func (sf *surface) observeWeb(ev *model.Event, hits []model.Hit, attacked bool) {
 	host := ev.Host
-	if host == "" {
-		host = "-"
+	if host == "" || detect.FakeSiteHost(host) {
+		host = "-" // 虚构的 Host 头（OAST、随机串域名、云元数据地址）不是站点
 	}
 	path := normPath(ev.URI)
 	exists := ev.Status >= 200 && ev.Status < 400

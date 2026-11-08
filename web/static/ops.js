@@ -95,9 +95,9 @@ async function loadIncidents() {
     ${ops ? `<td class="chk"><input type="checkbox" data-sel="${i.id}" ${inc.sel.has(i.id) ? 'checked' : ''} aria-label="选择事件 #${i.id}"></td>` : ''}
     <td class="nowrap mono">#${i.id}</td>
     <td><b>${esc(i.title)}</b><div class="cell-chips">${(i.phases || []).map((ph) => `<span class="chip">${esc(PHASE[ph] || ph)}</span>`).join('')}${(i.assets || []).map((a) => `<span class="chip ${i.asset_level === 'core' ? 'warn' : ''}">资产 ${esc(a)}</span>`).join('')}</div></td>
-    <td>${badge(i.severity)}${i.ai_from ? `<div class="muted" style="font-size:11px" title="模型判为疑似误报，等级已下调，待分析员确认">原${esc(SEV_LABEL[i.ai_from] || i.ai_from)} · AI 下调</div>` : ''}</td><td class="nowrap">${statusChip(i.status)}</td>
+    <td>${badge(i.severity)}${i.ai_from ? `<div class="muted" style="font-size:12px" title="模型判为疑似误报，等级已下调，待分析员确认">原${esc(SEV_LABEL[i.ai_from] || i.ai_from)} · AI 下调</div>` : ''}</td><td class="nowrap">${statusChip(i.status)}</td>
     <td class="nowrap">${esc(i.assignee || '-')}</td>
-    <td class="num">${num(i.alerts)}${i.hits && i.hits !== i.alerts ? `<div class="muted" style="font-size:11px" title="同一规则在节流窗口内只记录前若干条告警，其余命中只计数">命中 ${num(i.hits)}</div>` : ''}${i.success ? `<div class="res-success" style="font-size:11px">${i.success} 次疑似成功</div>` : ''}</td>
+    <td class="num">${num(i.alerts)}${i.hits && i.hits !== i.alerts ? `<div class="muted" style="font-size:12px" title="同一规则在节流窗口内只记录前若干条告警，其余命中只计数">命中 ${num(i.hits)}</div>` : ''}${i.success ? `<div class="res-success" style="font-size:12px">${i.success} 次疑似成功</div>` : ''}</td>
     <td class="nowrap muted">${esc(fmtShort(i.first_seen))}<br>${esc(fmtShort(i.last_seen))}</td>
     <td class="nowrap">${incDue(i)}</td><td class="num">${i.notes || ''}</td></tr>`).join('');
   $('#incTable').innerHTML = `<thead><tr>${ops ? '<th class="chk"><input type="checkbox" id="incAll" aria-label="全选本页"></th>' : ''}<th>编号</th><th>事件</th><th>等级</th><th>状态</th><th>负责人</th><th class="num">告警</th><th>首次 / 最近</th><th>处置时限</th><th class="num">记录</th></tr></thead><tbody>${rows || empty(ops ? 10 : 9, '没有符合条件的事件')}</tbody>`;
@@ -186,7 +186,7 @@ async function openIncident(id) {
   const notes = (d.notes_list || []).slice().reverse().map((n) => `<li><span class="muted nowrap">${esc(fmtShort(n.time))}</span> <b>${esc(n.user)}</b>
     ${n.action ? `<span class="tl-act">${esc(n.action)}</span>` : ''}${n.text ? `<div class="tl-text">${esc(n.text)}</div>` : ''}</li>`).join('');
   const alerts = (d.alert_list || []).map((a, k) => `<tr><td class="nowrap muted">${esc(fmtShort(a.time))}</td><td>${badge(a.severity)} ${esc(a.name)}</td>
-    <td class="mono">${a.method ? esc(a.method) + ' ' : ''}${esc(a.target)}${assetLine(a)}</td><td>${resTag(a.result, a.proven)}</td><td class="evidence">${esc(a.evidence)}</td>
+    <td class="mono">${a.method ? esc(a.method) + ' ' : ''}${esc(a.target)}${assetLine(a)}</td><td>${resTag(a.result, a.proven)}</td><td class="evidence"><div class="ev-clamp" title="${esc(a.evidence)}">${esc(a.evidence)}</div></td>
     <td class="nowrap">${canOperate() ? `<button type="button" class="btn" data-ia="fp" data-k="${k}">标记误报</button>` : ''}${canOperate() && meta.rawlog ? ` <button type="button" class="btn" data-ia="raw" data-k="${k}">原始日志</button>` : ''}</td></tr>`).join('');
   $('#incBody').innerHTML = `
     <div class="inc-head"><b>${esc(d.title)}</b></div>
@@ -511,11 +511,11 @@ function renderSenders() {
     const [lbl, cls] = SND_STATUS[s.status] || [s.status, ''];
     const ident = [s.hostname && `主机名 ${esc(s.hostname)}`, s.cert && `证书 ${esc(s.cert)}`].filter(Boolean).join('<br>');
     const fail = s.lines ? s.failed / s.lines : 0;
-    return `<tr><td class="mono nowrap">${esc(s.ip)}${ident ? `<div class="muted" style="font-size:11px">${ident}</div>` : ''}</td>
-      <td>${s.name ? `<b>${esc(s.name)}</b>` : '<span class="muted">未登记</span>'}${s.group ? ` <span class="chip">${esc(s.group)}</span>` : ''}${s.rule_cidr && s.rule_cidr !== s.ip ? `<div class="muted" style="font-size:11px">匹配 ${esc(s.rule_cidr)}</div>` : ''}</td>
-      <td class="nowrap"><b class="${cls}">● ${esc(lbl)}</b>${s.silence && s.silence !== 'off' ? `<div class="muted" style="font-size:11px">断流阈值 ${esc(s.silence)}</div>` : ''}</td>
+    return `<tr><td class="mono nowrap">${esc(s.ip)}${ident ? `<div class="muted" style="font-size:12px">${ident}</div>` : ''}</td>
+      <td>${s.name ? `<b>${esc(s.name)}</b>` : '<span class="muted">未登记</span>'}${s.group ? ` <span class="chip">${esc(s.group)}</span>` : ''}${s.rule_cidr && s.rule_cidr !== s.ip ? `<div class="muted" style="font-size:12px">匹配 ${esc(s.rule_cidr)}</div>` : ''}</td>
+      <td class="nowrap"><b class="${cls}">● ${esc(lbl)}</b>${s.silence && s.silence !== 'off' ? `<div class="muted" style="font-size:12px">断流阈值 ${esc(s.silence)}</div>` : ''}</td>
       <td class="nowrap">${(s.protocols || []).map((p) => `<span class="chip">${esc(p)}</span>`).join('')}</td>
-      <td>${s.detected ? `<span class="chip">${esc(s.detected)}</span>` : '-'}${s.time_offset ? `<div class="lv-medium" style="font-size:11px">时区已校正 ${esc(s.time_offset)}</div>` : ''}</td>
+      <td>${s.detected ? `<span class="chip">${esc(s.detected)}</span>` : '-'}${s.time_offset ? `<div class="lv-medium" style="font-size:12px">时区已校正 ${esc(s.time_offset)}</div>` : ''}</td>
       <td class="num">${num(s.lines)}</td>
       <td class="num">${s.failed ? `<span class="${fail > 0.2 ? 'lv-high' : 'lv-medium'}" title="${esc(s.sample_failed || '')}">${num(s.failed)}</span>` : 0}</td>
       <td class="num">${s.rate ? rateText(s.rate) : '-'}</td>
@@ -1106,7 +1106,8 @@ $('#auVerify').addEventListener('click', () => ntBusy($('#auVerify'), async () =
 
 // ---------------- 自学习 ----------------
 const LN_CHANGE = { calibrate: '自动下调', restore: '恢复', calibrate_ctx: '目标级下调', restore_ctx: '目标级恢复', pin: '锁定', unpin: '解锁', apply: '采纳建议', dismiss: '忽略建议', policy: '策略调整',
-  intranet: '识别内网网段', confirm_auto: '自动确认攻击源', discover: '发现未知攻击', discover_disable: '停用观察规则', discover_enable: '启用观察规则' };
+  intranet: '识别内网网段', confirm_auto: '自动确认攻击源', revoke_auto: '撤销自动确认', discover: '发现未知攻击', discover_disable: '停用观察规则', discover_enable: '启用观察规则',
+  discover_auto_off: '自动停用观察规则' };
 let lnPolicy = null;
 const LN_ANOM = { new_net: '新地址登录', odd_hour: '非常用时段', login_fail: '登录失败暴增', bulk_export: '批量导出', sensitive: '高危变更' };
 // 近 8 周人工结论中的误报占比（从早到晚）：持续下降说明检测在变准
@@ -1158,7 +1159,7 @@ async function loadLearn() {
       ? `<div class="scroll"><table class="table"><thead><tr><th>来源</th><th>依据</th><th>说明</th><th>时间</th></tr></thead><tbody>${atk.auto_sources.map((a) => `<tr>
           <td class="nowrap">${ipLink(a.ip)}</td><td class="nowrap">${esc(AUTO_KIND[a.kind] || a.kind)}</td>
           <td>${esc(a.reason)}</td><td class="nowrap muted">${esc(fmtShort(a.time))}</td></tr>`).join('')}</tbody></table></div>`
-      : atkEmpty('暂无。出现有证据的成功利用、或模型以 85% 以上的置信度判为攻击时自动确认。'))
+      : atkEmpty('暂无。出现有证据的成功利用、或模型以 85% 以上的置信度判为攻击时自动确认（站点的常客除外：大量正常访问、攻击命中不到一成）。'))
     + '<h4>攻击活动 <small class="muted">载荷中的带外回连标识相同，说明是同一个操作者</small></h4>'
     + (atk.campaigns.length
       ? `<div class="scroll"><table class="table"><thead><tr><th>回连标识</th><th>来源</th><th>次数</th><th>载荷样例</th><th>时间</th></tr></thead><tbody>${atk.campaigns.map((c) => `<tr>
@@ -1168,11 +1169,11 @@ async function loadLearn() {
     + `<h4>观察规则 <small class="muted">正在观察 ${num(atk.candidates)} 种候选请求形态</small></h4>`
     + (atk.learned_rules.length
       ? `<div class="scroll"><table class="table"><thead><tr><th>请求形态</th><th>来源</th><th>匹配</th><th>生成时间</th><th></th></tr></thead><tbody>${atk.learned_rules.map((x) => `<tr class="${x.disabled ? 'muted' : ''}">
-          <td class="mono"><b>${esc(x.shape)}</b><div class="muted">例：${esc(x.example)}</div></td>
+          <td class="mono"><b>${esc(x.shape)}</b><div class="muted">例：${esc(x.example)}</div>${x.auto_off ? `<div class="muted">已自动停用：${esc(x.auto_off)}</div>` : ''}</td>
           <td><div class="cell-chips">${x.sources.slice(0, 5).map((ip) => ipLink(ip)).join(' ')}</div></td>
           <td class="num">${num(x.hits)}</td><td class="nowrap muted">${esc(fmtShort(x.time))}</td>
           <td class="nowrap">${isAdmin() ? `<button type="button" class="btn" data-ln="${x.disabled ? 'enable' : 'disable'}" data-rule="${esc(x.id)}">${x.disabled ? '启用' : '停用'}</button>` : (x.disabled ? '已停用' : '')}</td></tr>`).join('')}</tbody></table></div>`
-      : atkEmpty(`暂无。同一种请求形态被 3 个以上已确认攻击源使用、没有命中任何规则、正常访客从未使用时，生成低危观察规则。`));
+      : atkEmpty(`暂无。同一种请求形态被 3 个以上已确认攻击源使用、没有命中任何规则、正常访客从未使用时，生成低危观察规则；被同一来源反复轮询的（业务接口）不学，已生成的自动停用。`));
   // 从正常流量学到的参数取值与站点产品
   const SHAPE = { text: '普通文字', strict: '数字 / 编号 / 单个词' };
   $('#lnProfile').innerHTML = `<div class="ln-policy">正在统计 ${num(prof.params)} 个参数，已生效 ${num(prof.mature)} 个（普通文字 ${num(prof.free_text)} · 数字 / 编号 ${num(prof.strict)}）`

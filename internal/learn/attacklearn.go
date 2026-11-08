@@ -38,7 +38,37 @@ const (
 	maxLearnedRules     = 500
 	discoverSources     = 3 // 同一请求形态至少被这么多已确认攻击源使用过，才生成观察规则
 	maxBenignIPs        = 4 // 每种请求形态最多记录这么多正常使用的来源，再多就是正常访客普遍在用
+	// 同一来源一小时内请求同一形态达到这么多次，是在轮询业务接口（心跳、会话保活、大屏刷新），不是攻击探测：
+	// 扫描器的每个探测只发一两次。这样的形态不学；已经学成观察规则的自动停用
+	pollRepeat = 20
+	pollWindow = time.Hour
 )
+
+// useWin 统计一个来源在当前一小时窗口内使用某种请求形态的次数。
+type useWin struct {
+	start time.Time
+	n     int
+}
+
+// bumpUse 记一次使用并返回窗口内的次数（来源数有上限，超出的不统计）。
+func bumpUse(m *map[string]*useWin, ip string, at time.Time) int {
+	if *m == nil {
+		*m = map[string]*useWin{}
+	}
+	u := (*m)[ip]
+	if u == nil {
+		if len(*m) >= 64 {
+			return 0
+		}
+		u = &useWin{start: at}
+		(*m)[ip] = u
+	}
+	if at.Sub(u.start) > pollWindow || at.Before(u.start) {
+		u.start, u.n = at, 0
+	}
+	u.n++
+	return u.n
+}
 
 // AutoSource 是自动确认的攻击来源。
 type AutoSource struct {
@@ -67,13 +97,20 @@ type LearnedRule struct {
 	Time     time.Time `json:"time"`
 	Disabled bool      `json:"disabled,omitempty"`
 	Hits     int64     `json:"hits"` // 生成后匹配的次数（本次启动以来）
+	// AutoOff 是自动停用的原因（被同一来源反复轮询，是业务接口）；Kept 表示管理员手动启用过，不再自动停用
+	AutoOff string `json:"auto_off,omitempty"`
+	Kept    bool   `json:"kept,omitempty"`
+
+	use map[string]*useWin
 }
 
 type candidate struct {
 	example string
 	sources []string // 使用过的已确认攻击源
 
-	last time.Time
+	first, last time.Time
+	use         map[string]*useWin
+	polled      bool // 被同一来源反复轮询过：业务接口，不学
 }
 
 // attackState 是攻击行为学习的状态，有自己的锁：热路径上每条 Web 日志都可能进来，不与研判反馈争用 l.mu。
@@ -259,6 +296,19 @@ func (l *Learner) ObserveAttack(ev *model.Event, hits []model.Hit) []model.Hit {
 	_, confirmed := l.confirmedSource(ev.SrcIP, at)
 	st.mu.Lock()
 	if r := st.rules[shape]; r != nil && !r.Disabled {
+		if n := bumpUse(&r.use, ev.SrcIP, at); n >= pollRepeat && !r.Kept {
+			r.Disabled = true
+			r.AutoOff = fmt.Sprintf("%s 在一小时内请求了 %d 次，是在轮询业务接口（心跳、会话保活、页面刷新），不是攻击探测", ev.SrcIP, n)
+			c := Change{Time: time.Now(), Kind: "discover_auto_off", Rule: r.ID, User: "自学习",
+				Detail: "自动停用观察规则 " + clipShape(shape) + "：" + r.AutoOff}
+			st.mu.Unlock()
+			l.mu.Lock()
+			l.dirty = true
+			l.logLocked(c)
+			l.mu.Unlock()
+			l.emit([]Change{c})
+			return hits
+		}
 		r.Hits++
 		n, learned := len(r.Sources), r.Time
 		st.mu.Unlock()
@@ -276,7 +326,7 @@ func (l *Learner) ObserveAttack(ev *model.Event, hits []model.Hit) []model.Hit {
 	switch {
 	case confirmed:
 		if c == nil && len(st.cand) < maxCandidates {
-			c = &candidate{example: clipShape(ev.Method + " " + ev.URI)}
+			c = &candidate{example: clipShape(ev.Method + " " + ev.URI), first: at}
 			st.cand[shape] = c
 		}
 		if c != nil {
@@ -284,11 +334,17 @@ func (l *Learner) ObserveAttack(ev *model.Event, hits []model.Hit) []model.Hit {
 			if !slices.Contains(c.sources, ev.SrcIP) && len(c.sources) < 16 {
 				c.sources = append(c.sources, ev.SrcIP)
 			}
+			if bumpUse(&c.use, ev.SrcIP, at) >= pollRepeat {
+				c.polled = true
+			}
 			ch = l.promoteLocked(st, shape, c, at)
 		}
 	default:
 		// 不是已确认攻击源、也没有命中攻击规则的请求：记下谁用过这个形态，用过的来源没有全部被确认为攻击源，就不学
 		st.noteBenign(shapeHash(shape), ev.SrcIP)
+		if c != nil && bumpUse(&c.use, ev.SrcIP, at) >= pollRepeat {
+			c.polled = true
+		}
 	}
 	st.mu.Unlock()
 	if ch != nil {
@@ -303,7 +359,17 @@ func (l *Learner) ObserveAttack(ev *model.Event, hits []model.Hit) []model.Hit {
 
 // promoteLocked 判断候选请求形态能否生成观察规则（调用方持 st.mu），生成时返回进化日志。
 func (l *Learner) promoteLocked(st *attackState, shape string, c *candidate, at time.Time) *Change {
-	if len(c.sources) < discoverSources || len(st.rules) >= maxLearnedRules {
+	// 至少观察一个窗口（一小时）：业务接口的轮询要过一会儿才看得出来，不能第三个来源一出现就生成规则
+	if len(c.sources) < discoverSources || len(st.rules) >= maxLearnedRules || c.polled || at.Sub(c.first) < pollWindow {
+		return nil
+	}
+	n := 0 // 期间被撤销确认（分析员判为误报、站点常客）的来源不算
+	for _, ip := range c.sources {
+		if _, ok := l.confirmedSource(ip, at); ok {
+			n++
+		}
+	}
+	if n < discoverSources {
 		return nil
 	}
 	// 用过这个形态的其他来源：当时还没被确认、后来被确认的攻击源不算正常访客；用过的来源太多也不学
@@ -418,6 +484,10 @@ func (l *Learner) SetLearnedRule(id, user string, enabled bool) bool {
 		return found != nil
 	}
 	found.Disabled = !enabled
+	found.Kept = enabled // 管理员确认要观察：不再因轮询自动停用
+	if enabled {
+		found.AutoOff = ""
+	}
 	shape := found.Shape
 	st.mu.Unlock()
 	verb := "停用"
@@ -643,8 +713,9 @@ func (l *Learner) attackReportLocked() AttackReport {
 	return r
 }
 
-// pruneAttackLocked 清理过期的自动确认来源、长期不活跃的候选与攻击活动（调用方持 l.mu）。
-func (l *Learner) pruneAttackLocked(now time.Time, days int) {
+// pruneAttackLocked 清理过期的自动确认来源、长期不活跃的候选与攻击活动，并为观察期满的候选生成规则
+// （调用方持 l.mu），返回需要通知的进化日志。
+func (l *Learner) pruneAttackLocked(now time.Time, days int) []Change {
 	keep := time.Duration(max(days, 1)) * 24 * time.Hour * 2
 	changed := false
 	for ip, a := range l.auto {
@@ -659,9 +730,15 @@ func (l *Learner) pruneAttackLocked(now time.Time, days int) {
 	}
 	st := &l.atk
 	st.mu.Lock()
+	var found []*Change
 	for k, c := range st.cand {
 		if now.Sub(c.last) > keep {
 			delete(st.cand, k)
+			continue
+		}
+		// 攻击源用过之后不再出现的形态：观察期满后在这里生成规则
+		if ch := l.promoteLocked(st, k, c, now); ch != nil {
+			found = append(found, ch)
 		}
 	}
 	for k, c := range st.campaigns {
@@ -670,4 +747,11 @@ func (l *Learner) pruneAttackLocked(now time.Time, days int) {
 		}
 	}
 	st.mu.Unlock()
+	var out []Change
+	for _, ch := range found {
+		l.dirty = true
+		l.logLocked(*ch)
+		out = append(out, *ch)
+	}
+	return out
 }

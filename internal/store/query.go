@@ -876,7 +876,9 @@ func (s *Store) Surface() *SurfaceReport {
 	}
 	hosts := map[string]int64{}
 	for _, ep := range sf.Endpoints {
-		hosts[ep.Host] += ep.Hits
+		if ep.Host != "-" { // 没有 Host 头、或 Host 是虚构的请求不列为站点
+			hosts[ep.Host] += ep.Hits
+		}
 		c := *ep
 		c.Methods, c.Status, c.Tech = copyMap(ep.Methods), copyMap(ep.Status), append([]string(nil), ep.Tech...)
 		r.Endpoints = append(r.Endpoints, &c)
@@ -927,6 +929,16 @@ func (s *Store) AttackCount(ip string) int64 {
 		return p.Attacks
 	}
 	return 0
+}
+
+// RegularUser 判断来源是否为站点的常客：Web 请求不少于 1000 次，攻击命中不到一成。
+// 线上实例：员工出口地址的长连接重连、浏览器插件探测 /.git/HEAD 触发了几条告警，模型据此以 95% 置信度判为攻击，
+// 自动确认后它的业务接口被学成“未知攻击”，一天多出上千条告警。漏洞扫描器的攻击命中通常占三成以上。
+func (s *Store) RegularUser(ip string) bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	p := s.ips[ip]
+	return p != nil && p.WebReqs >= 1000 && p.Attacks*10 < p.WebReqs
 }
 
 // Blocklist 返回达到指定等级的攻击者（不含内网地址），按评分降序。

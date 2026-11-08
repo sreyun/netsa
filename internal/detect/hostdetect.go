@@ -34,7 +34,7 @@ var dynDomains = domainSet("duckdns.org", "no-ip.com", "no-ip.org", "no-ip.biz",
 
 // 不会是真实站点的 Host 头后缀：通配 DNS（任意地址都能写成域名）、保留 / 测试用的顶级域名。
 var fakeSiteSuffix = domainSet("nip.io", "sslip.io", "xip.io", "nip.direct", "traefik.me", "localtest.me", "lvh.me", "vcap.me",
-	"invalid", "example", "localhost", "bxss.me", "requestrepo.com", "canarytokens.com", "pipedream.net",
+	"invalid", "example", "localhost", "test", "tld", "bxss.me", "requestrepo.com", "canarytokens.com", "pipedream.net",
 	"metadata.google.internal", "metadata.tencentyun.com", "metadata.azure.com")
 
 // FakeSiteHost 判断 Web 日志里的 Host 头是不是虚构的站点名（已归一为小写、不含端口）：扫描器把带外探测平台（OAST、DNSLog）、
@@ -71,7 +71,30 @@ func FakeSiteHost(h string) bool {
 	if strings.HasSuffix(h, ".amazonaws.com") && (strings.HasPrefix(h, "s3.") || strings.Contains(h, ".s3.") || strings.Contains(h, ".s3-")) {
 		return true
 	}
-	return false
+	return randomLabelHost(h)
+}
+
+// randomLabelHost 判断主域名是不是扫描器随机生成的 27 位串（Nuclei 的 {{randstr}} 是 KSUID，如 3lbsitxdhywmaerqm5xkm6tq59q.com）：
+// 测试 Host 头注入、虚拟主机路由时写进 Host 头，不是真实的站点。
+func randomLabelHost(h string) bool {
+	last := strings.LastIndexByte(h, '.')
+	if last <= 0 {
+		return false
+	}
+	label := h[strings.LastIndexByte(h[:last], '.')+1 : last]
+	if len(label) != 27 {
+		return false
+	}
+	digits := 0
+	for i := 0; i < len(label); i++ {
+		switch c := label[i]; {
+		case c >= '0' && c <= '9':
+			digits++
+		case c < 'a' || c > 'z':
+			return false
+		}
+	}
+	return digits >= 2
 }
 
 func domainSet(list ...string) map[string]bool {

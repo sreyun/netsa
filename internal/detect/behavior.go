@@ -16,6 +16,15 @@ import (
 
 var reLoginPath = regexp.MustCompile(`(?i)(login|logon|signin|sign-in|sign_in|/auth|wp-login\.php|xmlrpc\.php|j_security_check|j_spring_security_check|/oauth/token|/api/[^?]*token|passport|/session|admin\.php|/user/login|password)`)
 
+// reNotLoginSubmit 是路径里带 auth / password / session 等字样、却不提交口令的辅助接口：口令强度校验（每输入一个字符调用一次）、
+// 验证码与是否需要验证码的预检、登录状态 / 会话引导轮询、注销、刷新令牌、获取加密公钥。它们被频繁调用是正常的页面行为。
+var reNotLoginSubmit = regexp.MustCompile(`(?i)(strength|captcha|kaptcha|hascode|needcode|codevalidate|bootstrap|/status\b|heartbeat|keepalive|logout|signout|sign-out|refresh|userinfo|public-?key|getkey|rsakey)`)
+
+// loginSubmit 判断请求是否为提交口令的登录请求。
+func loginSubmit(method, path string) bool {
+	return method == "POST" && reLoginPath.MatchString(path) && !reNotLoginSubmit.MatchString(path)
+}
+
 // 行为检测中常被暴力破解的认证类端口。
 var authPorts = map[int]string{
 	21: "FTP", 22: "SSH", 23: "Telnet", 25: "SMTP", 110: "POP3", 143: "IMAP", 445: "SMB", 1433: "MSSQL",
@@ -46,7 +55,16 @@ type webWin struct {
 	loginPaths              map[string]int // 各登录接口的提交次数（疑似成功须出现在被反复提交的同一接口上）
 	fired                   int
 	scan                    scanSignals // 窗口内命中的攻击特征（判断自动化漏洞扫描）
+	// 判断高频请求是不是页面资源加载：静态资源（脚本、样式、图片、字体）的成功请求数，以及请求数过半 CC 阈值后
+	// 才开始记录的不同路径（有上限，正常访客不分配）
+	static  int
+	ccPaths map[string]struct{}
 }
+
+// 高频请求中静态资源占七成以上、且访问了 ccPageLoadPaths 个以上不同路径时，是页面资源加载：
+// App 内嵌页面（WebView 不缓存，每次打开都重新加载全部脚本）、出口 NAT 后的多个用户。CC 攻击反复请求少数几个接口，
+// 绕过缓存时变的是参数而不是路径。
+const ccPageLoadPaths = 20
 
 type fwWin struct {
 	start    time.Time
@@ -268,14 +286,23 @@ func (b *Behavior) observeWeb(ev *model.Event, sig scanSignals) []model.Hit {
 	case miss:
 		w.n404++
 	case ev.Status == 401:
-		// 只统计登录接口与 HTTP Basic 认证（日志记录了 $remote_user）的 401：App、单页应用带着过期令牌
-		// 启动或轮询时，十几个业务接口会同时返回 401，那是会话过期，不是暴力破解
-		if ev.User != "" || reLoginPath.MatchString(path) {
+		// 只统计登录提交与 HTTP Basic 认证（日志记录了 $remote_user）的 401：App、单页应用带着过期令牌
+		// 启动或轮询时，十几个业务接口（含 GET /auth/bootstrap 这类会话引导接口）会同时返回 401，那是会话过期，不是暴力破解
+		if ev.User != "" || loginSubmit(ev.Method, path) {
 			w.n401++
 		}
 	case ev.Status >= 500:
 		w.n5xx++
 		b.noteErr(ev)
+	}
+	if !miss && ev.Status < 400 && StaticAsset(path) {
+		w.static++
+	}
+	if w.reqs*2 >= b.th.CCRequests && w.fired&bitCC == 0 && len(w.ccPaths) < ccPageLoadPaths {
+		if w.ccPaths == nil {
+			w.ccPaths = make(map[string]struct{}, ccPageLoadPaths)
+		}
+		w.ccPaths[path] = struct{}{}
 	}
 	// 只在出现 404（或兜底页面）时记录路径：正常访客不分配集合，扫描器的集合达到阈值后不再增长
 	if miss && len(w.paths) < b.th.ScanPaths {
@@ -284,7 +311,7 @@ func (b *Behavior) observeWeb(ev *model.Event, sig scanSignals) []model.Hit {
 		}
 		w.paths[path] = struct{}{}
 	}
-	isLogin := ev.Method == "POST" && reLoginPath.MatchString(path)
+	isLogin := loginSubmit(ev.Method, path)
 	// 判断“疑似破解成功”需要基于本次之前的响应码分布
 	bruteOK := false
 	if isLogin {
@@ -318,11 +345,16 @@ func (b *Behavior) observeWeb(ev *model.Event, sig scanSignals) []model.Hit {
 	fire(bitCC, w.reqs >= b.th.CCRequests, func() model.Hit {
 		h := model.Hit{RuleID: "bhv-cc", Name: "CC攻击/高频请求", Category: CatCC,
 			Severity: model.SevHigh, Phase: model.PhaseImpact, Evidence: fmt.Sprintf("%s内请求 %d 次", win, w.reqs)}
-		if isPrivateIP(ev.SrcIP) {
+		switch {
+		case isPrivateIP(ev.SrcIP):
 			// 内部来源的高频请求多是没有还原真实地址的反向代理、负载均衡健康检查、监控或内部扫描器：
 			// 照常提示，但只是弱证据（低危，不按分类底线抬升）
 			h.Severity, h.Weak = model.SevLow, true
 			h.Evidence += "；来源是内网地址，多为反向代理（未还原真实客户端地址）、监控或内部扫描器"
+		case w.static*10 >= w.reqs*7 && len(w.ccPaths) >= ccPageLoadPaths:
+			h.Severity, h.Weak = model.SevLow, true
+			h.Evidence += fmt.Sprintf("；其中静态资源（脚本、样式、图片）占 %d%%，访问了 %d 个以上不同路径，是页面资源加载"+
+				"（App 内嵌页面不缓存、或出口 NAT 后的多个用户），不像反复请求少数接口的 CC 攻击", w.static*100/w.reqs, len(w.ccPaths))
 		}
 		return h
 	})

@@ -118,11 +118,7 @@ func (m *Manager) StartSyslog(ctx context.Context, cfg config.SyslogConfig) erro
 					}
 					st.bytes.Add(int64(n))
 					sec := time.Now().Unix()
-					for _, line := range strings.Split(string(buf[:n]), "\n") {
-						if line = strings.TrimSpace(line); line != "" {
-							ss.handleLine(ctx, st, line, sec)
-						}
-					}
+					eachMessage(string(buf[:n]), "\n\x00", func(line string) { ss.handleLine(ctx, st, line, sec) })
 				}
 			}()
 		}
@@ -245,7 +241,8 @@ func (m *Manager) serveStream(ctx context.Context, ln net.Listener, ss *syslogSo
 							return
 						}
 						st.bytes.Add(int64(len(msg)))
-						ss.handleLine(ctx, st, msg, time.Now().Unix())
+						sec := time.Now().Unix()
+						eachMessage(msg, "\x00", func(line string) { ss.handleLine(ctx, st, line, sec) })
 					}
 					if err != nil {
 						return
@@ -281,6 +278,24 @@ func (ss *syslogSource) batcher(ctx context.Context, m *Manager) {
 			}
 		case <-t.C:
 			m.flush(ctx, ss.source)
+		}
+	}
+}
+
+// eachMessage 按分隔符把收到的内容拆成日志行，去掉首尾空白后逐行交给 fn。
+// 部分设备（如华为防火墙）按 C 字符串发送 syslog，消息末尾带 NUL；也有设备用 NUL 分隔 TCP 消息（RFC 6587 提到的历史做法）。
+// NUL 留在行尾会进入最后一个字段：华为的 rule-name=default. 被记成 "default.\x00"，按策略名的判断全部失效。
+// UDP 按换行与 NUL 拆分；TCP 已按帧切分（octet-counting 的消息可以合法地包含换行），只按 NUL 拆分。
+func eachMessage(s, seps string, fn func(string)) {
+	for s != "" {
+		line := s
+		if i := strings.IndexAny(s, seps); i >= 0 {
+			line, s = s[:i], s[i+1:]
+		} else {
+			s = ""
+		}
+		if line = strings.TrimSpace(line); line != "" {
+			fn(line)
 		}
 	}
 }

@@ -167,6 +167,9 @@ var staticMedia = map[string]bool{".jpg": true, ".jpeg": true, ".png": true, ".g
 	".bmp": true, ".avif": true, ".mp4": true, ".m4s": true, ".m3u8": true, ".ts": true, ".flv": true, ".webm": true, ".mp3": true,
 	".m4a": true, ".aac": true, ".ogg": true, ".wav": true, ".css": true, ".js": true, ".woff": true, ".woff2": true, ".ttf": true, ".map": true}
 
+// StaticAsset 判断请求路径（不含参数）是否为静态资源。
+func StaticAsset(p string) bool { return staticMedia[strings.ToLower(path.Ext(p))] }
+
 // observeDownload 统计外部来源的下载量（调用方持锁）。
 func (b *Behavior) observeDownload(ev *model.Event) (model.Hit, bool) {
 	if ev.Bytes <= 0 || ev.Status < 200 || ev.Status >= 300 || isPrivateIP(ev.SrcIP) {
@@ -176,7 +179,7 @@ func (b *Behavior) observeDownload(ev *model.Event) (model.Hit, bool) {
 	if i := strings.IndexByte(p, '?'); i >= 0 {
 		p = p[:i]
 	}
-	if staticMedia[strings.ToLower(path.Ext(p))] {
+	if StaticAsset(p) {
 		return model.Hit{}, false
 	}
 	w := b.downloads[ev.SrcIP]

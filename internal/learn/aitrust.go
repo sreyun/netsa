@@ -72,9 +72,52 @@ func (l *Learner) RecordAI(incident uint64, r AIRecord) {
 	l.mu.Unlock()
 	l.emit(changes)
 	// 模型高置信判为攻击：自动确认来源（只会让该来源之后的命中升级，学错的代价是多几条告警）
-	if r.Source != "" && r.Verdict == "attack" && r.Confidence >= aiConfirmConfidence {
+	// 站点的常客除外：模型看到的只是告警，长连接重连、浏览器插件探测 /.git/HEAD 这类误报会让它把员工的出口地址判为攻击
+	if r.Source != "" && r.Verdict == "attack" && r.Confidence >= aiConfirmConfidence && (l.RegularUser == nil || !l.RegularUser(r.Source)) {
 		l.ConfirmSource(r.Source, "ai", fmt.Sprintf("模型 %s 以 %d%% 置信度判为攻击（事件 #%d）", r.Model, r.Confidence, incident), r.Time)
 	}
+}
+
+// revokeRegularAI 撤销只凭模型判断确认、实际是站点常客的攻击源（不持锁调用：RegularUser 查询状态库）。
+func (l *Learner) revokeRegularAI(now time.Time) {
+	if l.RegularUser == nil {
+		return
+	}
+	l.mu.Lock()
+	var ips []string
+	for ip, a := range l.auto {
+		if a.Kind == "ai" {
+			ips = append(ips, ip)
+		}
+	}
+	l.mu.Unlock()
+	var drop []string
+	for _, ip := range ips {
+		if l.RegularUser(ip) {
+			drop = append(drop, ip)
+		}
+	}
+	if len(drop) == 0 {
+		return
+	}
+	sort.Strings(drop)
+	l.mu.Lock()
+	var cs []Change
+	for _, ip := range drop {
+		if a := l.auto[ip]; a != nil && a.Kind == "ai" {
+			delete(l.auto, ip)
+			c := Change{Time: now, Kind: "revoke_auto", User: "自学习",
+				Detail: "撤销自动确认的攻击源 " + ip + "（" + a.Reason + "）：该来源是站点的常客，大量正常访问、攻击命中占比很低，模型的判断多半来自业务请求触发的误报"}
+			l.logLocked(c)
+			cs = append(cs, c)
+		}
+	}
+	if len(cs) > 0 {
+		l.dirty = true
+		l.publishAutoLocked()
+	}
+	l.mu.Unlock()
+	l.emit(cs)
 }
 
 // Refresh 按当前时间重新计算校准结果（由后台任务定期调用）：样本超过学习窗口后，相应的校准自动撤销。
@@ -82,9 +125,10 @@ func (l *Learner) Refresh(now time.Time) {
 	if l == nil {
 		return
 	}
+	l.revokeRegularAI(now) // 先撤销误确认的常客：之后为候选形态生成规则时，它们不再算攻击源
 	l.mu.Lock()
 	changes := l.recomputeLocked(now, "")
-	l.pruneAttackLocked(now, l.opt.EscalateDays)
+	changes = append(changes, l.pruneAttackLocked(now, l.opt.EscalateDays)...)
 	l.pruneProfileLocked(now)
 	l.mu.Unlock()
 	l.emit(changes)

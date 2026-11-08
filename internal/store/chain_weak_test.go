@@ -457,7 +457,8 @@ func TestLoadPurgesDeviceAndReclassifies(t *testing.T) {
 		name    string
 	}{{"43.242.97.48:830/tcp", 38, 30, "NETCONF"}, {"43.242.97.51:8080/tcp", 751, 144, "HTTP 管理"}, {"43.242.97.47:8080/tcp", 1926938, 133, "HTTP 管理"}} {
 		sf.Services[x.key] = &Service{DstIP: strings.Split(x.key, ":")[0], Port: 1, Allowed: x.allowed, Sources: x.sources, Exposed: true, src: map[string]int32{}}
-		sf.Findings["dev:"+x.key] = &Finding{ID: "dev:" + x.key, Title: "防火墙管理服务对公网放行: " + x.name, Category: "服务暴露", Severity: model.SevHigh, Asset: x.key}
+		sf.Findings["dev:"+x.key] = &Finding{ID: "dev:" + x.key, Title: "防火墙管理服务对公网放行: " + x.name, Category: "服务暴露", Severity: model.SevHigh, Asset: x.key,
+			Evidence: "防火墙按策略「允许本地上外网.\x00」放行了来自公网 113.57.107.46 到设备自身（local 安全域）的连接"}
 	}
 	ep := &Endpoint{Host: "mg.example.com", Path: "/waterbuddy/api/console/push-messages", Methods: map[string]int{}, Status: map[int]int{200: 9}, NormN: 9,
 		Sensitive: "管理后台/运维入口对外暴露", Severity: model.SevMedium, atk: map[string]struct{}{}}
@@ -483,8 +484,10 @@ func TestLoadPurgesDeviceAndReclassifies(t *testing.T) {
 			t.Errorf("%s 只有扫描器的单次探测，应撤销", k)
 		}
 	}
-	if r.surf.Findings["dev:43.242.97.47:8080/tcp"] == nil {
+	if f := r.surf.Findings["dev:43.242.97.47:8080/tcp"]; f == nil {
 		t.Error("确有大量访问的设备服务应保留")
+	} else if !strings.Contains(f.Evidence, "「允许本地上外网」") || strings.Contains(f.Evidence, "\x00") {
+		t.Errorf("证据中的 NUL 应清理: %q", f.Evidence)
 	}
 	if e := r.surf.Endpoints["mg.example.com /waterbuddy/api/console/push-messages"]; e == nil || e.Sensitive != "" || r.surf.Findings["sens:mg.example.com /waterbuddy/api/console/push-messages"] != nil {
 		t.Errorf("业务接口不是管理后台: %+v", e)
@@ -508,6 +511,74 @@ func TestPerimeterSummaryDedup(t *testing.T) {
 }
 
 // 旧版本把正常 Web 客户端（NAT 后的大量用户、不断重连的长连接）的防火墙连接判为洪泛：查询时按需核实处理。
+// 线上旧数据：一台手机上的 App 反复加载 H5 页面，旧版本只按请求数判为高危 CC，把站点推进到“影响”。
+// 停在静态资源上的旧 CC 步骤与新版本的低危页面加载都只是需核实的迹象；反复请求接口的 CC 照常计入。
+func TestAssetChainPageLoadCC(t *testing.T) {
+	s := newTestStore()
+	now := time.Now().Add(-time.Hour)
+	for i := range 80 {
+		s.Record(&model.Event{Kind: model.KindWeb, SrcIP: "14.31.64.16", Host: "mg.example.com", Method: "GET", URI: fmt.Sprintf("/platform-h5/static/js/c%d.js", i),
+			Status: 200, Time: now}, nil)
+	}
+	s.Record(&model.Event{Kind: model.KindWeb, SrcIP: "14.31.64.16", Host: "mg.example.com", Method: "GET", URI: "/platform-h5/static/js/index-b35b8665.js",
+		Status: 200, Time: now}, []model.Hit{hit("bhv-cc", "CC攻击", model.PhaseImpact, model.SevHigh, model.ResultUnknown)})
+	s.Record(&model.Event{Kind: model.KindWeb, SrcIP: "36.1.2.3", Host: "app.example.com", Method: "GET", URI: "/platform-h5/favicon.png",
+		Status: 200, Time: now}, []model.Hit{weakHit(hit("bhv-cc", "CC攻击", model.PhaseImpact, model.SevLow, model.ResultUnknown))})
+	for i := range 80 {
+		s.Record(&model.Event{Kind: model.KindWeb, SrcIP: "198.51.100.77", Host: "api.example.com", Method: "GET", URI: fmt.Sprintf("/search?q=%d", i),
+			Status: 200, Time: now}, nil)
+	}
+	s.Record(&model.Event{Kind: model.KindWeb, SrcIP: "198.51.100.77", Host: "api.example.com", Method: "GET", URI: "/search?q=x",
+		Status: 200, Time: now}, []model.Hit{hit("bhv-cc", "CC攻击", model.PhaseImpact, model.SevHigh, model.ResultUnknown)})
+	for _, site := range []string{"mg.example.com", "app.example.com"} {
+		if c := s.AssetChain(site); c == nil || slices.Contains(c.Reached, "impact") || !slices.Contains(c.Weak, "impact") {
+			t.Fatalf("%s: 页面资源加载的高频请求不应推进到影响: %+v", site, c)
+		}
+	}
+	if c := s.AssetChain("api.example.com"); c == nil || !slices.Contains(c.Reached, "impact") {
+		t.Fatalf("反复请求接口的 CC 照常计入影响: %+v", c)
+	}
+}
+
+// 线上实例：扫描器把 OAST 子域名、Nuclei 的随机串域名（3lbsitxdhywmaerqm5xkm6tq59q.tld）写进 Host 头，
+// 攻击面的“识别到的站点”列出了几十个不存在的站点。新请求不再按这些 Host 登记，旧记录在快照恢复时删除。
+func TestSurfaceFakeHosts(t *testing.T) {
+	s := newTestStore()
+	now := time.Now()
+	for _, h := range []string{"mg.example.com", "3lbsitxdhywmaerqm5xkm6tq59q.tld", "dbl3cmucm7o151m1ko0093sf1duw8h8zg.oast.fun"} {
+		s.Record(&model.Event{Kind: model.KindWeb, SrcIP: "198.51.100.5", Host: h, Method: "GET", URI: "/index.php", Status: 200, Time: now}, nil)
+	}
+	s.mu.Lock()
+	s.surf.Endpoints["interact.sh /admin"] = &Endpoint{Host: "interact.sh", Path: "/admin", Methods: map[string]int{}, Status: map[int]int{200: 1}, atk: map[string]struct{}{}}
+	s.surf.Findings["sens:interact.sh /admin"] = &Finding{ID: "sens:interact.sh /admin", Category: "敏感资源暴露"}
+	s.mu.Unlock()
+	path := filepath.Join(t.TempDir(), "state.json.gz")
+	if err := s.Save(path); err != nil {
+		t.Fatal(err)
+	}
+	r := newTestStore()
+	if err := r.Load(path); err != nil {
+		t.Fatal(err)
+	}
+	var hosts []string
+	for _, kv := range r.Surface().Hosts {
+		hosts = append(hosts, kv.Name)
+	}
+	if len(hosts) != 1 || hosts[0] != "mg.example.com" {
+		t.Fatalf("虚构的站点不应列出: %v", hosts)
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	if r.surf.Findings["sens:interact.sh /admin"] != nil || r.surf.Endpoints["interact.sh /admin"] != nil {
+		t.Fatal("旧版本按虚构 Host 登记的入口应删除")
+	}
+}
+
+func weakHit(h model.Hit) model.Hit {
+	h.Weak = true
+	return h
+}
+
 func TestAssetChainWebClientFlood(t *testing.T) {
 	s := newTestStore()
 	now := time.Now().Add(-time.Hour)

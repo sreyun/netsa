@@ -63,7 +63,7 @@ import (
 
 // version 是构建版本号。默认值用于本地构建；镜像构建通过
 // -ldflags "-X main.version=<tag>" 注入，`netsa version` 与 /api/meta 都会显示注入后的值。
-var version = "1.10.5"
+var version = "1.10.6"
 
 func usage() {
 	fmt.Fprintf(os.Stderr, `netsa %s —— 网络安全态势感知与攻击面分析系统
@@ -251,6 +251,7 @@ func build(cfg *config.Config) (*app, error) {
 		return nil, err
 	}
 	a.learn.PriorAttacks = a.store.AttackCount // 业务接口学习只用此前没有攻击记录的访客
+	a.learn.RegularUser = a.store.RegularUser  // 站点常客不凭模型判断自动确认为攻击源
 	a.store.Calibrate = a.learn.Calibrate      // 状态库生成的情报命中同样按情报源的准确率校准
 	a.store.OASTLinks = a.learn.OASTLinks      // 同一 OAST 关联标识的来源归入同一攻击活动
 	a.store.DecoyLinks = a.deception.Links     // 使用同一诱饵线索、诱饵账号的来源互相关联

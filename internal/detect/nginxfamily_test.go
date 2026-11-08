@@ -234,6 +234,29 @@ func TestBehaviorScanFloodAnd401(t *testing.T) {
 	if !basic["bhv-webbrute"] {
 		t.Errorf("Basic 认证反复失败应判为暴力破解: %v", basic)
 	}
+	// 线上实例：开发人员的脚本不带令牌轮询 GET /auth/bootstrap（401），页面每输入一个字符校验一次口令强度、
+	// 登录前预检是否需要验证码。都不是提交口令。
+	for name, mk := range map[string]func(i int) *model.Event{
+		"会话引导轮询": func(int) *model.Event {
+			return &model.Event{Kind: model.KindWeb, Method: "GET", URI: "/waterbuddy/api/waterbuddy/auth/bootstrap", Status: 401}
+		},
+		"口令强度校验": func(int) *model.Event {
+			return &model.Event{Kind: model.KindWeb, Method: "POST", URI: "/uaa/api/users/validate-password-strength", Status: 200}
+		},
+		"验证码预检": func(int) *model.Event {
+			return &model.Event{Kind: model.KindWeb, Method: "POST", URI: "/auth/hasCodeValidate", Status: 200}
+		},
+	} {
+		if got := fired("113.57.107.46", mk, 40); got["bhv-webbrute"] {
+			t.Errorf("%s不是暴力破解: %v", name, got)
+		}
+	}
+	form := fired("198.51.100.68", func(int) *model.Event {
+		return &model.Event{Kind: model.KindWeb, Method: "POST", URI: "/auth/login", Status: 200}
+	}, 40)
+	if !form["bhv-webbrute"] {
+		t.Errorf("反复提交登录表单应判为暴力破解: %v", form)
+	}
 }
 
 // 周期性外连：ICMP 定时 ping 与多台主机同规律连接同一地址（统一部署的代理）降为低危，单台主机的 TCP 心跳仍为中危。

@@ -329,6 +329,8 @@ func (s *Store) Load(path string) error {
 		sf.cleanLegacy()       // 旧版本把兜底页面登记成的敏感入口与敏感资源暴露
 		sf.purgeUnusedDevice() // 旧版本只凭策略匹配日志记下的防火墙管理服务
 		sf.reclassify()        // 规则收紧后旧版本误判的敏感入口
+		sf.stripNUL()          // 旧版本把华为 syslog 末尾的 NUL 带进了策略名
+		sf.purgeFakeHosts()    // 旧版本按虚构的 Host 头登记的入口
 		s.surf = sf
 	}
 	if len(snap.Scores) > maxScorePoints {

@@ -165,6 +165,10 @@ func TestDiscoverUnknownAttack(t *testing.T) {
 		// 静态资源不参与
 		l.ObserveAttack(webEv(ip, "GET", "/static/app.js", now), nil)
 	}
+	if r := l.Report().Attack; len(r.Rules) != 0 {
+		t.Fatalf("观察期（一小时）内不生成规则: %+v", r.Rules)
+	}
+	l.Refresh(now.Add(2 * time.Hour)) // 观察期满、攻击源没有再出现：定期刷新时生成
 	r := l.Report().Attack
 	if len(r.Rules) != 1 || r.Rules[0].Shape != "POST /cgi-bin/x0/run.cgi?cmd_id&token" || len(r.Rules[0].Sources) != 3 {
 		t.Fatalf("应只为攻击者独有的形态生成规则: %+v", r.Rules)
@@ -207,9 +211,94 @@ func TestDiscoverIgnoresLaterConfirmed(t *testing.T) {
 	for _, ip := range ips[:2] {
 		l.ObserveAttack(webEv(ip, "GET", "/vuln/probe.do?a=2", now), nil)
 	}
-	l.ObserveAttack(webEv(ips[2], "GET", "/vuln/probe.do?a=3", now), nil)
+	l.ObserveAttack(webEv(ips[2], "GET", "/vuln/probe.do?a=3", now.Add(2*time.Hour)), nil) // 观察期满后再次出现时生成
 	if r := l.Report().Attack; len(r.Rules) != 1 {
 		t.Fatalf("之后被确认的攻击源不应阻止学习: %+v", r)
+	}
+}
+
+// 线上实例：三个员工出口地址被模型误判为攻击源，它们每隔几秒轮询的心跳接口 GET /uaa/api/ht/sid 被学成“未知攻击”，
+// 一天多出上千条告警。被同一来源反复轮询的形态是业务接口：不学；已经学成的规则自动停用（管理员手动启用的保留）。
+func TestDiscoverIgnoresPolling(t *testing.T) {
+	l := attackLearner(t, "")
+	now := time.Date(2026, 11, 6, 14, 0, 0, 0, time.UTC)
+	office := []string{"101.231.58.190", "180.169.235.202", "180.169.235.203"}
+	for _, ip := range office {
+		l.ConfirmSource(ip, "ai", "模型判为攻击", now)
+	}
+	for i := range pollRepeat + 5 {
+		for _, ip := range office {
+			l.ObserveAttack(webEv(ip, "GET", "/uaa/api/ht/sid", now.Add(time.Duration(i)*10*time.Second)), nil)
+		}
+	}
+	l.ObserveAttack(webEv(office[0], "GET", "/uaa/api/ht/sid", now.Add(2*time.Hour)), nil)
+	l.Refresh(now.Add(3 * time.Hour))
+	if r := l.Report().Attack; len(r.Rules) != 0 {
+		t.Fatalf("被反复轮询的业务接口不应学成观察规则: %+v", r.Rules)
+	}
+
+	// 已经学成的规则（旧版本学到的）：被同一来源反复轮询后自动停用
+	shape := "GET /uaa/api/ht/sid2"
+	l.atk.mu.Lock()
+	l.atk.rules[shape] = &LearnedRule{ID: "learn-4b5c24a2", Shape: shape, Sources: office, Time: now}
+	l.atk.mu.Unlock()
+	fired := 0
+	for i := range pollRepeat + 5 {
+		if hits := l.ObserveAttack(webEv("101.231.58.190", "GET", "/uaa/api/ht/sid2", now.Add(time.Hour+time.Duration(i)*5*time.Second)), nil); len(hits) > 0 {
+			fired++
+		}
+	}
+	r := l.Report().Attack
+	if len(r.Rules) != 1 || !r.Rules[0].Disabled || !strings.Contains(r.Rules[0].AutoOff, "轮询") || fired != pollRepeat-1 {
+		t.Fatalf("被轮询的观察规则应自动停用: fired=%d %+v", fired, r.Rules)
+	}
+	if !strings.Contains(r.Rules[0].AutoOff, "101.231.58.190") {
+		t.Fatalf("停用原因应说明来源: %q", r.Rules[0].AutoOff)
+	}
+	// 管理员确认要继续观察：不再自动停用
+	l.SetLearnedRule("learn-4b5c24a2", "admin", true)
+	for i := range pollRepeat + 5 {
+		l.ObserveAttack(webEv("101.231.58.190", "GET", "/uaa/api/ht/sid2", now.Add(2*time.Hour+time.Duration(i)*5*time.Second)), nil)
+	}
+	if r := l.Report().Attack; r.Rules[0].Disabled {
+		t.Fatal("管理员启用的规则不应再自动停用")
+	}
+	// 扫描器每天跑一遍同样的探测：一小时内只有一两次，照常命中
+	l.atk.mu.Lock()
+	l.atk.rules["POST /cgi-bin/run.cgi?cmd"] = &LearnedRule{ID: "learn-1", Shape: "POST /cgi-bin/run.cgi?cmd", Time: now}
+	l.atk.mu.Unlock()
+	for d := range 30 {
+		if hits := l.ObserveAttack(webEv("43.242.97.54", "POST", "/cgi-bin/run.cgi?cmd=id", now.Add(time.Duration(d)*24*time.Hour)), nil); len(hits) != 1 {
+			t.Fatalf("第 %d 天的扫描应命中观察规则", d)
+		}
+	}
+}
+
+// 站点的常客（大量正常访问、攻击命中不到一成）：不凭模型的判断自动确认；已确认的在定期刷新时撤销。
+func TestAIConfirmSkipsRegularUser(t *testing.T) {
+	l := attackLearner(t, "")
+	now := time.Now()
+	l.ConfirmSource("180.169.235.202", "ai", "模型 m 以 85% 置信度判为攻击（事件 #425）", now)
+	l.ConfirmSource("203.0.113.66", "evidence", "攻击成功且有证据", now)
+	l.ConfirmSource("43.242.97.54", "ai", "模型 m 以 95% 置信度判为攻击（事件 #104）", now)
+	regular := map[string]bool{"101.231.58.190": true, "180.169.235.202": true, "203.0.113.66": true}
+	l.RegularUser = func(ip string) bool { return regular[ip] }
+	l.RecordAI(68, AIRecord{Verdict: "attack", Confidence: 95, Model: "m", Source: "101.231.58.190", Time: now})
+	if _, ok := l.confirmedSource("101.231.58.190", now); ok {
+		t.Fatal("站点常客不应凭模型判断自动确认")
+	}
+	l.Refresh(now)
+	for ip, want := range map[string]bool{"180.169.235.202": false, "203.0.113.66": true, "43.242.97.54": true} {
+		if _, ok := l.confirmedSource(ip, now); ok != want {
+			t.Errorf("%s 确认=%v，期望 %v（只撤销模型判断确认的常客，有证据的保留）", ip, ok, want)
+		}
+	}
+	found := false
+	for _, c := range l.Report().Changes {
+		found = found || c.Kind == "revoke_auto" && strings.Contains(c.Detail, "180.169.235.202")
+	}
+	if !found {
+		t.Fatal("撤销应写进化日志")
 	}
 }
 

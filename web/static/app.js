@@ -4,7 +4,8 @@
 const $ = (s, el = document) => el.querySelector(s);
 const $$ = (s, el = document) => [...el.querySelectorAll(s)];
 // 日志中的攻击载荷（如 <script>）必须转义后再插入页面
-const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+// NUL 直接去掉：旧版本把华为 syslog 末尾的 NUL 带进了策略名，历史告警的证据里还留着，浏览器会显示成乱码字符
+const esc = (s) => String(s ?? '').replace(/[&<>"'\u0000]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;', '\u0000': '' }[c]));
 
 const LV = { critical: '严重', high: '高危', medium: '中危', low: '低危', info: '信息' };
 const LV_COLOR = { critical: '#ff4d4f', high: '#ff7a45', medium: '#ffc53d', low: '#40a9ff', info: '#8c9ab8' };
@@ -101,6 +102,13 @@ const isAdmin = () => me.role === 'admin';
 const canOperate = () => me.role === 'admin' || me.role === 'analyst';
 let meta = { china_maps: {}, geo_providers: [] };
 const num = (n) => (n ?? 0).toLocaleString('zh-CN');
+// 指标卡片里的大数：千万以上按万 / 亿显示（八列卡片放不下 49,660,505 这样的九位数），精确值写在提示里
+const numBig = (n) => {
+  n = n ?? 0;
+  if (n >= 1e8) return `${(n / 1e8).toFixed(2)}<small>亿</small>`;
+  if (n >= 1e7) return `${Math.round(n / 1e4).toLocaleString('zh-CN')}<small>万</small>`;
+  return num(n);
+};
 const zero = (t) => !t || t.startsWith('0001');
 const pad = (n) => String(n).padStart(2, '0');
 // 时间统一按服务端配置的 timezone 展示（未配置时用浏览器本地时区）：值班电脑的系统时区设置不同
@@ -396,17 +404,17 @@ async function loadOverview() {
   // 两类“等级”含义不同：攻击事件按单次攻击的告警等级统计；攻击源按 IP 的综合威胁等级统计
   // （不低于其触发过的最高告警等级）。一个同时触发高危与严重告警的 IP 计为严重攻击源。
   const kpis = [
-    ['总事件', num(t.events), `Web ${num(t.web)} · 防火墙 ${num(t.firewall)}`, '#8fe9ff', '点击查看各日志数据源的采集与解析情况', 'sources:'],
-    ['攻击事件', num(t.attacks), `严重 ${num(sc.critical || 0)} · 高危 ${num(sc.high || 0)} · 中危 ${num(sc.medium || 0)}`, LV_COLOR.high,
-      `按告警等级统计的攻击命中次数：严重 ${num(sc.critical || 0)} · 高危 ${num(sc.high || 0)} · 中危 ${num(sc.medium || 0)} · 低危 ${num(sc.low || 0)}；近 1 小时 ${num(o.recent.attacks)} 次`, 'alerts:'],
+    ['总事件', numBig(t.events), `Web ${num(t.web)} · 防火墙 ${num(t.firewall)}`, 'var(--hl)', `共 ${num(t.events)} 条。点击查看各日志数据源的采集与解析情况`, 'sources:'],
+    ['攻击事件', numBig(t.attacks), `严重 ${num(sc.critical || 0)} · 高危 ${num(sc.high || 0)} · 中危 ${num(sc.medium || 0)}`, LV_COLOR.high,
+      `共 ${num(t.attacks)} 次。按告警等级统计的攻击命中次数：严重 ${num(sc.critical || 0)} · 高危 ${num(sc.high || 0)} · 中危 ${num(sc.medium || 0)} · 低危 ${num(sc.low || 0)}；近 1 小时 ${num(o.recent.attacks)} 次`, 'alerts:'],
     ['攻击源 IP', num(o.attackers), `独立来源 ${num(o.unique_ips)} · 近 1 小时活跃 ${num(o.recent.attackers)}`, '#ffc53d', '', 'attackers:'],
     ['高危以上攻击源', num((lc.critical || 0) + (lc.high || 0)), `严重 ${lc.critical || 0} · 高危 ${lc.high || 0}`, LV_COLOR.critical,
       `按攻击源 IP 的综合威胁等级统计：严重 ${lc.critical || 0} · 高危 ${lc.high || 0} · 中危 ${lc.medium || 0} · 低危 ${lc.low || 0}。触发过高危告警的 IP 至少为高危`, 'attackers:high'],
-    ['攻击拦截率', `${o.block_rate}%`, `已拦截 ${num(t.blocked)}`, o.block_rate >= 80 ? '#52c41a' : o.block_rate >= 40 ? '#8fe9ff' : LV_COLOR.medium, `已拦截 ${num(t.blocked)} 次，点击查看已拦截的告警`, 'alerts:blocked'],
+    ['攻击拦截率', `${o.block_rate}%`, `已拦截 ${num(t.blocked)}`, o.block_rate >= 80 ? '#52c41a' : o.block_rate >= 40 ? 'var(--hl)' : LV_COLOR.medium, `已拦截 ${num(t.blocked)} 次，点击查看已拦截的告警`, 'alerts:blocked'],
     ['疑似成功攻击', num(t.success), '需优先排查是否失陷', t.success > 0 ? LV_COLOR.critical : '#52c41a', '', 'alerts:success'],
     ['攻击面风险指数', `${o.surface_score}`, `风险发现 ${num(o.findings)} 项`,
       o.surface_score >= 60 ? LV_COLOR.critical : o.surface_score >= 30 ? LV_COLOR.high : o.surface_score > 0 ? LV_COLOR.medium : '#52c41a', '', 'surface:'],
-    ['攻击来源地域', num(o.country_count), `国家/地区 · 城市 ${num(o.city_count)}`, '#8fe9ff', '点击查看全部攻击源（可在下方“来源国家/地区”“攻击来源城市”图表中点击具体地域）', 'attackers:'],
+    ['攻击来源地域', num(o.country_count), `国家/地区 · 城市 ${num(o.city_count)}`, 'var(--hl)', '点击查看全部攻击源（可在下方“来源国家/地区”“攻击来源城市”图表中点击具体地域）', 'attackers:'],
   ];
   $('#kpis').innerHTML = kpis.map(([l, v, s, c, tip, go]) => `<div class="kpi${go ? ' clickable' : ''}"${go ? ` data-go="${go}"` : ''} title="${esc(tip || s)}"><div class="label">${l}</div><div class="value" style="color:${c}">${v}</div><div class="sub">${esc(s)}</div></div>`).join('');
   const tb = $('#threatBadge');
@@ -926,7 +934,7 @@ async function loadAttackers() {
     <td class="nowrap">${esc(CONF[a.confidence] || '-')}</td>
     <td><div class="cell-chips wide">${(a.categories || []).map((c) => `<span class="chip">${esc(c)}</span>`).join('')}</div></td>
     <td><div class="cell-chips">${(a.phases || []).map((p) => `<span class="chip">${esc(PHASE[p] || p)}</span>`).join('')}</div></td>
-    <td class="num">${num(a.attacks)}${a.successes ? `<div class="res-success" style="font-size:11px">${a.successes} 次疑似成功</div>` : ''}</td>
+    <td class="num">${num(a.attacks)}${a.successes ? `<div class="res-success" style="font-size:12px">${a.successes} 次疑似成功</div>` : ''}</td>
     <td class="nowrap muted">${esc(fmtShort(a.last_seen))}</td></tr>`).join('');
   $('#atkTable').innerHTML = `<thead><tr><th>来源 IP</th><th>威胁评分</th><th>等级</th><th>归属地 / 运营商</th><th>ASN</th><th>网络类型</th><th>定位置信度</th><th>攻击类型</th><th>攻击阶段</th><th class="num">攻击次数</th><th>最近活动</th></tr></thead><tbody>${rows || empty(11)}</tbody>`;
   const pages = Math.max(1, Math.ceil(r.total / ATK_PAGE));
@@ -967,7 +975,7 @@ async function loadAlerts() {
     <td><b>${esc(a.name)}</b><div class="muted">${esc(a.category)} · ${esc(PHASE[a.phase] || a.phase)}</div></td>
     <td>${ipLink(a.src_ip)}<div class="muted">${esc(a.location || '')}</div></td>
     <td class="mono">${a.method ? esc(a.method) + ' ' : ''}${esc(a.target)}${a.status ? ` <span class="muted">[${a.status}]</span>` : ''}${assetLine(a)}</td>
-    <td>${resTag(a.result, a.proven)}</td><td class="evidence">${esc(a.evidence)}</td>
+    <td>${resTag(a.result, a.proven)}</td><td class="evidence"><div class="ev-clamp" title="${esc(a.evidence)}">${esc(a.evidence)}</div></td>
     <td class="nowrap">${a.incident_id ? `<button type="button" class="btn link" data-al="inc" data-i="${i}" title="打开所属的安全事件">事件 #${a.incident_id}</button>` : ''}
       ${ops ? `<button type="button" class="btn" data-al="fp" data-i="${i}" title="生成误报抑制规则，之后同类命中不再告警">标记误报</button>` : ''}
       ${ops && meta.rawlog ? `<button type="button" class="btn" data-al="raw" data-i="${i}" title="检索该来源前后 5 分钟的原始日志">原始日志</button>` : ''}</td></tr>`).join('');
@@ -1152,11 +1160,11 @@ chartSetup.cHsDay = (c) => c.on('click', (x) => {
 function renderHistTable(list) {
   const items = list.items || [];
   const rows = items.map((a) => `<tr>
-    <td class="nowrap muted">${esc(fmtTime(a.time))}${a.instance ? `<div style="font-size:11px">${esc(a.instance)}</div>` : ''}</td><td>${badge(a.severity)}</td>
+    <td class="nowrap muted">${esc(fmtTime(a.time))}${a.instance ? `<div style="font-size:12px">${esc(a.instance)}</div>` : ''}</td><td>${badge(a.severity)}</td>
     <td><b>${esc(a.name)}</b><div class="muted">${esc(a.category || '-')}${a.phase ? ' · ' + esc(PHASE[a.phase] || a.phase) : ''}</div><div class="muted mono rule-id">${esc(a.rule_id)}</div></td>
     <td>${ipLink(a.src_ip)}<div class="muted">${esc(a.location || '')}</div></td>
     <td class="mono">${a.method ? esc(a.method) + ' ' : ''}${esc(a.target || '-')}${a.status ? ` <span class="muted">[${a.status}]</span>` : ''}</td>
-    <td>${a.result ? resTag(a.result) : '-'}</td><td class="evidence">${esc(a.evidence || '')}</td></tr>`).join('');
+    <td>${a.result ? resTag(a.result) : '-'}</td><td class="evidence"><div class="ev-clamp" title="${esc(a.evidence || '')}">${esc(a.evidence || '')}</div></td></tr>`).join('');
   $('#hsTable').innerHTML = `<thead><tr><th>时间</th><th>等级</th><th>攻击类型 / 规则</th><th>来源</th><th>目标</th><th>结果研判</th><th>证据 / 载荷</th></tr></thead><tbody>${rows || empty(7, '没有符合条件的历史告警')}</tbody>`;
   const page = Math.floor(hs.offset / HS_PAGE) + 1;
   const total = hs.stats?.total ?? 0;
@@ -1220,8 +1228,8 @@ async function loadSurface() {
       <div class="ft">${badge(f.severity)}<span>${esc(f.title)}</span><span class="spacer"></span><span class="muted">${esc(f.category)} · ${num(f.count)} 次</span></div>
       <div class="asset">${esc(f.asset)}</div><div class="ev">${esc(f.evidence)}</div>
       <div class="fix">处置建议：${esc(f.remediation)}</div>
-      ${(f.ips || []).length ? `<div class="cell-chips"><span class="muted" style="font-size:11px">${f.category === '失陷迹象' ? '外连地址' : '来源'}</span>${f.ips.map((ip) => `<span class="chip ip clickable" data-ip="${esc(ip)}">${esc(ip)}</span>`).join('')}</div>` : ''}
-      <div class="muted" style="font-size:11px">${esc(fmtShort(f.first_seen))} ~ ${esc(fmtShort(f.last_seen))}</div></div>`).join('') || '<div class="empty">未发现明显暴露面风险</div>';
+      ${(f.ips || []).length ? `<div class="cell-chips"><span class="muted" style="font-size:12px">${f.category === '失陷迹象' ? '外连地址' : '来源'}</span>${f.ips.map((ip) => `<span class="chip ip clickable" data-ip="${esc(ip)}">${esc(ip)}</span>`).join('')}</div>` : ''}
+      <div class="muted" style="font-size:12px">${esc(fmtShort(f.first_seen))} ~ ${esc(fmtShort(f.last_seen))}</div></div>`).join('') || '<div class="empty">未发现明显暴露面风险</div>';
   $('#svcTable').innerHTML = `<thead><tr><th>目标</th><th>服务</th><th>风险</th><th>公网放行</th><th class="num">放行/拦截</th><th class="num">来源数</th><th>最近</th></tr></thead><tbody>${
     (s.services || []).map((v) => `<tr><td class="mono">${esc(v.dst_ip || '*')}:${v.port}/${esc(v.proto)}</td><td>${esc(v.name)}</td><td>${badge(v.risk)}</td>
       <td>${v.exposed ? '<span class="res-success">是</span>' : '<span class="muted">否</span>'}</td><td class="num">${num(v.allowed)} / ${num(v.denied)}</td>
@@ -1241,8 +1249,8 @@ async function loadSources() {
   $('#procCount').textContent = `已处理 ${num(r.processed)} 条事件 · 运行 ${rt.uptime || '-'} · 内存 ${rt.heap_mb ?? '-'} MB · 待溯源 ${r.geo_pending ?? 0}`;
   $('#srcTable').innerHTML = `<thead><tr><th>名称</th><th>路径/地址</th><th>配置类型</th><th>自动识别格式</th><th>状态</th><th class="num">行数</th><th class="num">解析成功</th><th class="num">失败</th><th>最近事件时间</th><th>最近失败样例</th></tr></thead><tbody>${
     (r.sources || []).map((s) => `<tr><td>${esc(s.name)}</td><td class="mono">${esc(s.path)}</td><td>${esc(s.type)}</td><td><span class="chip">${esc(s.detected || '-')}</span></td>
-      <td>${s.silent ? `<b class="lv-critical" title="超过 ${esc(s.silence)} 没有新日志，已推送断流告警">● 断流</b> <span class="muted">最后活动 ${esc(fmtShort(s.last_active))}</span><br>` : ''}${esc(SRC_STATUS[s.status] || s.status)}${s.last_error ? `<div class="lv-high" style="font-size:11px">${esc(s.last_error)}</div>` : ''}${s.time_offset
-        ? `<div class="lv-medium" style="font-size:11px" title="日志时间与实际时间相差整时区，已自动校正。通常是日志产生方（服务器 / 设备）按 UTC 等其他时区记录，而 timezone 配置为 ${esc(meta.timezone || '本地时区')}。可将日志产生方的时区改为一致，或忽略（已自动校正）。">时区已自动校正 ${esc(s.time_offset)}</div>` : ''}</td>
+      <td>${s.silent ? `<b class="lv-critical" title="超过 ${esc(s.silence)} 没有新日志，已推送断流告警">● 断流</b> <span class="muted">最后活动 ${esc(fmtShort(s.last_active))}</span><br>` : ''}${esc(SRC_STATUS[s.status] || s.status)}${s.last_error ? `<div class="lv-high" style="font-size:12px">${esc(s.last_error)}</div>` : ''}${s.time_offset
+        ? `<div class="lv-medium" style="font-size:12px" title="日志时间与实际时间相差整时区，已自动校正。通常是日志产生方（服务器 / 设备）按 UTC 等其他时区记录，而 timezone 配置为 ${esc(meta.timezone || '本地时区')}。可将日志产生方的时区改为一致，或忽略（已自动校正）。">时区已自动校正 ${esc(s.time_offset)}</div>` : ''}</td>
       <td class="num">${num(s.lines)}</td><td class="num">${num(s.parsed)}</td><td class="num">${s.failed ? `<span class="lv-medium">${num(s.failed)}</span>` : 0}</td>
       <td class="nowrap muted">${esc(fmtShort(s.last_event))}</td><td class="evidence">${esc(s.sample_failed || '')}</td></tr>`).join('') || empty(10, '未配置数据源')}</tbody>`;
   const sl = r.syslog || {};
@@ -1354,7 +1362,7 @@ async function openIP(ip) {
   const ports = sortedEntries(p.ports, 30).map(([k, v]) => `<span class="chip">${esc(k)} × ${v}</span>`).join('');
   const status = sortedEntries(p.status, 10).map(([k, v]) => `<span class="chip">${esc(k)} × ${v}</span>`).join('');
   const uas = sortedEntries(p.uas, 8).map(([k, v]) => `<div class="mono">${esc(k)} <span class="muted">× ${v}</span></div>`).join('');
-  const recent = (p.recent || []).slice().reverse().map((a) => `<tr><td class="nowrap muted">${esc(fmtShort(a.time))}</td><td>${badge(a.severity)} ${esc(a.name)}</td><td>${resTag(a.result)}</td><td class="mono">${esc(a.target)}</td><td class="evidence">${esc(a.evidence)}</td></tr>`).join('');
+  const recent = (p.recent || []).slice().reverse().map((a) => `<tr><td class="nowrap muted">${esc(fmtShort(a.time))}</td><td>${badge(a.severity)} ${esc(a.name)}</td><td>${resTag(a.result)}</td><td class="mono">${esc(a.target)}</td><td class="evidence"><div class="ev-clamp" title="${esc(a.evidence)}">${esc(a.evidence)}</div></td></tr>`).join('');
 
   const v6 = ip.includes(':');
   const advice = [];

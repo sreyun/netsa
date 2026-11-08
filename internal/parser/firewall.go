@@ -263,7 +263,7 @@ func fillSession(ev *model.Event, kv map[string]string, act string) {
 		return z
 	}
 	ev.SrcZone, ev.DstZone = zone(kvSrcZone), zone(kvDstZone)
-	ev.Policy = strings.TrimRight(strings.Trim(pick(kv, kvPolicy...), `"' `), ".") // 华为日志以句号结尾
+	ev.Policy = strings.TrimRight(strings.Trim(pick(kv, kvPolicy...), "\"' \x00"), ".") // 华为日志以句号结尾（直接发送的 syslog 末尾还带 NUL）
 	if ev.Policy == "-" || ev.Policy == "---" {
 		ev.Policy = ""
 	}

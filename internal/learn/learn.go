@@ -243,6 +243,9 @@ type Learner struct {
 	OnChange func(Change)
 	// PriorAttacks 返回来源此前的攻击次数（业务接口学习只用此前没有攻击记录的访客），为空时视为 0。
 	PriorAttacks func(ip string) int64
+	// RegularUser 判断来源是否为站点的常客（大量正常访问、攻击命中占比很低）。模型只看到告警、看不到这些正常访问，
+	// 常客被模型判为攻击多半是业务请求触发了误报：不凭模型的判断自动确认，已确认的撤销。为空时不做判断。
+	RegularUser func(ip string) bool
 }
 
 // state 是持久化的学习状态。

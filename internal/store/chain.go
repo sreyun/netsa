@@ -828,6 +828,10 @@ func (s *Store) weakLocked(g *chainGroup, st *chainStep) string {
 			return "该来源同时在 Web 日志中正常访问站点：防火墙只看得到连接数，是否为攻击以 Web 日志的 CC 检测为准"
 		case st.Rule == "bhv-timeout" && longLivedTarget(st.Target):
 			return "长连接（WebSocket / SockJS / SSE）本来就一直挂着：旧版本把页面的不断重连误判为慢请求攻击"
+		case st.Rule == "bhv-cc" && st.Severity < model.SevMedium:
+			return "高频请求以页面资源加载为主：App 内嵌页面不缓存、出口 NAT 后的多个用户同样会这样，说明不了拒绝服务"
+		case st.Rule == "bhv-cc" && staticTarget(st.Target) && s.webClientLocked(st.Src):
+			return "高频请求停在静态资源（脚本、样式、图片）上：多为 App 内嵌页面或出口 NAT 后多个用户的页面加载，旧版本只按请求数判为 CC 攻击"
 		}
 	case stBreach, stPersist:
 		if !st.Proven && st.Result == model.ResultSuccess && risk.ResponseProvable(st.Category) && !s.surf.successKept(st.Category, st.Target) {
@@ -873,6 +877,18 @@ func webTarget(target string) bool {
 func (s *Store) webClientLocked(ip string) bool {
 	p := s.ips[ip]
 	return p != nil && p.WebReqs >= 50 && p.Attacks*2 < p.WebReqs
+}
+
+// staticTarget 判断 Web 步骤的目标（站点 + 空格 + URI）是否为静态资源。
+func staticTarget(target string) bool {
+	_, uri, ok := strings.Cut(target, " ")
+	if !ok {
+		return false
+	}
+	if i := strings.IndexByte(uri, '?'); i >= 0 {
+		uri = uri[:i]
+	}
+	return detect.StaticAsset(uri)
 }
 
 // longLivedTarget 判断 Web 步骤的目标（站点 + 空格 + URI）是否为长连接接口。

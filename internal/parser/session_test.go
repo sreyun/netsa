@@ -23,6 +23,9 @@ func TestFirewallSessionFields(t *testing.T) {
 		// 华为策略匹配日志：外网探测被出站策略放行，目的安全域仍为 untrust
 		{"华为 POLICYPERMIT", `<190>Oct 29 2026 00:49:59 USG6300 %%01POLICY/6/POLICYPERMIT(l):vsys=public, protocol=6, source-ip=195.184.76.97, source-port=11062, destination-ip=43.242.97.35, destination-port=23, time=2026/10/29 08:49:59, source-zone=untrust, destination-zone=untrust, application-name=, rule-name=允许本地上外网.`,
 			"195.184.76.97", "43.242.97.35", "untrust", "untrust", "允许本地上外网", "", model.ActionAllow, model.ReplyUnknown},
+		// 原样转存的华为 syslog 末尾带 NUL：策略名不能带上它
+		{"华为 POLICYPERMIT 末尾 NUL", `<190>Oct 29 2026 00:49:59 USG6630E %%01POLICY/6/POLICYPERMIT(l):vsys=public, protocol=6, source-ip=79.124.58.130, source-port=11062, destination-ip=43.242.97.50, destination-port=830, time=2026/10/29 08:49:59, source-zone=untrust, destination-zone=local, application-name=, rule-name=default.` + "\x00",
+			"79.124.58.130", "43.242.97.50", "untrust", "local", "default", "", model.ActionAllow, model.ReplyUnknown},
 		// 华为会话日志：会话结束时目标无应答
 		{"华为 SESSION_TEARDOWN", `<190>2026-10-29 08:49:59 USG6300 %%01SECLOG/6/SESSION_TEARDOWN(l):IPVer=4,Protocol=tcp,SourceIP=195.184.76.97,DestinationIP=43.242.97.32,SourcePort=51234,DestinationPort=5432,SourceNatIP=,SourceNatPort=,BeginTime=1793235000,EndTime=1793235030,SendPkts=2,SendBytes=120,RcvPkts=0,RcvBytes=0,SourceVpnID=0,DestinationVpnID=0,SourceZone=untrust,DestinationZone=trust,PolicyName=web,CloseReason=aged-out.`,
 			"195.184.76.97", "43.242.97.32", "untrust", "trust", "web", "", model.ActionAllow, model.ReplyNone},

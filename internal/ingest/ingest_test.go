@@ -134,6 +134,36 @@ func TestSyslogUDP(t *testing.T) {
 	}
 }
 
+// 华为防火墙直接发送的 syslog 以 C 字符串结尾（末尾带 NUL）：NUL 不能进入最后一个字段（rule-name）。
+func TestSyslogTrailingNUL(t *testing.T) {
+	var udp, tcp []string
+	eachMessage("a=1\x00\n b=2 \x00\x00\nc=3", "\n\x00", func(l string) { udp = append(udp, l) })
+	if strings.Join(udp, "|") != "a=1|b=2|c=3" {
+		t.Fatalf("UDP 拆分: %q", udp)
+	}
+	eachMessage("line1\nline2\x00", "\x00", func(l string) { tcp = append(tcp, l) })
+	if len(tcp) != 1 || tcp[0] != "line1\nline2" {
+		t.Fatalf("TCP 帧内换行应保留: %q", tcp)
+	}
+
+	m := NewManager(100)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if err := m.StartSyslog(ctx, config.SyslogConfig{Enabled: true, UDP: "127.0.0.1:15517"}); err != nil {
+		t.Fatal(err)
+	}
+	conn, err := net.Dial("udp", "127.0.0.1:15517")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	fmt.Fprint(conn, `<190>Nov 07 2026 23:59:15 USG6630E %%01POLICY/6/POLICYPERMIT(l):vsys=public, protocol=6, source-ip=79.124.58.130, source-port=40000, destination-ip=43.242.97.50, destination-port=830, time=2026/11/08 07:59:15, source-zone=untrust, destination-zone=local, application-name=, rule-name=default.`+"\x00")
+	ev := collect(t, m.Out, 1)[0]
+	if ev.Policy != "default" || ev.DstZone != "local" || ev.DstPort != 830 {
+		t.Fatalf("policy=%q zone=%q port=%d", ev.Policy, ev.DstZone, ev.DstPort)
+	}
+}
+
 func TestLineReaderLongLines(t *testing.T) {
 	long := strings.Repeat("A", MaxLineBytes*2)
 	lr := newLineReader(strings.NewReader("short\n" + long + "\nnext\ntail-without-newline"))

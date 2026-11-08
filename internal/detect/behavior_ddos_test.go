@@ -2,6 +2,7 @@ package detect
 
 import (
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -176,5 +177,42 @@ func TestCCInternalSource(t *testing.T) {
 	}
 	if h := burst("10.34.45.31"); h.RuleID == "" || h.Severity != model.SevLow || !h.Weak {
 		t.Fatalf("内网来源的高频请求应为低危的弱证据: %+v", h)
+	}
+}
+
+// 线上实例：一台安卓手机上的 App（WebView 不缓存）一分钟内反复打开 H5 页面，695 次请求、196 个不同路径、
+// 八成以上是脚本与图片，全部 200。这是页面资源加载，不是 CC 攻击；反复请求同一个静态文件的仍按 CC 告警。
+func TestCCPageLoad(t *testing.T) {
+	th := config.Default().Detect.Thresholds
+	b := NewBehavior(th)
+	t0 := time.Date(2026, 11, 7, 9, 19, 0, 0, time.UTC)
+	burst := func(ip string, uri func(i int) string) model.Hit {
+		for i := range th.CCRequests + 5 {
+			for _, h := range b.Observe(&model.Event{Kind: model.KindWeb, SrcIP: ip, Host: "mg.example.com", Method: "GET", URI: uri(i),
+				Status: 200, Bytes: 4096, Time: t0.Add(time.Duration(i) * 80 * time.Millisecond)}) {
+				if h.RuleID == "bhv-cc" {
+					return h
+				}
+			}
+		}
+		return model.Hit{}
+	}
+	page := func(i int) string {
+		switch {
+		case i%8 == 0:
+			return fmt.Sprintf("/portal/api/tasks?page=%d", i)
+		case i%8 == 1:
+			return "/platform-h5/favicon.png"
+		}
+		return fmt.Sprintf("/platform-h5/static/js/chunk-%d.js", i%60)
+	}
+	if h := burst("14.31.64.16", page); h.RuleID == "" || h.Severity != model.SevLow || !h.Weak || !strings.Contains(h.Evidence, "页面资源加载") {
+		t.Fatalf("页面资源加载应为低危的弱证据: %+v", h)
+	}
+	if h := burst("14.31.64.17", func(int) string { return "/platform-h5/static/js/index.js" }); h.Severity != model.SevHigh || h.Weak {
+		t.Fatalf("反复请求同一个文件仍是 CC: %+v", h)
+	}
+	if h := burst("14.31.64.18", func(i int) string { return fmt.Sprintf("/search?q=%d", i) }); h.Severity != model.SevHigh || h.Weak {
+		t.Fatalf("变换参数请求同一接口仍是 CC: %+v", h)
 	}
 }
