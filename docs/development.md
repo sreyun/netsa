@@ -96,16 +96,16 @@ docs/                 使用与开发文档（images/ 为 README 截图，i18n/ 
 
 | 触发 | 行为 |
 |---|---|
-| 创建 tag `v1.11.3` | 构建 + 启动自检 + 推送：`1.11.3`、`1.11`、`1`、`latest`、`sha-xxxxxxx` |
-| 创建预发布 tag `v1.11.3-rc1` | 只推 `1.11.3-rc1`、`sha-xxxxxxx`，不动 `latest` / `1.11` / `1` |
+| 创建 tag `v1.11.4` | 构建 + 启动自检 + 推送：`1.11.4`、`1.11`、`1`、`latest`、`sha-xxxxxxx` |
+| 创建预发布 tag `v1.11.4-rc1` | 只推 `1.11.4-rc1`、`sha-xxxxxxx`，不动 `latest` / `1.11` / `1` |
 | 推送 `master` / Pull Request | 不构建镜像（质量门禁由 `ci` 工作流负责） |
 | 手动触发（workflow_dispatch） | 填写要发布的 tag 与是否更新 `latest`；按该 tag 检出源码，版本与内容严格对应 |
 
 发布流程：
 
 ```bash
-git tag v1.11.3
-git push origin v1.11.3
+git tag v1.11.4
+git push origin v1.11.4
 ```
 
 需要在仓库 **Settings → Secrets and variables → Actions** 配置两个 Secret：
@@ -131,9 +131,9 @@ printf '%s' "$AK" | openssl dgst -binary -sha256 -hmac "$SK" | od -An -vtx1 | tr
 | `GOPROXY` | `https://goproxy.cn,direct` | 构建时的 Go 模块代理 |
 
 ```bash
-docker pull swr.cn-east-3.myhuaweicloud.com/sreyun/netsa:1.11.3
+docker pull swr.cn-east-3.myhuaweicloud.com/sreyun/netsa:1.11.4
 docker run -d --name netsa -p 8080:8080 -p 5514:5514/udp -v netsa-state:/app/state \
-  swr.cn-east-3.myhuaweicloud.com/sreyun/netsa:1.11.3
+  swr.cn-east-3.myhuaweicloud.com/sreyun/netsa:1.11.4
 ```
 
 - **版本随 tag 注入**：构建时通过 `-ldflags "-X main.version=<tag>"` 写入二进制，`netsa version` 与 `/api/meta` 显示的就是发布版本；本地 `docker build` 不传该参数，仍使用源码中的默认版本。

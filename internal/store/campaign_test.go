@@ -187,3 +187,35 @@ func TestCorrelateTLSAndRhythm(t *testing.T) {
 		t.Fatalf("行为节奏: %+v", p.Rhythm)
 	}
 }
+
+// 缓存过期后先返回上一次的结果，在后台重新归并；重新归并完成后返回新结果，同一时间只有一个后台归并。
+func TestCampaignsStaleWhileRevalidate(t *testing.T) {
+	s := newTestStore()
+	first := s.Campaigns()
+	if first == nil || s.Campaigns() != first {
+		t.Fatal("有效期内应返回缓存")
+	}
+	s.campMu.Lock()
+	first.Generated = time.Now().Add(-2 * campaignTTL)
+	s.campMu.Unlock()
+	if got := s.Campaigns(); got != first {
+		t.Fatal("过期后应先返回上一次的结果，不等待重新归并")
+	}
+	s.Campaigns() // 后台归并进行中：不再启动第二个
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		s.campMu.Lock()
+		cur, building := s.camp, s.campBuilding
+		s.campMu.Unlock()
+		if cur != first && !building {
+			if time.Since(cur.Generated) > campaignTTL {
+				t.Fatal("后台归并的结果应是新的")
+			}
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("后台归并没有完成")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}

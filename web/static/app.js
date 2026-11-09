@@ -332,6 +332,7 @@ $('#subnav').addEventListener('click', (e) => {
 const drillState = { attackers: null, alerts: null };
 // drillTo 打开目标列表。params 为附加到接口的筛选参数，label 为条件说明，native 为列表自带的筛选控件取值。
 function drillTo(tab, { params = {}, label = '', native = {} } = {}) {
+  exitMapFull(); // 从全屏地图下钻：先退出全屏，目标页面才能显示
   if (tab === 'attackers') {
     $('#atkSearch').value = native.q || '';
     $('#atkLevel').value = native.level || '';
@@ -684,7 +685,7 @@ async function renderMap(reset) {
   };
   const stagger = (i) => (i * 137) % 4000; // 错开各条飞线的出发时间，避免同时脉动
   const size = (a) => 7 + 18 * Math.sqrt(a / maxA);
-  const labelN = mapCtl.view === 'world' ? 16 : 30;
+  const labelN = (mapCtl.view === 'world' ? 16 : 30) * (mapIsFull() ? 2 : 1); // 全屏时标注更多地点
   const pointItem = (p, i) => ({
     name: placeShort(p), value: [p.lon, p.lat, p.attacks], p,
     symbol: pointSymbol(p), symbolSize: size(p.attacks),
@@ -789,13 +790,24 @@ function updateMapChrome(pts, regions, outs = []) {
   }
   if (pts.length) stats += `<br/>精确坐标占比<b>${Math.round((exact * 100) / pts.length)}%</b>`;
   $('#mapStats').innerHTML = stats;
-  const notes = [];
-  if (d.no_coord > 0) notes.push(`${d.no_coord} 个攻击源无法定位（未配置自定义网段的内网地址或定位库中无记录）`);
-  if (outs.length) notes.push('紫色虚线为内网主机对外的攻击或异常连接（木马回连、周期性外连、数据外传、对外扫描等），从受保护资产指向外部目标');
-  if (d.out_no_coord > 0) notes.push(`${d.out_no_coord} 个内部对外的目标无法定位`);
-  if (pts.some((p) => p.internal)) notes.push('菱形为命中自定义网段的内网攻击源');
-  if (pts.length && exact < pts.length) notes.push('空心点为按城市/省份/国家中心换算的近似位置，配置 MaxMind 或开启在线溯源可获得精确坐标');
-  $('#mapNote').textContent = notes.join('；');
+  // 说明只留结论，原因与改进办法放在悬停提示里（图例“内部对外”另有悬停说明）
+  const notes = [], tips = [];
+  if (d.no_coord > 0) {
+    notes.push(`${d.no_coord} 个攻击源无法定位`);
+    tips.push('无法定位：未配置自定义网段的内网地址，或定位库中没有记录');
+  }
+  if (d.out_no_coord > 0) notes.push(`${d.out_no_coord} 个外连目标无法定位`);
+  if (pts.some((p) => p.internal)) {
+    notes.push('菱形为内网攻击源');
+    tips.push('菱形：命中自定义网段（geo.custom）的内网攻击源');
+  }
+  if (pts.length && exact < pts.length) {
+    notes.push('空心点为近似位置');
+    tips.push('空心点：按城市 / 省份 / 国家中心换算的近似位置，配置 MaxMind 或开启在线溯源可获得精确坐标');
+  }
+  const note = $('#mapNote');
+  note.textContent = notes.join(' · ');
+  note.title = tips.join('\n');
   $('#mapCrumb').innerHTML = mapCtl.view === 'china' && mapCtl.province
     ? `<button type="button" id="crumbBack">中国</button> › <b>${esc(mapCtl.province)}</b> <button type="button" id="crumbList" title="列出该省全部攻击源">攻击源列表 ›</button>`
     : mapCtl.view === 'china' ? '<button type="button" id="crumbList" title="列出国内全部攻击源">国内攻击源列表 ›</button>' : '';
@@ -869,9 +881,67 @@ chartSetup.cMap = (c) => c.on('click', (x) => {
   }
   drillTo('attackers', { params: { province: mapCtl.province, city_map: x.name }, label: `来源地市 = ${mapCtl.province} ${label}` });
 });
+// 地图全屏：优先使用浏览器全屏（整块地图面板，含视图切换、统计、图例与说明），浏览器不支持或拒绝时铺满窗口。
+// 全屏时保留缩放与平移，标注的地点数加倍；跳转到其他页面（攻击源详情、下钻列表）前先退出全屏。
+const mapPanel = () => $('.map-panel');
+const mapIsFull = () => !!mapPanel() && (document.fullscreenElement === mapPanel() || mapPanel().classList.contains('map-max'));
+function syncMapFull() {
+  const b = $('#mapFull');
+  if (!b) return;
+  const on = mapIsFull();
+  // 图标按钮：aria-pressed 切换“展开 / 收起”两个图标（见样式 .map-icon），提示文字随状态变化
+  b.title = on ? '退出全屏（Esc）' : '全屏查看（Esc 退出）';
+  b.setAttribute('aria-label', on ? '退出全屏' : '全屏查看');
+  b.setAttribute('aria-pressed', String(on));
+  setTimeout(() => {
+    if (charts.cMap && !charts.cMap.isDisposed()) charts.cMap.resize();
+    renderMap(false); // 按新的尺寸调整标注数量，保留当前视角
+  }, 150);
+}
+function toggleMapFull() {
+  if (mapIsFull()) { exitMapFull(); return; }
+  const p = mapPanel();
+  hidePop();
+  let done = false;
+  const fallback = () => {
+    if (done || document.fullscreenElement === p) return;
+    done = true;
+    p.classList.add('map-max');
+    document.body.classList.add('map-max-open');
+    syncMapFull();
+  };
+  if (!p.requestFullscreen || !document.fullscreenEnabled) { fallback(); return; }
+  p.requestFullscreen().then(() => { done = true; }, fallback);
+  // 嵌入式浏览器（桌面客户端的内置浏览器、iframe 等）可能既不进入全屏也不报错：短时间内没有进入全屏就铺满窗口
+  setTimeout(fallback, 600);
+}
+function exitMapFull() {
+  const p = mapPanel();
+  if (!p) return;
+  if (p.classList.contains('map-max')) {
+    p.classList.remove('map-max');
+    document.body.classList.remove('map-max-open');
+    syncMapFull();
+  }
+  if (document.fullscreenElement === p) document.exitFullscreen().catch(() => {});
+}
+document.addEventListener('fullscreenchange', () => {
+  const p = mapPanel();
+  if (p && document.fullscreenElement === p && p.classList.contains('map-max')) { // 浏览器全屏晚于退化方式生效：以浏览器全屏为准
+    p.classList.remove('map-max');
+    document.body.classList.remove('map-max-open');
+  }
+  syncMapFull();
+});
+document.addEventListener('keydown', (e) => {
+  // 铺满窗口的退化方式没有浏览器的 Esc 处理；全局搜索打开时 Esc 先关闭搜索框
+  if (e.key === 'Escape' && mapPanel()?.classList.contains('map-max') && $('#gsModal')?.hidden !== false) exitMapFull();
+});
+
 function initMapEvents() {
   $$('#mapView button').forEach((b) => b.addEventListener('click', () => switchMapView(b.dataset.v)));
   $('#mapReset').addEventListener('click', () => { hidePop(); renderMap(true); });
+  $('#mapFull').addEventListener('click', toggleMapFull);
 }
 
 async function loadTopAttackers() {
@@ -1398,6 +1468,7 @@ document.addEventListener('keydown', (e) => {
 });
 
 async function openIP(ip) {
+  exitMapFull(); // 攻击源详情在地图面板之外，全屏时看不到
   let d;
   try { d = await api('/api/ip/' + encodeURIComponent(ip)); } catch (e) { return; }
   const s = d.summary;

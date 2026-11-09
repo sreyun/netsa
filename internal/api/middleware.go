@@ -135,7 +135,8 @@ type gzipWriter struct {
 func (g *gzipWriter) WriteHeader(code int) {
 	if !g.wroteHeader {
 		g.wroteHeader = true
-		g.compress = code >= 200 && code != http.StatusNoContent && code != http.StatusNotModified
+		// 已经压缩好的响应（静态文件的预压缩结果）原样输出
+		g.compress = code >= 200 && code != http.StatusNoContent && code != http.StatusNotModified && g.Header().Get("Content-Encoding") == ""
 		if g.compress {
 			g.Header().Del("Content-Length")
 			g.Header().Set("Content-Encoding", "gzip")

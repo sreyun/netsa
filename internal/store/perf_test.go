@@ -3,6 +3,7 @@ package store
 import (
 	"fmt"
 	"math"
+	"math/rand"
 	"sort"
 	"testing"
 	"time"
@@ -161,6 +162,64 @@ func BenchmarkAttackers(b *testing.B) {
 	for i := 0; i < b.N; i++ {
 		if list, total := s.Attackers(AttackerQuery{Limit: 50}); total != 50000 || len(list) != 50 {
 			b.Fatalf("total=%d len=%d", total, len(list))
+		}
+	}
+}
+
+// 分页查询只保留前 k 个候选：任意排序方式、偏移与页长下，结果与完整排序后分页完全一致。
+func TestAttackersTopKMatchesFullSort(t *testing.T) {
+	s := New(10000, 1000, 5, time.Hour)
+	rng := rand.New(rand.NewSource(7))
+	base := time.Now().Add(-time.Hour)
+	for i := 0; i < 3000; i++ {
+		ip := fmt.Sprintf("10.%d.%d.%d", i/65536, (i/256)%256, i%256)
+		p := &IPProfile{IP: ip, Score: float64(rng.Intn(20)), Attacks: int64(1 + rng.Intn(5)), Level: model.SevLow,
+			FirstSeen: base, LastSeen: base.Add(time.Duration(rng.Intn(50)) * time.Second), Categories: map[string]int{"端口扫描": 1}}
+		s.ips[ip] = p
+	}
+	full := func(sortBy string) []string {
+		all, _ := s.Attackers(AttackerQuery{Sort: sortBy}) // 不分页：完整排序
+		out := make([]string, len(all))
+		for i, a := range all {
+			out[i] = a.IP
+		}
+		return out
+	}
+	for _, sortBy := range []string{"", "score", "attacks", "last"} {
+		want := full(sortBy)
+		for _, pg := range [][2]int{{0, 1}, {0, 50}, {37, 20}, {2990, 50}, {0, 3000}, {0, 5000}, {3100, 10}} {
+			got, total := s.Attackers(AttackerQuery{Sort: sortBy, Offset: pg[0], Limit: pg[1]})
+			if total != 3000 {
+				t.Fatalf("总数: %d", total)
+			}
+			lo, hi := min(pg[0], len(want)), min(pg[0]+pg[1], len(want))
+			if len(got) != hi-lo {
+				t.Fatalf("sort=%s 分页 %v: 条数 %d，期望 %d", sortBy, pg, len(got), hi-lo)
+			}
+			for i := range got {
+				if got[i].IP != want[lo+i] {
+					t.Fatalf("sort=%s 分页 %v 第 %d 条: %s，期望 %s", sortBy, pg, i, got[i].IP, want[lo+i])
+				}
+			}
+		}
+	}
+}
+
+// 2 万个入口、2 万个服务时生成攻击面报告的耗时（页面只取前 500 / 300 个）。
+func BenchmarkSurface(b *testing.B) {
+	s := New(1000, 100, 5, time.Hour)
+	for i := 0; i < maxEndpoints; i++ {
+		ep := &Endpoint{Host: fmt.Sprintf("s%d.example.com", i%40), Path: fmt.Sprintf("/p/%d", i), Hits: int64(i % 997), Attacks: int64(i % 13),
+			Severity: model.Severity(i % 5), Methods: map[string]int{"GET": i}, Status: map[int]int{200: i, 404: 1}}
+		s.surf.Endpoints[ep.Host+" "+ep.Path] = ep
+		sv := &Service{DstIP: fmt.Sprintf("10.0.%d.%d", i/250, i%250), Port: 1 + i%60000, Proto: "tcp", Risk: model.Severity(i % 5), Sources: i % 77, Exposed: i%3 == 0}
+		s.surf.Services[fmt.Sprintf("%s:%d/tcp", sv.DstIP, sv.Port)] = sv
+	}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if r := s.Surface(); len(r.Endpoints) != 500 || len(r.Services) != 300 {
+			b.Fatalf("endpoints=%d services=%d", len(r.Endpoints), len(r.Services))
 		}
 	}
 }

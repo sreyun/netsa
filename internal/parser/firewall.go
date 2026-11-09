@@ -4,6 +4,8 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 
 	"netsa/internal/model"
 )
@@ -340,14 +342,44 @@ func (KVFirewall) Parse(line string) (*model.Event, bool) {
 	if strings.Contains(line, "%%") && reATKHeader.MatchString(line) {
 		return nil, false
 	}
-	kv := make(map[string]string, 32)
+	kv := kvMapPool.Get().(map[string]string)
+	defer func() {
+		clear(kv)
+		kvMapPool.Put(kv)
+	}()
 	kvPairs(line, func(key, val string) {
-		k := strings.ToLower(kvKey.Replace(key))
+		k := normKVKey(key)
 		if _, ok := kv[k]; !ok {
 			kv[k] = val
 		}
 	})
-	return kvEvent(kv, "kv_firewall", line)
+	return kvEvent(kv, "kv_firewall", line) // kvEvent 只在调用期间读取 kv，事件里保存的是取值（日志行的子串）
+}
+
+// 防火墙会话日志是数量最多的日志（生产环境 95% 以上），每行几十个键值对：
+//   - 键值表复用（sync.Pool），不再每行新建一个 map；
+//   - 键名的归一结果（转小写、去掉 _ - .）按原始写法缓存：同一种设备每行都是同样几十个键（华为的 SourceIP、
+//     DestinationPort…），不必每个键都重新分配一次字符串。缓存条数有上限，键名异常多时不再增加。
+var kvMapPool = sync.Pool{New: func() any { return make(map[string]string, 48) }}
+
+var (
+	kvKeyCache  sync.Map // 原始键名 → 归一键名
+	kvKeyCached atomic.Int32
+)
+
+const maxKVKeyCache = 4096
+
+func normKVKey(key string) string {
+	if v, ok := kvKeyCache.Load(key); ok {
+		return v.(string)
+	}
+	k := strings.ToLower(kvKey.Replace(key))
+	if kvKeyCached.Load() < maxKVKeyCache && len(key) <= 64 {
+		if _, loaded := kvKeyCache.LoadOrStore(strings.Clone(key), k); !loaded { // 键名是日志行的子串，复制后再缓存，不连带保留整行
+			kvKeyCached.Add(1)
+		}
+	}
+	return k
 }
 
 func kvEvent(kv map[string]string, format, line string) (*model.Event, bool) {

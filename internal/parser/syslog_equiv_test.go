@@ -71,6 +71,21 @@ var syslogSamples = []string{
 	`<0>Nov  9 09:47:19 h t`,
 	`<999>Jan  1 00:00:00 h tag[1]:x`,
 	`Mar 31 23:59:59.123456 2026 host kernel: [UFW BLOCK] IN=eth0 SRC=203.0.113.1`,
+	"<134>Nov	9 10:00:00 host msg",
+	"<134>Nov  9	2026 10:00:00 host msg",
+	"<134>Nov 9 2026 10:00:00	host	msg",
+	"<134>Nov 9 10:00:00 20261 host msg",
+	"<134>Nov 9 10:00:00 2026",
+	"<134>Nov 9 10:00:00 2026 ",
+	"<134>Nov 9 10:00:00 1234 host",
+	"<134>Nov 9 10:00:00.5Z host msg",
+	"<134>Nov 19 2026 10:00:00.000123 fw-01:  body",
+	"<12a>Nov 9 10:00:00 host msg",
+	"<1>Nov 9 10:00:00 h: tagless",
+	"Nov 123 10:00:00 host msg",
+	"Nov 9 2026 1:00:00 host msg",
+	"<190>Nov  9 2026 01:47:19 USG6630E \x00\x01 %%01SECLOG/6/SESSION_TEARDOWN(l):x=1",
+	"<190>Nov  9 2026 01:47:19 USG6630E\v%%01SECLOG",
 }
 
 func TestStripSyslogMatchesReference(t *testing.T) {
@@ -78,7 +93,7 @@ func TestStripSyslogMatchesReference(t *testing.T) {
 	const alphabet = " <>:[]-T01239aZz%\"=.\t/"
 	lines := append([]string(nil), syslogSamples...)
 	for _, s := range syslogSamples {
-		for k := 0; k < 300; k++ {
+		for k := 0; k < 2000; k++ {
 			b := []byte(s)
 			for n := rng.Intn(4) + 1; n > 0; n-- {
 				i := rng.Intn(len(b))
@@ -127,4 +142,21 @@ func refASAParse(msg string) string {
 		return ""
 	}
 	return a[3]
+}
+
+// 任意输入下，报文头解析（含手写的 RFC3164 快速匹配）与改造前的正则实现结果一致。
+func FuzzStripSyslogMatchesReference(f *testing.F) {
+	for _, s := range syslogSamples {
+		f.Add(s)
+	}
+	f.Fuzz(func(t *testing.T, line string) {
+		if strings.ContainsRune(line, '\n') {
+			t.Skip("含换行的报文：旧实现的 (.*)$ 不能跨行匹配，整条不识别；新实现正常剥离报文头（有意的改进）")
+		}
+		gotRest, gotH, gotOK := StripSyslog(line)
+		wantRest, wantH, wantOK := refStripSyslog(line)
+		if gotRest != wantRest || gotOK != wantOK || gotH.Host != wantH.Host || gotH.Tag != wantH.Tag || !gotH.Time.Equal(wantH.Time) {
+			t.Fatalf("结果不一致: %q\n新: %q %+v %v\n旧: %q %+v %v", line, gotRest, gotH, gotOK, wantRest, wantH, wantOK)
+		}
+	})
 }

@@ -92,7 +92,16 @@
       <div class="panel map-panel area-map">
         <h3>攻击来源态势地图
           <span class="crumb" id="mapCrumb"></span>
-          <span class="seg map-seg" id="mapView"><button data-v="world" class="active">世界</button><button data-v="china">中国</button></span>
+          <span class="map-head">
+            <span class="seg map-seg" id="mapView"><button data-v="world" class="active">世界</button><button data-v="china">中国</button></span>
+            <button type="button" class="map-icon" id="mapReset" title="重置视角" aria-label="重置视角">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3.5 12a8.5 8.5 0 1 0 2.6-6.1"/><path d="M3 4.5V9h4.5"/><circle cx="12" cy="12" r="1.6"/></svg>
+            </button>
+            <button type="button" class="map-icon" id="mapFull" title="全屏查看（Esc 退出）" aria-label="全屏查看" aria-pressed="false">
+              <svg class="i-expand" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 3.5H3.5V9M15 3.5h5.5V9M20.5 15v5.5H15M3.5 15v5.5H9"/></svg>
+              <svg class="i-compress" viewBox="0 0 24 24" aria-hidden="true"><path d="M3.5 9H9V3.5M20.5 9H15V3.5M15 20.5V15h5.5M9 20.5V15H3.5"/></svg>
+            </button>
+          </span>
         </h3>
         <div class="map-wrap">
           <div class="chart" id="cMap"></div>
@@ -100,10 +109,9 @@
           <div class="map-legend">
             <span><i style="background:var(--critical)"></i>严重</span><span><i style="background:var(--high)"></i>高危</span>
             <span><i style="background:var(--medium)"></i>中危</span><span><i style="background:var(--low)"></i>低危</span>
-            <span><i class="out-line"></i>内部对外</span>
+            <span title="内网主机对外的攻击或异常连接：木马回连、周期性外连、数据外传、对外扫描等（正常的出站访问不画线）"><i class="out-line"></i>内部对外</span>
             <span class="muted">◎ 精确坐标　○ 区划中心</span>
           </div>
-          <div class="map-tools"><button class="btn" id="mapReset" title="重置视角">⟲ 重置</button></div>
           <div class="map-pop" id="mapPop" hidden></div>
         </div>
         <div class="map-note" id="mapNote"></div>

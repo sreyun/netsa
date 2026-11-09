@@ -880,12 +880,21 @@ func (b *Behavior) prune(now time.Time) {
 	b.pruneImpact(now)
 }
 
+// fmtDur 把统计窗口格式化为“5分钟”“30秒”。窗口来自配置、只有少数几个取值，结果缓存起来：
+// 行为检测每条日志都要准备一次窗口文字（防火墙日志处理中曾占约 1%）。
 func fmtDur(d time.Duration) string {
-	if d%time.Minute == 0 {
-		return fmt.Sprintf("%d分钟", int(d/time.Minute))
+	if v, ok := durText.Load(d); ok {
+		return v.(string)
 	}
-	return fmt.Sprintf("%d秒", int(d/time.Second))
+	s := fmt.Sprintf("%d秒", int(d/time.Second))
+	if d%time.Minute == 0 {
+		s = fmt.Sprintf("%d分钟", int(d/time.Minute))
+	}
+	durText.Store(d, s)
+	return s
 }
+
+var durText sync.Map // time.Duration → 文字
 
 // outside 判断事件是否落在窗口之外；允许多数据源之间存在少量乱序。
 func outside(t, start time.Time, win time.Duration) bool {

@@ -279,15 +279,7 @@ func (s *Server) Handler() http.Handler {
 		mux.HandleFunc("GET /debug/pprof/trace", pprof.Trace)
 	}
 	if s.Static != nil {
-		files := http.FileServer(http.FS(s.Static))
-		mux.Handle("GET /", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if strings.HasPrefix(r.URL.Path, "/vendor/") {
-				w.Header().Set("Cache-Control", "public, max-age=604800")
-			} else {
-				w.Header().Set("Cache-Control", "no-cache")
-			}
-			files.ServeHTTP(w, r)
-		}))
+		mux.Handle("GET /", newStaticFiles(s.Static)) // 内容、ETag 与压缩结果缓存（static.go）
 	}
 
 	root := http.NewServeMux()

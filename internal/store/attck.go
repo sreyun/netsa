@@ -269,8 +269,6 @@ type AttackMatrix struct {
 	Unmapped int64        `json:"unmapped"` // 未映射到 ATT&CK 的攻击命中（如自定义规则、威胁情报）
 }
 
-// attackMatrixLocked 汇总 ATT&CK 矩阵（调用方持读锁）。所有可检测的技术都会列出，未观测到的命中数为 0，
-// 便于同时看出攻击者用到了哪些手法、平台对哪些手法具备检测能力。
 // matrixAcc 累计各技术的攻击源数与最高等级。每个攻击源用位掩码记录用到的技术、计数放在数组中，
 // 遍历数万个画像时不做 map 分配，缩短读锁占用；安全评估在收集其他指标的同一次遍历中累计。
 type matrixAcc struct {
@@ -298,21 +296,8 @@ func (a *matrixAcc) done() {
 	a.mask = 0
 }
 
-func (s *Store) attackMatrixLocked() *AttackMatrix {
-	var acc matrixAcc
-	for _, p := range s.ips {
-		if p.Attacks == 0 {
-			continue
-		}
-		for cat := range p.Categories {
-			acc.category(cat, p.CatSev[cat])
-		}
-		acc.done()
-	}
-	return s.buildMatrixLocked(&acc)
-}
-
-// buildMatrixLocked 由累计结果生成 ATT&CK 矩阵（调用方持读锁）。
+// buildMatrixLocked 由累计结果生成 ATT&CK 矩阵（调用方持读锁）。所有可检测的技术都会列出，未观测到的命中数为 0，
+// 便于同时看出攻击者用到了哪些手法、平台对哪些手法具备检测能力。
 func (s *Store) buildMatrixLocked(acc *matrixAcc) *AttackMatrix {
 	attackers, maxSev := acc.attackers, acc.maxSev
 	m := &AttackMatrix{Total: len(techniques)}
@@ -352,11 +337,11 @@ func (s *Store) buildMatrixLocked(acc *matrixAcc) *AttackMatrix {
 	return m
 }
 
-// AttackMatrix 返回 ATT&CK 矩阵。
+// AttackMatrix 返回 ATT&CK 矩阵：按增量统计生成（与安全评估一致），不再逐个遍历攻击源画像。
 func (s *Store) AttackMatrix() *AttackMatrix {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return s.attackMatrixLocked()
+	return s.buildMatrixLocked(s.agg.matrixAcc())
 }
 
 // matchTechnique 判断攻击类型集合是否包含映射到该技术的类型。

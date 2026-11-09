@@ -73,13 +73,24 @@ const (
 )
 
 // Campaigns 返回攻击活动归并结果（结果缓存 1 分钟）。
+// 缓存过期后先返回上一次的结果、在后台重新归并（同一时间只有一个），请求不再等待整轮归并
+// （数千个攻击源约百毫秒以上，全局搜索、攻击活动页面都会调用）；只有第一次调用同步生成。
 func (s *Store) Campaigns() *CampaignReport {
 	s.campMu.Lock()
 	defer s.campMu.Unlock()
-	if s.camp != nil && time.Since(s.camp.Generated) < campaignTTL {
+	if s.camp == nil {
+		s.camp = s.buildCampaigns()
 		return s.camp
 	}
-	s.camp = s.buildCampaigns()
+	if time.Since(s.camp.Generated) >= campaignTTL && !s.campBuilding {
+		s.campBuilding = true
+		go func() {
+			rep := s.buildCampaigns()
+			s.campMu.Lock()
+			s.camp, s.campBuilding = rep, false
+			s.campMu.Unlock()
+		}()
+	}
 	return s.camp
 }
 
@@ -90,17 +101,26 @@ type campEdge struct {
 
 func (s *Store) buildCampaigns() *CampaignReport {
 	rep := &CampaignReport{Campaigns: []*Campaign{}, Generated: time.Now()}
+	// 评分在读锁内取出：解锁后写者会继续更新画像，不能再读取其字段
+	type scored struct {
+		p     *IPProfile
+		score float64
+	}
 	s.mu.RLock()
-	list := make([]*IPProfile, 0, len(s.ips))
+	all := make([]scored, 0, len(s.ips))
 	for _, o := range s.ips {
 		if isAttacker(o) {
-			list = append(list, o)
+			all = append(all, scored{o, o.Score})
 		}
 	}
 	s.mu.RUnlock()
-	sort.Slice(list, func(i, j int) bool { return list[i].Score > list[j].Score })
-	if len(list) > campaignMax {
-		list = list[:campaignMax]
+	sort.Slice(all, func(i, j int) bool { return all[i].score > all[j].score })
+	if len(all) > campaignMax {
+		all = all[:campaignMax]
+	}
+	list := make([]*IPProfile, len(all))
+	for i := range all {
+		list[i] = all[i].p
 	}
 	rep.Scanned = len(list)
 

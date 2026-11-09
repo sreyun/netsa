@@ -100,6 +100,24 @@ func (s *netSet) classify(a netip.Addr) int {
 			return addrInternal
 		}
 	}
+	if a.Is4() {
+		// IPv4 内置网段按字节判断，与 builtinInternal / builtinReserved 中的 IPv4 网段一致（见 TestClassifyFastPath）：
+		// 每条日志的检测、入库要判断十几次来源是否为内网，逐个网段比较是防火墙日志处理中的热点
+		b := a.As4()
+		switch {
+		case b[0] == 10, b[0] == 127, b[0] == 100 && b[1]&0xc0 == 64, b[0] == 169 && b[1] == 254,
+			b[0] == 172 && b[1]&0xf0 == 16, b[0] == 192 && b[1] == 168:
+			return addrInternal
+		case b[0] == 0, b[0] >= 240:
+			return addrReserved
+		}
+		return addrPublic
+	}
+	return s.classifySlow(a)
+}
+
+// classifySlow 按内置网段列表逐个比较（IPv6，以及验证 IPv4 快速判断时使用）。
+func (s *netSet) classifySlow(a netip.Addr) int {
 	for _, p := range s.builtinInternal {
 		if p.Contains(a) {
 			return addrInternal
@@ -183,7 +201,10 @@ func ExtraInternalNetworks() []string {
 // 以及配置与自动探测补充的内网段）。保留 / 文档 / 基准测试地址不属于内网，但同样不可路由，
 // 由 IsNonPublic 判断。
 func IsPrivate(ip string) bool {
-	a, err := netip.ParseAddr(strings.TrimSpace(ip))
+	if n := len(ip); n > 0 && (ip[0] <= ' ' || ip[0] >= 0x80 || ip[n-1] <= ' ' || ip[n-1] >= 0x80) { // 日志中的地址通常已去掉空白，需要时才处理
+		ip = strings.TrimSpace(ip)
+	}
+	a, err := netip.ParseAddr(ip)
 	if err != nil {
 		return false
 	}

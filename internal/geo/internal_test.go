@@ -1,6 +1,7 @@
 package geo
 
 import (
+	"math/rand"
 	"net/netip"
 	"testing"
 )
@@ -127,5 +128,53 @@ func TestReclassifyAfterIntranetChange(t *testing.T) {
 	r.mu.Unlock()
 	if enriched {
 		t.Fatal("移出内网后应允许重新补全在线定位")
+	}
+}
+
+// IPv4 的快速判断与按内置网段列表逐个比较的结果必须一致（随机地址 + 各网段边界）。
+func TestClassifyFastPath(t *testing.T) {
+	s := internalSet.Load()
+	check := func(a netip.Addr) {
+		t.Helper()
+		if !a.IsValid() || a.IsLoopback() || a.IsLinkLocalUnicast() || a.IsUnspecified() || a.IsMulticast() {
+			return // 这些地址在快速判断之前就已返回
+		}
+		var fast int
+		switch b := a.As4(); {
+		case b[0] == 10, b[0] == 127, b[0] == 100 && b[1]&0xc0 == 64, b[0] == 169 && b[1] == 254,
+			b[0] == 172 && b[1]&0xf0 == 16, b[0] == 192 && b[1] == 168:
+			fast = addrInternal
+		case b[0] == 0, b[0] >= 240:
+			fast = addrReserved
+		default:
+			fast = addrPublic
+		}
+		if got, want := s.classify(a), s.classifySlow(a); got != want || fast != want {
+			t.Fatalf("%s: classify=%d fast=%d slow=%d", a, got, fast, want)
+		}
+	}
+	rng := rand.New(rand.NewSource(3))
+	for i := 0; i < 200000; i++ {
+		check(netip.AddrFrom4([4]byte{byte(rng.Intn(256)), byte(rng.Intn(256)), byte(rng.Intn(256)), byte(rng.Intn(256))}))
+	}
+	for _, c := range append(append([]string(nil), builtinInternal...), builtinReserved...) {
+		p := netip.MustParsePrefix(c)
+		if !p.Addr().Is4() {
+			continue
+		}
+		first := p.Masked().Addr()
+		check(first)
+		check(first.Prev())
+		last := first
+		for i := 0; i < 32-p.Bits(); i++ { // 网段内最后一个地址
+			b := last.As4()
+			v := uint32(b[0])<<24 | uint32(b[1])<<16 | uint32(b[2])<<8 | uint32(b[3])
+			v |= 1 << i
+			last = netip.AddrFrom4([4]byte{byte(v >> 24), byte(v >> 16), byte(v >> 8), byte(v)})
+		}
+		check(last)
+		if n := last.Next(); n.IsValid() {
+			check(n)
+		}
 	}
 }

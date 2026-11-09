@@ -280,46 +280,47 @@ type Totals struct {
 
 // Store 是线程安全的态势状态库。
 type Store struct {
-	mu          sync.RWMutex
-	campMu      sync.Mutex      // 攻击活动归并结果的缓存（campaign.go），计算期间不持有 mu
-	camp        *CampaignReport // 最近一次归并结果
-	maxIPs      int
-	maxAlerts   int
-	perRule     int
-	retention   time.Duration
-	ips         map[string]*IPProfile
-	alerts      []*model.Alert
-	alertHead   int
-	nextID      uint64
-	buckets     map[int64]*Bucket
-	totals      Totals
-	categories  map[string]int64
-	rules       map[string]int64
-	ruleNames   map[string]string
-	ruleMeta    map[string]ruleMeta     // 规则 → 攻击类型与阶段（剔除误报规则的命中时按此调整评分与排行）
-	excluded    map[string]bool         // 命中不计入攻击源评分与排行的规则：被判定为误报而停用的自学习观察规则
-	outbound    map[string]*OutboundDst // 内部对外的攻击与异常连接的外部目标（地图上从受保护资产飞出的线）
-	sevCount    [5]int64
-	phases      map[string]int64
-	results     map[string]int64
-	minTime     time.Time
-	maxTime     time.Time
-	surf        *surface
-	ruleBits    map[string]int       // 规则 ID → 指纹位下标（同源关联分析用）
-	scores      []ScorePoint         // 安全评分历史（每小时一次）
-	incidents   map[uint64]*Incident // 安全事件（同一来源的告警合并处置）
-	incByKey    map[string]uint64    // 来源 IP → 最近的事件
-	journal     *os.File             // 处置记录预写日志，见 journal.go
-	journalPath string
-	nextInc     uint64
-	agg         *aggregate          // 总览增量统计（国家/省份/城市/等级/目标/近 1 小时）
-	days        map[string]*DayStat // 按自然日的汇总（周报 / 月报）
-	curDay      *DayStat
-	dayStart    int64
-	dayEnd      int64
-	loc         *time.Location
-	chains      map[chainKey]*chainTrack // 资产攻击链路（chain.go）
-	noSrcSeen   map[string]time.Time     // 没有来源的设备威胁的告警节流（nosource.go）
+	mu           sync.RWMutex
+	campMu       sync.Mutex      // 攻击活动归并结果的缓存（campaign.go），计算期间不持有 mu
+	camp         *CampaignReport // 最近一次归并结果
+	campBuilding bool            // 后台正在重新归并（campMu 保护）
+	maxIPs       int
+	maxAlerts    int
+	perRule      int
+	retention    time.Duration
+	ips          map[string]*IPProfile
+	alerts       []*model.Alert
+	alertHead    int
+	nextID       uint64
+	buckets      map[int64]*Bucket
+	totals       Totals
+	categories   map[string]int64
+	rules        map[string]int64
+	ruleNames    map[string]string
+	ruleMeta     map[string]ruleMeta     // 规则 → 攻击类型与阶段（剔除误报规则的命中时按此调整评分与排行）
+	excluded     map[string]bool         // 命中不计入攻击源评分与排行的规则：被判定为误报而停用的自学习观察规则
+	outbound     map[string]*OutboundDst // 内部对外的攻击与异常连接的外部目标（地图上从受保护资产飞出的线）
+	sevCount     [5]int64
+	phases       map[string]int64
+	results      map[string]int64
+	minTime      time.Time
+	maxTime      time.Time
+	surf         *surface
+	ruleBits     map[string]int       // 规则 ID → 指纹位下标（同源关联分析用）
+	scores       []ScorePoint         // 安全评分历史（每小时一次）
+	incidents    map[uint64]*Incident // 安全事件（同一来源的告警合并处置）
+	incByKey     map[string]uint64    // 来源 IP → 最近的事件
+	journal      *os.File             // 处置记录预写日志，见 journal.go
+	journalPath  string
+	nextInc      uint64
+	agg          *aggregate          // 总览增量统计（国家/省份/城市/等级/目标/近 1 小时）
+	days         map[string]*DayStat // 按自然日的汇总（周报 / 月报）
+	curDay       *DayStat
+	dayStart     int64
+	dayEnd       int64
+	loc          *time.Location
+	chains       map[chainKey]*chainTrack // 资产攻击链路（chain.go）
+	noSrcSeen    map[string]time.Time     // 没有来源的设备威胁的告警节流（nosource.go）
 
 	// AssetOf 返回地址或站点域名对应的台账资产（资产攻击链路识别外连、横向的内网主机），为 nil 时只按地址与域名区分资产。
 	// 调用时持有状态库的写锁，不能回调状态库
