@@ -758,6 +758,10 @@ func (s *Store) RefreshGeo(relocate func(ip string, old *geo.Info) *geo.Info) in
 		if p := s.ips[it.ip]; p != nil && p.Geo == it.old {
 			if !geo.SameLocation(it.old, info) {
 				n++
+				// 该来源的事件同样更新归属（否则要等下一条告警才更新）
+				if inc := s.incidents[s.incByKey[it.ip]]; inc != nil {
+					inc.Location = info.Location()
+				}
 			}
 			p.Geo = info
 			s.agg.setGeo(p, it.old)

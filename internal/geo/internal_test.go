@@ -93,3 +93,39 @@ func TestDetectLocalNetworks(t *testing.T) {
 		}
 	}
 }
+
+// 自学习新增内网网段后，缓存中的地址要按新网段重新定位，之前的在线定位结果不再采信；移出内网后恢复公网定位、可以重新补全。
+func TestReclassifyAfterIntranetChange(t *testing.T) {
+	SetInternalNetworks(nil)
+	defer SetInternalNetworks(nil)
+	const ip = "43.242.97.54"
+	p := fakeProvider{"ip2region", map[string]*SourceResult{ip: {Source: "ip2region", Country: "中国", CountryCode: "CN", Province: "上海"}}}
+	r := NewResolver(Options{Providers: []Provider{p}, HomeLat: 31.23, HomeLon: 121.47})
+	before := r.Lookup(ip)
+	if before.Private || before.Country != "中国" {
+		t.Fatalf("公网地址: %+v", before)
+	}
+	r.mu.Lock()
+	r.cache[ip].online, r.cache[ip].enriched = &SourceResult{Source: "ip-api", Country: "美国", CountryCode: "US"}, true
+	r.mu.Unlock()
+
+	AddInternalNetworks([]string{"43.242.97.0/24"})
+	r.Reclassify()
+	in := r.Relocate(ip, before)
+	if !in.Private || in.Country != "内网" || in.CountryCode != "" {
+		t.Fatalf("划入内网后应按内部地址定位，且不再采信在线结果: %+v", in)
+	}
+
+	SetInternalNetworks(nil)
+	r.Reclassify()
+	out := r.Relocate(ip, in)
+	if out.Private || out.Country != "中国" {
+		t.Fatalf("移出内网后应恢复公网定位: %+v", out)
+	}
+	r.mu.Lock()
+	enriched := r.cache[ip].enriched
+	r.mu.Unlock()
+	if enriched {
+		t.Fatal("移出内网后应允许重新补全在线定位")
+	}
+}

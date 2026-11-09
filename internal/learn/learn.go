@@ -369,6 +369,7 @@ func Load(opt Options) (*Learner, error) {
 		// 从进化日志补齐的客观结论可能让模型的自动确认收紧：这次变化写入进化日志
 		l.refreshAIStatsLocked(time.Now())
 	}
+	l.dropDeviceNetsLocked() // 旧版本依据防火墙自身 local 域学到的内网网段：撤销
 	return l, nil
 }
 

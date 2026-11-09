@@ -802,6 +802,10 @@ func InternalSource(ev *model.Event) bool {
 // InternalZone 判断安全域名称是否表示内部一侧（trust、dmz、inside 等）。
 func InternalZone(zone string) bool { return zoneSide(zone) > 0 }
 
+// DeviceZone 判断安全域是否表示防火墙自身（华为 / H3C / 山石的 local 域）。从这个域发出的报文，来源是防火墙自己的接口地址，
+// 外网接口往往就是公网地址：检测时仍按内部来源处理（设备是自己的），但不能据此推断所在网段属于内网。
+func DeviceZone(zone string) bool { return strings.EqualFold(strings.TrimSpace(zone), "local") }
+
 // zoneSide 按安全域名称判断属于内部（1）、外部（-1）还是无法判断（0）。
 // 覆盖华为 / H3C / 山石（trust、untrust、dmz、local）、思科 / ASA（inside、outside）与常见的自定义命名。
 func zoneSide(zone string) int {

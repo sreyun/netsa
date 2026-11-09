@@ -184,7 +184,7 @@ func (r *Resolver) Start(ctx context.Context) {
 				}
 				if sr := res[ip]; sr != nil {
 					r.mu.Lock()
-					if e := r.cache[ip]; e != nil {
+					if e := r.cache[ip]; e != nil && !e.private { // 查询期间被划入内网：结果不再适用
 						e.online = sr
 					}
 					r.mu.Unlock()

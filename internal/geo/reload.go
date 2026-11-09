@@ -36,7 +36,11 @@ func (r *Resolver) SetCustom(c *Custom) {
 	r.refresh()
 }
 
-// refresh 用当前离线库重新定位缓存中的全部地址。逐个加锁，不阻塞实时定位。
+// Reclassify 在内网网段变化后（自学习识别出新网段）按当前网段重新定位缓存中的全部地址。
+// 不调用时缓存里仍是旧的归属，Relocate 会原样返回，已有攻击源要等缓存淘汰或重启才更新。
+func (r *Resolver) Reclassify() { r.refresh() }
+
+// refresh 用当前离线库与内网网段重新定位缓存中的全部地址。逐个加锁，不阻塞实时定位。
 // 画像侧的更新由调用方通过 Store.RefreshGeo + Relocate 完成。
 func (r *Resolver) refresh() {
 	r.mu.Lock()
@@ -51,10 +55,15 @@ func (r *Resolver) refresh() {
 			continue
 		}
 		addr = addr.Unmap()
-		local := r.lookupLocal(addr, isPrivate(addr))
+		private := isPrivate(addr)
+		local := r.lookupLocal(addr, private)
 		r.mu.Lock()
 		if e := r.cache[ip]; e != nil {
-			e.local = local
+			if private != e.private {
+				// 归属变了（划入或移出内网）：在线定位结果不再适用，移出内网后可以重新补全
+				e.online, e.enriched = nil, false
+			}
+			e.private, e.local = private, local
 			e.info = r.merge(ip, e)
 		}
 		r.mu.Unlock()

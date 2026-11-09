@@ -251,3 +251,27 @@ func TestAggregateRestoredFromSnapshot(t *testing.T) {
 		t.Fatalf("恢复后攻击源数应为 30，实际 %d", got.Attackers)
 	}
 }
+
+// 归属地刷新时，该来源的事件同样更新（不等下一条告警）。
+func TestRefreshGeoUpdatesIncident(t *testing.T) {
+	s := New(1000, 100, 5, time.Hour)
+	inner := &geo.Info{Country: "内网", Province: "局域网", NetType: "内网", Private: true}
+	s.GeoLookup = func(string) *geo.Info { return inner }
+	s.Record(&model.Event{Kind: model.KindWeb, SrcIP: "43.242.97.54", Host: "shop.example.com", Method: "GET", URI: "/.env", Status: 404, Time: time.Now()},
+		[]model.Hit{{RuleID: "sens-env", Name: "敏感文件探测", Category: "敏感文件探测", Severity: model.SevMedium, Phase: model.PhaseRecon}})
+	s.mu.RLock()
+	before := s.incidents[s.incByKey["43.242.97.54"]].Location
+	s.mu.RUnlock()
+	if !strings.Contains(before, "内网") {
+		t.Fatalf("事件归属: %q", before)
+	}
+	if n := s.RefreshGeo(func(string, *geo.Info) *geo.Info { return testGeo(0) }); n != 1 {
+		t.Fatalf("应更新 1 个来源，实际 %d", n)
+	}
+	s.mu.RLock()
+	after := s.incidents[s.incByKey["43.242.97.54"]].Location
+	s.mu.RUnlock()
+	if after == before || !strings.Contains(after, "中国") && !strings.Contains(after, "广东") {
+		t.Fatalf("事件归属应随来源更新: %q → %q", before, after)
+	}
+}

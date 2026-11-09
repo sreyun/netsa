@@ -41,6 +41,7 @@ type LoopStats struct {
 	RulesOff  int             `json:"rules_off"`          // 停用的观察规则（被业务接口轮询自动停用、管理员停用）
 	Retracted int             `json:"retracted"`          // 回溯修正的事件
 	Restored  int             `json:"restored,omitempty"` // 纠错被纠正、恢复等级的事件（重新启用观察规则、被撤销的来源出现攻击证据）
+	NetsOff   int             `json:"nets_off,omitempty"` // 撤销的自动识别内网网段（旧版本依据防火墙自身 local 域学到的）
 	Archived  int             `json:"archived"`           // 自动归档的事件
 	Migrated  bool            `json:"migrated,omitempty"` // 已从进化日志补齐旧版本的数据
 	Gated     map[string]bool `json:"gated,omitempty"`

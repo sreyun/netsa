@@ -63,7 +63,7 @@ import (
 
 // version 是构建版本号。默认值用于本地构建；镜像构建通过
 // -ldflags "-X main.version=<tag>" 注入，`netsa version` 与 /api/meta 都会显示注入后的值。
-var version = "1.11.0"
+var version = "1.11.1"
 
 func usage() {
 	fmt.Fprintf(os.Stderr, `netsa %s —— 网络安全态势感知与攻击面分析系统
@@ -283,6 +283,7 @@ func build(cfg *config.Config) (*app, error) {
 	// 自学习识别出新的内网网段：已有攻击源按新网段重新定位（不再显示为境外）
 	a.pipe.OnIntranetLearned = func(string) {
 		go func() {
+			a.geo.Reclassify() // 缓存里还是旧的归属，先按新网段重新定位
 			if n := a.store.RefreshGeo(a.geo.Relocate); n > 0 {
 				log.Printf("[geo] 按自动识别的内网网段更新了 %d 个攻击源的归属地", n)
 			}
