@@ -21,7 +21,7 @@
 
 </div>
 
-![态势总览：攻击地图、实时告警与威胁指数](docs/images/overview.png)
+![态势总览：内外双向攻击地图、实时告警与威胁指数](docs/images/overview.png)
 
 <div align="center">
 
@@ -70,6 +70,10 @@ go build -o bin/netsa ./cmd/netsa
 | ![安全评估](docs/images/assess.png) | ![攻击面分析](docs/images/surface.png) |
 | **事件处置与处置时限** | **自学习与自我纠错** |
 | ![事件处置](docs/images/incidents.png) | ![自学习](docs/images/learn.png) |
+| **攻击活动：同源攻击者归并** | **资产攻击链路** |
+| ![攻击活动](docs/images/campaigns.png) | ![资产攻击链路](docs/images/chains.png) |
+| **全屏攻击地图：外部攻击与内部对外连接** | **全局搜索（Ctrl + K）** |
+| ![全屏攻击地图](docs/images/map.png) | ![全局搜索](docs/images/search.png) |
 
 截图来自内置模拟器生成的演示数据，其中的 IP 与站点均为模拟，可用上面的演示环境自行体验。
 
@@ -126,17 +130,40 @@ go build -o bin/netsa ./cmd/netsa
 ## 工作原理
 
 ```mermaid
-flowchart LR
-  A["日志源<br/>Web · 防火墙 / IDS · 流量<br/>主机认证与进程 · DNS · 采集器"] --> B["格式识别<br/>每个发送端独立识别<br/>格式与时区"]
-  B --> C["真实 IP<br/>可信代理还原<br/>XFF 伪造识别"]
-  C --> D["威胁检测<br/>AC 预筛 + 正则<br/>libinjection · 行为检测"]
-  D --> E["情报与诱饵<br/>IP / 域名 / TLS / 哈希"]
-  E --> F["证据过滤与学习校准<br/>会话证据 · DNAT<br/>参数基线 · 站点产品"]
-  F --> G["等级裁决<br/>分类底线 · 成功升级<br/>结果封顶"]
-  G --> H["状态库<br/>画像 · 告警 · 事件<br/>攻击链路 · 攻击面"]
-  H --> I["大屏与 REST API<br/>SSE 实时推送"]
-  H --> J["推送 · 封禁联动<br/>归档 · AI 研判"]
-  H -. 客观结论与处置结论 .-> F
+flowchart TB
+  subgraph IN["接入"]
+    direction LR
+    I1["日志与流量来源<br/>Web · WAF · 防火墙 / IDS<br/>主机认证与进程<br/>DNS · 应用登录"]
+    I2["采集<br/>文件跟踪<br/>Syslog UDP / TCP / TLS<br/>NetFlow · sFlow · IPFIX"]
+    I3["识别与还原<br/>按发送端识别格式与时区<br/>真实 IP 还原<br/>XFF 伪造识别"]
+    I1 --> I2 --> I3
+  end
+  subgraph DET["检测与研判（并行解析，按批入库）"]
+    direction LR
+    D1["威胁检测<br/>AC 预筛 + 正则<br/>libinjection · 漏洞签名<br/>行为检测"]
+    D2["情报、诱饵与关联<br/>IP / 域名 / TLS / 哈希<br/>攻击后回连<br/>横向移动"]
+    D3["证据复核与学习校准<br/>会话证据 · DNAT<br/>响应基线 · 参数基线"]
+    D4["等级统一裁决<br/>分类底线 · 成功升级<br/>结果封顶"]
+    D1 --> D2 --> D3 --> D4
+  end
+  subgraph ST["状态库（内存 + 快照）"]
+    direction LR
+    S1["攻击源画像<br/>告警 · 事件"]
+    S2["攻击活动<br/>资产攻击链路"]
+    S3["攻击面<br/>内部对外目标"]
+    S1 ~~~ S2 ~~~ S3
+  end
+  subgraph OUT["呈现与处置"]
+    direction LR
+    O1["态势大屏 · REST API · SSE<br/>全局搜索 · 内外双向飞线"]
+    O2["钉钉 / 企业微信 / 飞书<br/>封禁联动 · SIEM 转发<br/>工单与处置剧本"]
+    O3["原始日志留存 · 审计链<br/>PostgreSQL 归档 · AI 研判"]
+    O1 ~~~ O2 ~~~ O3
+  end
+  LEARN["自学习与自我纠错<br/>从客观结论与<br/>分析员结论中学习<br/>校准 · 自动确认<br/>回溯修正 · 撤销纠错"]
+  IN --> DET --> ST --> OUT
+  LEARN -. 校准 .-> DET
+  LEARN -. 回溯修正 .-> ST
 ```
 
 几个关键设计：

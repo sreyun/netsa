@@ -18,7 +18,7 @@ Eine einzige Binärdatei, sofort einsatzbereit, auch in isolierten Netzen.
 
 </div>
 
-![Lageübersicht: Angriffskarte, Echtzeit-Alarme und Bedrohungsindex](../images/overview.png)
+![Lageübersicht: Angriffskarte in beide Richtungen, Echtzeit-Alarme und Bedrohungsindex](../images/overview.png)
 
 ## Warum netsa
 
@@ -78,6 +78,10 @@ go build -o bin/netsa ./cmd/netsa
 | ![Sicherheitsbewertung](../images/assess.png) | ![Angriffsflächenanalyse](../images/surface.png) |
 | **Vorfallbearbeitung und Fristen** | **Selbstlernen und automatische Kalibrierung** |
 | ![Vorfallbearbeitung](../images/incidents.png) | ![Selbstlernen](../images/learn.png) |
+| **Kampagnen: Angreifer gleicher Herkunft gebündelt** | **Asset-Angriffsketten** |
+| ![Kampagnen](../images/campaigns.png) | ![Asset-Angriffsketten](../images/chains.png) |
+| **Angriffskarte im Vollbild: eingehende Angriffe und ausgehende Verbindungen** | **Globale Suche (Ctrl + K)** |
+| ![Angriffskarte im Vollbild](../images/map.png) | ![Globale Suche](../images/search.png) |
 
 Die Screenshots zeigen die chinesischsprachige Weboberfläche mit Demodaten des eingebauten Simulators. Alle IPs und Websites sind simuliert. Mit der obigen Demoumgebung kannst du es selbst ausprobieren.
 
@@ -100,32 +104,41 @@ Die Screenshots zeigen die chinesischsprachige Weboberfläche mit Demodaten des 
 
 ## Funktionsweise
 
-```text
-Logquellen           nginx · Firewall / IDS · Zeek · Host-Authentifizierung und -Prozesse · App-Anmeldungen · DNS · Container und Kollektoren
-   │                 Dateiverfolgung / Stapelanalyse / Syslog (UDP · TCP · TLS) / Flusserfassung (NetFlow · IPFIX · sFlow)
-   ▼
-Formaterkennung      Format und Zeitzone je Quelle und je Absender getrennt erkannt
-   ▼
-Echte IP             ermittelt die Quelle über vertrauenswürdige Proxys, markiert XFF-Fälschung und CDN-Umgehung
-   ▼
-Bedrohungserkennung  Signaturregeln (AC-Vorfilter + Regex) + Syntaxanalyse (libinjection) + Regeln für Host-Prozesse + Verhaltenserkennung (Zeitfenster, begrenzter Speicher)
-   ▼
-Threat Intel und Köder  Threat Intelligence zu IP / Domain / TLS-Fingerabdruck / Datei-Hash; Treffer auf Köderpfade, -token, -konten und Honeypots bestätigen den Angreifer
-   ▼
-Nachweisfilter       Sitzungsnachweise und DNAT-Zuordnungen verwerfen Sondierungen, die keinen Dienst erreichten; Unterdrückung wird angewendet
-   ▼
-Gelernte Anpassung   normale Parameterwerte und Website-Produkte prüfen Treffer erneut; wiederholte Fehlalarme werden gemäß Analystenurteilen herabgestuft, bestätigte Quellen hochgestuft (learn)
-   ▼
-Verknüpfung          verbindet frühere Web-Angriffe: Rückrufe und Nutzlast-Downloads nach einem Angriff; spätere laterale Verbindungen kompromittierter Hosts
-   ▼
-Schweregrad          Kategorie-Untergrenze, Hochstufung bei Erfolg und Obergrenze nach Ergebnis bestimmen den endgültigen Schweregrad (risk)
-   ▼
-Zustandsspeicher     Angreiferprofile · Alarme · Vorfälle · Kampagnen · Asset-Angriffsketten · Angriffsfläche · Zeitreihen · Persistenz per Snapshot
-   │
-   ├── Web-Dashboard und REST-API (Live-Push per SSE)
-   ├── DingTalk / WeCom / Feishu / Webhook
-   ├── Aufbewahrung der Rohlogs · PostgreSQL-Archiv (optional)
-   └── KI-Triage (optional, Ergebnisse werden in die Vorfallakte geschrieben)
+```mermaid
+flowchart TB
+  subgraph IN["Eingang"]
+    direction LR
+    I1["Log- und Flussquellen<br/>Web · WAF<br/>Firewall / IDS<br/>Host-Anmeldung · Prozesse<br/>DNS · App-Anmeldung"]
+    I2["Erfassung<br/>Dateiverfolgung<br/>Syslog UDP / TCP / TLS<br/>NetFlow · sFlow · IPFIX"]
+    I3["Formaterkennung<br/>Format und Zeitzone<br/>je Absender<br/>echte IP · XFF-Fälschung"]
+    I1 --> I2 --> I3
+  end
+  subgraph DET["Analyse und Triage (paralleles Parsen, Speicherung in Stapeln)"]
+    direction LR
+    D1["Bedrohungserkennung<br/>AC-Vorfilter + Regex<br/>libinjection<br/>Schwachstellensignaturen<br/>Verhalten"]
+    D2["Threat Intel und Köder<br/>IP / Domain / TLS / Hash<br/>Verknüpfung: Rückrufe,<br/>laterale Bewegung"]
+    D3["Nachweise, Anpassung<br/>Sitzungsnachweise · DNAT<br/>Antwort-Baselines<br/>Parameter-Baselines"]
+    D4["Schweregrad<br/>Kategorie-Untergrenze<br/>Hochstufung bei Erfolg<br/>Obergrenze nach Ergebnis"]
+    D1 --> D2 --> D3 --> D4
+  end
+  subgraph ST["Zustandsspeicher (Arbeitsspeicher + Snapshots)"]
+    direction LR
+    S1["Angreiferprofile<br/>Alarme · Vorfälle"]
+    S2["Kampagnen<br/>Asset-Angriffsketten"]
+    S3["Angriffsfläche<br/>externe Ziele<br/>interner Hosts"]
+    S1 ~~~ S2 ~~~ S3
+  end
+  subgraph OUT["Darstellung und Reaktion"]
+    direction LR
+    O1["Dashboard · REST-API · SSE<br/>globale Suche<br/>Linien in beide Richtungen"]
+    O2["DingTalk / WeCom / Feishu<br/>Sperren · SIEM-Weiterleitung<br/>Tickets und Playbooks"]
+    O3["Rohlogs · Audit-Kette<br/>PostgreSQL-Archiv<br/>KI-Triage"]
+    O1 ~~~ O2 ~~~ O3
+  end
+  LEARN["Selbstlernen und<br/>Selbstkorrektur<br/>lernt aus objektiven Prüfungen<br/>und Analystenurteilen<br/>Anpassung · Auto-Bestätigung<br/>rückwirkende Korrektur"]
+  IN --> DET --> ST --> OUT
+  LEARN -. Anpassung .-> DET
+  LEARN -. rückwirkende Korrektur .-> ST
 ```
 
 Wichtige Gestaltungsprinzipien:

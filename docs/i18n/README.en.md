@@ -21,7 +21,7 @@ No Elasticsearch, Kafka or database required. Works fully offline. Up and runnin
 
 </div>
 
-![Situation overview: attack map, live alerts and threat index](../images/overview.png)
+![Situation overview: two-way attack map, live alerts and threat index](../images/overview.png)
 
 <div align="center">
 
@@ -89,6 +89,10 @@ go build -o bin/netsa ./cmd/netsa
 | ![Security assessment](../images/assess.png) | ![Attack surface analysis](../images/surface.png) |
 | **Incident handling and deadlines** | **Self-learning and automatic tuning** |
 | ![Incident handling](../images/incidents.png) | ![Self-learning](../images/learn.png) |
+| **Campaigns: attackers of the same origin grouped** | **Asset attack chains** |
+| ![Campaigns](../images/campaigns.png) | ![Asset attack chains](../images/chains.png) |
+| **Fullscreen attack map: inbound attacks and outbound connections** | **Global search (Ctrl + K)** |
+| ![Fullscreen attack map](../images/map.png) | ![Global search](../images/search.png) |
 
 Screenshots use demo data from the built-in simulator; all IPs and sites are simulated. Try it yourself with the demo environment above.
 
@@ -111,32 +115,41 @@ Screenshots use demo data from the built-in simulator; all IPs and sites are sim
 
 ## How it works
 
-```text
-Log sources       nginx · firewall / IDS · Zeek · host authentication and processes · app logins · DNS · containers and collectors
-   │              file tailing / batch analysis / syslog (UDP · TCP · TLS) / flow collection (NetFlow · IPFIX · sFlow)
-   ▼
-Format detection  format and time zone detected separately per source and per sender
-   ▼
-Real IP           recovers the source via trusted proxies, flags XFF spoofing and CDN bypass
-   ▼
-Threat detection  signature rules (AC prefilter + regex) + syntax analysis (libinjection) + host process rules + behavioral detection (time windows, bounded memory)
-   ▼
-Intel and decoys  IP / domain / TLS fingerprint / file hash intelligence; hits on decoy paths, tokens, accounts and honeypots confirm the attacker
-   ▼
-Evidence filter   session evidence and DNAT mappings drop probes that reached no service; suppression applied
-   ▼
-Learned tuning    normal parameter values and site products re-check hits; repeated false positives downgraded per analyst verdicts, confirmed sources escalated (learn)
-   ▼
-Correlation       links earlier web attacks: callbacks and payload downloads after an attack; later lateral connections from compromised hosts
-   ▼
-Severity decision category floor, success escalation, result cap decide the final severity (risk)
-   ▼
-State store       attacker profiles · alerts · incidents · campaigns · asset attack chains · attack surface · time series · snapshot persistence
-   │
-   ├── Web dashboard and REST API (SSE live push)
-   ├── DingTalk / WeCom / Feishu / Webhook
-   ├── Raw log retention · PostgreSQL archive (optional)
-   └── AI triage (optional, conclusions written to the incident record)
+```mermaid
+flowchart TB
+  subgraph IN["Ingestion"]
+    direction LR
+    I1["Log and flow sources<br/>Web · WAF · firewall / IDS<br/>host auth · processes<br/>DNS · app logins"]
+    I2["Collection<br/>file tailing<br/>Syslog UDP / TCP / TLS<br/>NetFlow · sFlow · IPFIX"]
+    I3["Recognition<br/>format and time zone<br/>per sender<br/>real IP · XFF spoofing"]
+    I1 --> I2 --> I3
+  end
+  subgraph DET["Detection and triage (parallel parsing, batched writes)"]
+    direction LR
+    D1["Threat detection<br/>AC prefilter + regex<br/>libinjection<br/>vulnerability signatures<br/>behavioral detection"]
+    D2["Intel and decoys<br/>IP / domain / TLS / hash<br/>correlation: callbacks,<br/>lateral movement"]
+    D3["Evidence and tuning<br/>session evidence · DNAT<br/>response baselines<br/>parameter baselines"]
+    D4["Severity decision<br/>category floor<br/>success escalation<br/>result cap"]
+    D1 --> D2 --> D3 --> D4
+  end
+  subgraph ST["State store (memory + snapshots)"]
+    direction LR
+    S1["Attacker profiles<br/>alerts · incidents"]
+    S2["Campaigns<br/>asset attack chains"]
+    S3["Attack surface<br/>outbound targets"]
+    S1 ~~~ S2 ~~~ S3
+  end
+  subgraph OUT["Presentation and response"]
+    direction LR
+    O1["Dashboard · REST API · SSE<br/>global search<br/>two-way map lines"]
+    O2["DingTalk / WeCom / Feishu<br/>blocking · SIEM forwarding<br/>tickets and playbooks"]
+    O3["Raw logs · audit chain<br/>PostgreSQL archive<br/>AI triage"]
+    O1 ~~~ O2 ~~~ O3
+  end
+  LEARN["Self-learning and<br/>self-correction<br/>learns from objective checks<br/>and analyst verdicts<br/>tuning · auto-confirm<br/>retroactive fixes · undo"]
+  IN --> DET --> ST --> OUT
+  LEARN -. tuning .-> DET
+  LEARN -. retroactive fixes .-> ST
 ```
 
 Key design points:

@@ -18,7 +18,7 @@ Un único binario listo para usar, también en redes aisladas.
 
 </div>
 
-![Vista general: mapa de ataques, alertas en tiempo real e índice de amenaza](../images/overview.png)
+![Vista general: mapa de ataques en ambos sentidos, alertas en tiempo real e índice de amenaza](../images/overview.png)
 
 ## Por qué netsa
 
@@ -78,6 +78,10 @@ go build -o bin/netsa ./cmd/netsa
 | ![Evaluación de seguridad](../images/assess.png) | ![Análisis de la superficie de ataque](../images/surface.png) |
 | **Gestión de incidentes y plazos** | **Autoaprendizaje y ajuste automático** |
 | ![Gestión de incidentes](../images/incidents.png) | ![Autoaprendizaje](../images/learn.png) |
+| **Campañas: atacantes del mismo origen agrupados** | **Cadenas de ataque a activos** |
+| ![Campañas](../images/campaigns.png) | ![Cadenas de ataque a activos](../images/chains.png) |
+| **Mapa de ataques a pantalla completa: ataques entrantes y conexiones salientes** | **Búsqueda global (Ctrl + K)** |
+| ![Mapa de ataques a pantalla completa](../images/map.png) | ![Búsqueda global](../images/search.png) |
 
 Las capturas muestran la interfaz web, que está en chino, con datos de demostración del simulador integrado. Todas las IP y los sitios son simulados. Puedes probarlo con el entorno de demostración de arriba.
 
@@ -100,32 +104,41 @@ Las capturas muestran la interfaz web, que está en chino, con datos de demostra
 
 ## Cómo funciona
 
-```text
-Fuentes de registro    nginx · cortafuegos / IDS · Zeek · autenticación y procesos de hosts · inicios de sesión de aplicaciones · DNS · contenedores y recolectores
-   │                   seguimiento de archivos / análisis por lotes / syslog (UDP · TCP · TLS) / recopilación de flujos (NetFlow · IPFIX · sFlow)
-   ▼
-Detección del formato  formato y zona horaria detectados por separado para cada fuente y cada emisor
-   ▼
-IP real                recupera el origen mediante proxies de confianza, marca la falsificación de XFF y la elusión de la CDN
-   ▼
-Detección de amenazas  reglas de firmas (prefiltro AC + regex) + análisis sintáctico (libinjection) + reglas de procesos del host + detección por comportamiento (ventanas de tiempo, memoria acotada)
-   ▼
-Inteligencia y señuelos  inteligencia de IP / dominios / huellas TLS / hashes de archivos; los aciertos en rutas, tokens, cuentas señuelo y honeypots confirman al atacante
-   ▼
-Filtro de evidencias   la evidencia de sesión y las asignaciones DNAT descartan sondas que no llegaron a ningún servicio; se aplica la supresión
-   ▼
-Ajuste aprendido       los valores normales de los parámetros y los productos de cada sitio revisan los aciertos; los falsos positivos repetidos se rebajan según los veredictos de los analistas y se elevan los orígenes confirmados (learn)
-   ▼
-Correlación            enlaza ataques web anteriores: retornos y descargas de cargas útiles tras un ataque; conexiones laterales posteriores de hosts comprometidos
-   ▼
-Decisión de gravedad   el mínimo por categoría, la elevación por éxito y el tope por resultado fijan la gravedad final (risk)
-   ▼
-Almacén de estado      perfiles de atacantes · alertas · incidentes · campañas · cadenas de ataque a activos · superficie de ataque · series temporales · persistencia por instantáneas
-   │
-   ├── Panel web y API REST (envío en vivo por SSE)
-   ├── DingTalk / WeCom / Feishu / Webhook
-   ├── Conservación de registros sin procesar · archivo en PostgreSQL (opcional)
-   └── Triaje con IA (opcional, las conclusiones se escriben en el registro del incidente)
+```mermaid
+flowchart TB
+  subgraph IN["Entrada"]
+    direction LR
+    I1["Registros y flujos<br/>Web · WAF<br/>cortafuegos / IDS<br/>autenticación · procesos<br/>DNS · inicios de sesión"]
+    I2["Recopilación<br/>seguimiento de archivos<br/>Syslog UDP / TCP / TLS<br/>NetFlow · sFlow · IPFIX"]
+    I3["Reconocimiento<br/>formato y zona horaria<br/>por emisor<br/>IP real · XFF falsificado"]
+    I1 --> I2 --> I3
+  end
+  subgraph DET["Detección y triaje (análisis en paralelo, escritura por lotes)"]
+    direction LR
+    D1["Detección de amenazas<br/>prefiltro AC + regex<br/>libinjection<br/>firmas de vulnerabilidades<br/>comportamiento"]
+    D2["Inteligencia y señuelos<br/>IP / dominio / TLS / hash<br/>correlación: retornos,<br/>movimiento lateral"]
+    D3["Evidencias y ajuste<br/>evidencia de sesión · DNAT<br/>línea base de respuestas<br/>línea base de parámetros"]
+    D4["Decisión de gravedad<br/>mínimo por categoría<br/>elevación por éxito<br/>tope por resultado"]
+    D1 --> D2 --> D3 --> D4
+  end
+  subgraph ST["Almacén de estado (memoria + instantáneas)"]
+    direction LR
+    S1["Perfiles de atacantes<br/>alertas · incidentes"]
+    S2["Campañas<br/>cadenas de ataque<br/>a activos"]
+    S3["Superficie de ataque<br/>destinos externos<br/>de hosts internos"]
+    S1 ~~~ S2 ~~~ S3
+  end
+  subgraph OUT["Presentación y respuesta"]
+    direction LR
+    O1["Panel · API REST · SSE<br/>búsqueda global<br/>líneas en ambos sentidos"]
+    O2["DingTalk / WeCom / Feishu<br/>bloqueo · reenvío a SIEM<br/>tickets y playbooks"]
+    O3["Registros sin procesar<br/>cadena de auditoría<br/>archivo PostgreSQL<br/>triaje con IA"]
+    O1 ~~~ O2 ~~~ O3
+  end
+  LEARN["Autoaprendizaje<br/>y autocorrección<br/>aprende de comprobaciones<br/>objetivas y de analistas<br/>ajuste · autoconfirmación<br/>corrección retroactiva"]
+  IN --> DET --> ST --> OUT
+  LEARN -. ajuste .-> DET
+  LEARN -. corrección retroactiva .-> ST
 ```
 
 Puntos clave del diseño:

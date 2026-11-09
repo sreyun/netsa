@@ -408,8 +408,9 @@ pre.cmd { background: #050b18; border: 1px solid var(--border); padding: 8px 10p
 #atkTable { min-width: 1080px; }
 #alTable { min-width: 980px; }
 #srcTable { min-width: 980px; }
-/* 并排的表格面板使用相同高度的滚动区域，避免一侧留白 */
-.grid-2 > .panel > .scroll { flex: 1 1 auto; height: 480px; max-height: none; }
+/* 并排的面板等高（网格按较高的一侧拉伸，滚动区域填满面板）；内容超过 480px 时滚动。
+   不再固定 480px 高度：两侧都没有内容（如自学习的待确认建议、平台安全异常）时不留出大片空白 */
+.grid-2 > .panel > .scroll { flex: 1 1 auto; height: auto; max-height: 480px; }
 .grid-2 > .panel > .scroll .table { min-width: 560px; }
 
 /* ---------------- 告警推送 ---------------- */

@@ -18,7 +18,7 @@ Web, 방화벽 / IDS, 네트워크 플로, 호스트 인증과 프로세스, DNS
 
 </div>
 
-![상황 개요: 공격 지도, 실시간 경보, 위협 지수](../images/overview.png)
+![상황 개요: 안팎 양방향 공격 지도, 실시간 경보, 위협 지수](../images/overview.png)
 
 ## netsa를 선택하는 이유
 
@@ -78,6 +78,10 @@ go build -o bin/netsa ./cmd/netsa
 | ![보안 평가](../images/assess.png) | ![공격 표면 분석](../images/surface.png) |
 | **인시던트 처리와 처리 기한** | **자가 학습과 자동 보정** |
 | ![인시던트 처리](../images/incidents.png) | ![자가 학습](../images/learn.png) |
+| **공격 캠페인: 같은 공격자 묶기** | **자산 공격 체인** |
+| ![공격 캠페인](../images/campaigns.png) | ![자산 공격 체인](../images/chains.png) |
+| **전체 화면 공격 지도: 외부 공격과 내부에서 외부로의 연결** | **전역 검색(Ctrl + K)** |
+| ![전체 화면 공격 지도](../images/map.png) | ![전역 검색](../images/search.png) |
 
 스크린샷은 중국어 웹 화면이며, 내장 시뮬레이터가 생성한 데모 데이터를 보여 줍니다. IP와 사이트는 모두 가상입니다. 위의 데모 환경으로 직접 체험할 수 있습니다.
 
@@ -100,32 +104,41 @@ go build -o bin/netsa ./cmd/netsa
 
 ## 동작 방식
 
-```text
-로그 소스        nginx · 방화벽 / IDS · Zeek · 호스트 인증과 프로세스 · 앱 로그인 · DNS · 컨테이너와 수집기
-   │             파일 추적 / 일괄 분석 / syslog(UDP · TCP · TLS) / 플로 수집(NetFlow · IPFIX · sFlow)
-   ▼
-형식 인식        데이터 소스별, 발신 장비별로 형식과 시간대를 따로 인식
-   ▼
-실제 IP          신뢰할 수 있는 프록시에 따라 출처를 복원하고 XFF 위조와 CDN 우회를 표시
-   ▼
-위협 탐지        시그니처 규칙(AC 사전 필터 + 정규식) + 구문 분석(libinjection) + 호스트 프로세스 규칙 + 행위 탐지(시간 창, 메모리 상한)
-   ▼
-인텔리전스와 미끼  IP / 도메인 / TLS 핑거프린트 / 파일 해시 인텔리전스, 미끼 경로·토큰·계정·허니팟에 걸리면 공격 출처로 확정
-   ▼
-증거 필터        세션 증거와 DNAT 매핑으로 서비스에 닿지 않은 탐색을 배제하고 오탐 억제를 적용
-   ▼
-학습 보정        매개변수 정상 값과 사이트 제품으로 탐지를 다시 확인, 분석가 결론에 따라 반복 오탐을 낮추고 확인된 공격 출처를 올림(learn)
-   ▼
-연계 분석        이전 Web 공격과 연관: 공격 후 콜백, 페이로드 다운로드, 침해된 호스트의 이후 측면 이동 연결
-   ▼
-심각도 판정      분류 하한, 성공 시 상향, 결과에 따른 상한으로 최종 심각도를 통합 결정(risk)
-   ▼
-상태 저장소      공격자 프로필 · 경보 · 인시던트 · 공격 캠페인 · 자산 공격 체인 · 공격 표면 · 시계열 · 스냅숏 영속화
-   │
-   ├── Web 대시보드와 REST API(SSE 실시간 푸시)
-   ├── DingTalk / WeCom / Feishu / Webhook
-   ├── 원본 로그 보존 · PostgreSQL 보관(선택)
-   └── AI 판정(선택, 결론은 인시던트 처리 기록에 기록)
+```mermaid
+flowchart TB
+  subgraph IN["입력"]
+    direction LR
+    I1["로그와 플로 소스<br/>Web · WAF · 방화벽 / IDS<br/>호스트 인증과 프로세스<br/>DNS · 앱 로그인"]
+    I2["수집<br/>파일 추적<br/>Syslog UDP / TCP / TLS<br/>NetFlow · sFlow · IPFIX"]
+    I3["인식과 복원<br/>발신 장비별<br/>형식과 시간대 인식<br/>실제 IP · XFF 위조"]
+    I1 --> I2 --> I3
+  end
+  subgraph DET["탐지와 판정(병렬 파싱, 일괄 저장)"]
+    direction LR
+    D1["위협 탐지<br/>AC 사전 필터 + 정규식<br/>libinjection<br/>취약점 시그니처<br/>행위 탐지"]
+    D2["인텔리전스와 미끼<br/>IP / 도메인 / TLS / 해시<br/>연계 분석: 공격 후 콜백<br/>측면 이동"]
+    D3["증거 확인과 학습 보정<br/>세션 증거 · DNAT<br/>응답 기준선<br/>매개변수 기준선"]
+    D4["심각도 통합 판정<br/>분류 하한<br/>성공 시 상향<br/>결과 상한"]
+    D1 --> D2 --> D3 --> D4
+  end
+  subgraph ST["상태 저장소(메모리 + 스냅숏)"]
+    direction LR
+    S1["공격자 프로필<br/>경보 · 인시던트"]
+    S2["공격 캠페인<br/>자산 공격 체인"]
+    S3["공격 표면<br/>내부에서 외부로의<br/>연결 대상"]
+    S1 ~~~ S2 ~~~ S3
+  end
+  subgraph OUT["표시와 대응"]
+    direction LR
+    O1["대시보드 · REST API · SSE<br/>전역 검색<br/>안팎 양방향 공격선"]
+    O2["DingTalk / WeCom / Feishu<br/>차단 연동 · SIEM 전달<br/>티켓과 플레이북"]
+    O3["원본 로그 보존 · 감사 체인<br/>PostgreSQL 보관<br/>AI 판정"]
+    O1 ~~~ O2 ~~~ O3
+  end
+  LEARN["자가 학습과 자가 교정<br/>객관적 결론과<br/>분석가 결론에서 학습<br/>보정 · 자동 확인<br/>소급 수정 · 취소"]
+  IN --> DET --> ST --> OUT
+  LEARN -. 보정 .-> DET
+  LEARN -. 소급 수정 .-> ST
 ```
 
 주요 설계:

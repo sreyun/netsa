@@ -18,7 +18,7 @@
 
 </div>
 
-![態勢總覽：攻擊地圖、即時告警與威脅指數](../images/overview.png)
+![態勢總覽：內外雙向攻擊地圖、即時告警與威脅指數](../images/overview.png)
 
 ## 為什麼是 netsa
 
@@ -78,6 +78,10 @@ go build -o bin/netsa ./cmd/netsa
 | ![安全評估](../images/assess.png) | ![攻擊面分析](../images/surface.png) |
 | **事件處置與處置時限** | **自學習與自動校準** |
 | ![事件處置](../images/incidents.png) | ![自學習](../images/learn.png) |
+| **攻擊活動：同源攻擊者歸併** | **資產攻擊鏈路** |
+| ![攻擊活動](../images/campaigns.png) | ![資產攻擊鏈路](../images/chains.png) |
+| **全螢幕攻擊地圖：外部攻擊與內部對外連線** | **全域搜尋（Ctrl + K）** |
+| ![全螢幕攻擊地圖](../images/map.png) | ![全域搜尋](../images/search.png) |
 
 截圖來自內建模擬器產生的示範資料，其中的 IP 與網站均為模擬，可用上面的示範環境自行體驗。
 
@@ -100,32 +104,41 @@ go build -o bin/netsa ./cmd/netsa
 
 ## 運作原理
 
-```text
-日誌來源    nginx · 防火牆 / IDS · Zeek · 主機認證與處理程序 · 應用程式登入 · DNS · 容器與採集器
-   │        檔案追蹤 / 批次分析 / Syslog（UDP · TCP · TLS）/ 流量採集（NetFlow · IPFIX · sFlow）
-   ▼
-格式識別    每個資料來源、每個傳送端獨立識別格式與時區
-   ▼
-真實 IP     依可信代理還原來源，標記 XFF 偽造與繞過 CDN
-   ▼
-威脅偵測    特徵規則（AC 預篩 + 正規表示式）+ 語法分析（libinjection）+ 主機處理程序規則 + 行為偵測（時間視窗，記憶體有上限）
-   ▼
-情資與誘餌  IP / 網域 / TLS 指紋 / 檔案雜湊情資；誘餌路徑、線索、帳號與蜜罐命中即確認攻擊來源
-   ▼
-證據過濾    工作階段證據與 DNAT 對應排除未到達服務的探測，套用誤報抑制
-   ▼
-學習校準    參數正常取值、網站產品複核命中；依分析師結論下調反覆誤報的命中，升級已確認攻擊來源（learn）
-   ▼
-聯動分析    關聯先前的 Web 攻擊：被攻擊後回連、下載載荷；遭入侵主機事後的橫向連線
-   ▼
-等級裁決    分類底線、成功升級、結果封頂，統一決定最終等級（risk）
-   ▼
-狀態庫      攻擊者畫像 · 告警 · 安全事件 · 攻擊活動 · 資產攻擊鏈路 · 攻擊面 · 時間序列 · 快照持久化
-   │
-   ├── Web 大螢幕與 REST API（SSE 即時推播）
-   ├── 釘釘 / 企業微信 / 飛書 / Webhook
-   ├── 原始日誌留存 · PostgreSQL 歸檔（選用）
-   └── AI 研判（選用，結論寫入事件處置紀錄）
+```mermaid
+flowchart TB
+  subgraph IN["接入"]
+    direction LR
+    I1["日誌與流量來源<br/>Web · WAF · 防火牆 / IDS<br/>主機認證與處理程序<br/>DNS · 應用程式登入"]
+    I2["採集<br/>檔案追蹤<br/>Syslog UDP / TCP / TLS<br/>NetFlow · sFlow · IPFIX"]
+    I3["識別與還原<br/>依傳送端識別格式與時區<br/>真實 IP 還原<br/>XFF 偽造識別"]
+    I1 --> I2 --> I3
+  end
+  subgraph DET["偵測與研判（平行解析，分批入庫）"]
+    direction LR
+    D1["威脅偵測<br/>AC 預篩 + 正規表示式<br/>libinjection · 漏洞特徵<br/>行為偵測"]
+    D2["情資、誘餌與聯動<br/>IP / 網域 / TLS / 雜湊<br/>攻擊後回連<br/>橫向移動"]
+    D3["證據複核與學習校準<br/>工作階段證據 · DNAT<br/>回應基線 · 參數基線"]
+    D4["等級統一裁決<br/>分類底線 · 成功升級<br/>結果封頂"]
+    D1 --> D2 --> D3 --> D4
+  end
+  subgraph ST["狀態庫（記憶體 + 快照）"]
+    direction LR
+    S1["攻擊者畫像<br/>告警 · 安全事件"]
+    S2["攻擊活動<br/>資產攻擊鏈路"]
+    S3["攻擊面<br/>內部對外目標"]
+    S1 ~~~ S2 ~~~ S3
+  end
+  subgraph OUT["呈現與處置"]
+    direction LR
+    O1["態勢大螢幕 · REST API · SSE<br/>全域搜尋 · 內外雙向飛線"]
+    O2["釘釘 / 企業微信 / 飛書<br/>封鎖聯動 · SIEM 轉送<br/>工單與處置劇本"]
+    O3["原始日誌留存 · 稽核鏈<br/>PostgreSQL 歸檔 · AI 研判"]
+    O1 ~~~ O2 ~~~ O3
+  end
+  LEARN["自學習與自我糾錯<br/>從客觀結論與<br/>分析師結論中學習<br/>校準 · 自動確認<br/>回溯修正 · 撤銷糾錯"]
+  IN --> DET --> ST --> OUT
+  LEARN -. 校準 .-> DET
+  LEARN -. 回溯修正 .-> ST
 ```
 
 幾個關鍵設計：
