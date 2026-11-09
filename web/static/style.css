@@ -186,8 +186,10 @@ main { padding: 14px 16px 30px; }
 .stack { display: flex; flex-direction: column; gap: 12px; min-width: 0; }
 .stack > .panel { margin-bottom: 0; flex: none; }
 .stack > .panel.grow { flex: 1 1 auto; }
-.map-wrap { position: relative; flex: 1 1 auto; display: flex; flex-direction: column; min-height: 500px; }
-.map-wrap .chart { flex: 1 1 auto; min-height: 500px; }
+/* 地图高度只由布局决定（flex-basis 为 0、最小 500px、超出裁剪），不随画布内容撑高：
+   全屏时画布按整屏尺寸绘制，退出后若按内容计算高度，面板会停在全屏的高度并把同一行的左右两列一起拉高 */
+.map-wrap { position: relative; flex: 1 1 0; display: flex; flex-direction: column; min-height: 500px; }
+.map-wrap .chart { flex: 1 1 0; min-height: 500px; overflow: hidden; }
 .map-seg { margin-left: auto; }
 .crumb { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; font-weight: normal; color: var(--muted); }
 .crumb a, .crumb button { cursor: pointer; text-decoration: none; color: var(--hl); background: none; border: 0; padding: 0; font: inherit; }
@@ -221,6 +223,11 @@ main { padding: 14px 16px 30px; }
 .map-icon[aria-pressed="true"] { color: var(--hl); border-color: var(--accent); background: rgba(58,139,255,.22); }
 .map-icon .i-compress, .map-icon[aria-pressed="true"] .i-expand { display: none; }
 .map-icon[aria-pressed="true"] .i-compress { display: block; }
+/* 飞线密度：重点（默认）/ 全部（高亮）/ 关闭（变暗并加斜线） */
+.map-icon { position: relative; }
+.map-icon[data-mode="all"] { color: var(--hl); border-color: var(--accent); background: rgba(58,139,255,.22); }
+.map-icon[data-mode="off"] { opacity: .55; }
+.map-icon[data-mode="off"]::after { content: ""; position: absolute; left: 5px; right: 5px; top: 50%; border-top: 1.6px solid currentColor; transform: rotate(-45deg); }
 .map-note { font-size: 12px; color: var(--muted); margin-top: 4px; min-height: 16px; }
 .map-note[title]:not([title=""]), .map-legend [title] { cursor: help; }
 .map-pop { position: absolute; right: 8px; top: 8px; width: 300px; max-height: 420px; overflow: auto; background: rgba(8,16,34,.96);
@@ -864,8 +871,8 @@ kbd { display: inline-block; min-width: 18px; padding: 0 4px; border: 1px solid 
 }
 .map-panel.map-max { position: fixed; inset: 0; z-index: 900; }
 .map-panel:fullscreen::backdrop { background: var(--bg); }
-.map-panel:fullscreen .map-wrap, .map-panel.map-max .map-wrap { flex: 1 1 auto; min-height: 0; }
-.map-panel:fullscreen .map-wrap .chart, .map-panel.map-max .map-wrap .chart { flex: 1 1 auto; min-height: 0; height: auto; }
+.map-panel:fullscreen .map-wrap, .map-panel.map-max .map-wrap { flex: 1 1 0; min-height: 0; }
+.map-panel:fullscreen .map-wrap .chart, .map-panel.map-max .map-wrap .chart { flex: 1 1 0; min-height: 0; height: auto; }
 .map-panel:fullscreen h3, .map-panel.map-max h3 { font-size: 18px; }
 .map-panel:fullscreen .map-stats, .map-panel.map-max .map-stats { font-size: 14px; }
 .map-panel:fullscreen .map-stats b, .map-panel.map-max .map-stats b { font-size: 18px; }

@@ -575,6 +575,31 @@ const COORD = {
 const isExact = (s) => s === 'maxmind' || s === 'ip-api' || s === 'custom';
 const mapCtl = { view: 'world', province: null, data: null, home: null, maps: {}, flashes: [], rendered: false };
 try { mapCtl.view = localStorage.getItem('netsa.mapView') === 'china' ? 'china' : 'world'; } catch (_) { /* 隐私模式 */ }
+// 飞线密度：key 重点（默认，攻击最多的若干地点，高危与严重优先）/ all 全部 / off 关闭。攻击源多时全部画出会密成一片
+const LINE_MODES = { key: '重点', all: '全部', off: '关闭' };
+const LINE_NEXT = { key: 'all', all: 'off', off: 'key' };
+mapCtl.lines = 'key';
+try { const v = localStorage.getItem('netsa.mapLines'); if (LINE_MODES[v]) mapCtl.lines = v; } catch (_) { /* 隐私模式 */ }
+// 重点模式下画飞线的来源地点数与内部对外目标数（全屏时版面大，多画一些）
+function lineBudget() {
+  const k = mapIsFull() ? 1.5 : 1;
+  return { in: Math.round((mapCtl.view === 'world' ? 150 : mapCtl.province ? 80 : 100) * k), out: Math.round(60 * k) };
+}
+function syncLineBtn() {
+  const b = $('#mapLines');
+  if (!b) return;
+  const m = mapCtl.lines, n = lineBudget();
+  b.dataset.mode = m;
+  b.setAttribute('aria-label', `飞线：${LINE_MODES[m]}`);
+  b.title = m === 'key' ? `飞线：重点（攻击最多的 ${n.in} 个来源地点，高危与严重优先）· 点击显示全部`
+    : m === 'all' ? '飞线：全部 · 点击关闭飞线' : '飞线：关闭 · 点击只显示重点';
+}
+function cycleLines() {
+  mapCtl.lines = LINE_NEXT[mapCtl.lines];
+  try { localStorage.setItem('netsa.mapLines', mapCtl.lines); } catch (_) { /* 隐私模式 */ }
+  syncLineBtn();
+  renderMap(false);
+}
 
 function registerMap(name, url) {
   if (!mapCtl.maps[name]) {
@@ -684,6 +709,16 @@ async function renderMap(reset) {
     return { coords: [homeXY, [o.lon, o.lat]], lineStyle: { width: 1.2 + 1.6 * w, opacity: 0.55 + 0.35 * w } };
   };
   const stagger = (i) => (i * 137) % 4000; // 错开各条飞线的出发时间，避免同时脉动
+  // 飞线密度：所有地点都上图（点），飞线按模式选取。重点模式先取高危、严重的地点，再按攻击次数补足
+  let linePts = pts, lineOuts = outs;
+  if (mapCtl.lines === 'off') {
+    linePts = lineOuts = [];
+  } else if (mapCtl.lines === 'key') {
+    const n = lineBudget();
+    const hot = (p) => p.level === 'critical' || p.level === 'high';
+    linePts = [...pts.filter(hot), ...pts.filter((p) => !hot(p))].slice(0, n.in);
+    lineOuts = outs.slice(0, n.out);
+  }
   const size = (a) => 7 + 18 * Math.sqrt(a / maxA);
   const labelN = (mapCtl.view === 'world' ? 16 : 30) * (mapIsFull() ? 2 : 1); // 全屏时标注更多地点
   const pointItem = (p, i) => ({
@@ -730,13 +765,13 @@ async function renderMap(reset) {
         type: 'lines', coordinateSystem: 'geo', zlevel: 1, silent: true,
         effect: { show: true, period: 4, delay: stagger, trailLength: 0.3, symbol: 'arrow', symbolSize: 5 },
         lineStyle: { curveness: 0.25 },
-        data: homeVisible ? pts.map(inLine) : [],
+        data: homeVisible ? linePts.map(inLine) : [],
       },
       { // 内部对外：受保护资产飞向内网主机攻击、异常连接的外部目标（虚线、反向弯曲，与外部对内区分）
         type: 'lines', coordinateSystem: 'geo', zlevel: 1, silent: true,
         effect: { show: true, period: 3.5, delay: stagger, trailLength: 0.3, symbol: 'arrow', symbolSize: 5, color: OUT_COLOR },
         lineStyle: { curveness: -0.3, type: 'dashed', color: OUT_COLOR },
-        data: homeVisible ? outs.map(outLine) : [],
+        data: homeVisible ? lineOuts.map(outLine) : [],
       },
       {
         type: 'scatter', coordinateSystem: 'geo', zlevel: 2, symbol: 'triangle',
@@ -893,10 +928,14 @@ function syncMapFull() {
   b.title = on ? '退出全屏（Esc）' : '全屏查看（Esc 退出）';
   b.setAttribute('aria-label', on ? '退出全屏' : '全屏查看');
   b.setAttribute('aria-pressed', String(on));
+  syncLineBtn(); // 全屏时重点模式的飞线数量不同，提示随之更新
+  // 进入 / 退出全屏的过渡结束前尺寸还在变化：过渡后各调整一次（图表高度只由布局决定，见样式 .map-wrap）
+  const fit = () => { if (charts.cMap && !charts.cMap.isDisposed()) charts.cMap.resize(); };
   setTimeout(() => {
-    if (charts.cMap && !charts.cMap.isDisposed()) charts.cMap.resize();
-    renderMap(false); // 按新的尺寸调整标注数量，保留当前视角
+    fit();
+    renderMap(false); // 按新的尺寸调整标注与飞线数量，保留当前视角
   }, 150);
+  setTimeout(fit, 450);
 }
 function toggleMapFull() {
   if (mapIsFull()) { exitMapFull(); return; }
@@ -942,6 +981,8 @@ function initMapEvents() {
   $$('#mapView button').forEach((b) => b.addEventListener('click', () => switchMapView(b.dataset.v)));
   $('#mapReset').addEventListener('click', () => { hidePop(); renderMap(true); });
   $('#mapFull').addEventListener('click', toggleMapFull);
+  $('#mapLines').addEventListener('click', cycleLines);
+  syncLineBtn();
 }
 
 async function loadTopAttackers() {
