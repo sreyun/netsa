@@ -352,6 +352,9 @@ func (p *Pipeline) publish(evs []*model.Event, hits [][]model.Hit, results []sto
 		if (res.LevelUp || res.NewIP) && res.Level >= p.EnrichLevel && res.Level > model.SevInfo && p.Geo != nil {
 			p.Geo.Enrich(ev.SrcIP)
 		}
+		if res.NewOutbound != "" && p.Geo != nil { // 内部对外的外部目标：在线溯源，地图上才能定位
+			p.Geo.Enrich(res.NewOutbound)
+		}
 		// 攻击源威胁等级升级：仅在等级因多次攻击累积而高于本次命中的最高等级时推送
 		// （由单条高危 / 严重告警直接触发的升级已由该告警本身推送，不重复）
 		if res.LevelUp && res.Level >= model.SevMedium && res.Level > maxHitSev(hits[i]) && p.Notifier.Wants(res.Level) {

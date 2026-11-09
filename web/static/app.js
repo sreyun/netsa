@@ -4,8 +4,11 @@
 const $ = (s, el = document) => el.querySelector(s);
 const $$ = (s, el = document) => [...el.querySelectorAll(s)];
 // 日志中的攻击载荷（如 <script>）必须转义后再插入页面
-// NUL 直接去掉：旧版本把华为 syslog 末尾的 NUL 带进了策略名，历史告警的证据里还留着，浏览器会显示成乱码字符
-const esc = (s) => String(s ?? '').replace(/[&<>"'\u0000]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;', '\u0000': '' }[c]));
+// NUL 直接去掉：旧版本把华为 syslog 末尾的 NUL 带进了策略名，历史告警的证据里还留着，浏览器会显示成乱码字符；
+// 其余控制字符（制表、换行、回车除外）显示为 \xHH：服务端已对日志内容转义，这里兜底，页面上不出现方块或乱码
+const ESC = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;', '\u0000': '' };
+const esc = (s) => String(s ?? '').replace(/[&<>"'\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g,
+  (c) => ESC[c] ?? '\\x' + c.charCodeAt(0).toString(16).padStart(2, '0'));
 
 const LV = { critical: '严重', high: '高危', medium: '中危', low: '低危', info: '信息' };
 const LV_COLOR = { critical: '#ff4d4f', high: '#ff7a45', medium: '#ffc53d', low: '#40a9ff', info: '#8c9ab8' };
@@ -587,12 +590,15 @@ const placeShort = (p) => p.label || p.city || p.province || p.country || '未�
 // 内网攻击源（命中自定义网段）用菱形标注，与外部来源区分
 const pointSymbol = (p) => (p.internal ? 'diamond' : isExact(p.coord_source) ? 'circle' : 'emptyCircle');
 
-function visiblePoints() {
-  const pts = (mapCtl.data && mapCtl.data.points) || [];
-  if (mapCtl.view === 'world') return pts;
-  if (!mapCtl.province) return pts.filter((p) => p.world_name === 'China');
-  return pts.filter((p) => p.province_map === mapCtl.province);
+function inView(list) {
+  if (mapCtl.view === 'world') return list;
+  if (!mapCtl.province) return list.filter((p) => p.world_name === 'China');
+  return list.filter((p) => p.province_map === mapCtl.province);
 }
+const visiblePoints = () => inView((mapCtl.data && mapCtl.data.points) || []);
+// 内部对外：内网主机攻击、异常连接（木马回连、周期性外连、数据外传、对外扫描）的外部目标
+const visibleOutbound = () => inView((mapCtl.data && mapCtl.data.outbound) || []);
+const OUT_COLOR = '#c77dff';
 
 function regionData() {
   const d = mapCtl.data || {};
@@ -615,13 +621,22 @@ async function loadMap() {
   await renderMap(!mapCtl.rendered);
 }
 
+function outTip(o) {
+  const top = (o.items || [])[0];
+  return `<b>内部对外 → ${esc(o.name || placeShort(o))}</b><br/>外部地址 ${o.targets} 个 · 内网主机 ${o.hosts} 台 · ${num(o.hits)} 次`
+    + `<br/>最高等级 <span style="color:${LV_COLOR[o.level]}">${LV[o.level]}</span>`
+    + (top ? `<br/>${esc(top.name || top.category)}：${esc(top.hosts.join('、'))} → ${esc(top.ip)}` : '')
+    + '<br/><span style="color:#7d8db3">点击查看外部地址与内网主机</span>';
+}
+
 function pointTip(p) {
   return `<b>${esc(p.name || placeShort(p))}</b><br/>攻击源 ${p.attackers} 个 · 攻击 ${num(p.attacks)} 次<br/>最高等级 <span style="color:${LV_COLOR[p.level]}">${LV[p.level]}</span>`
     + (p.internal ? '<br/><span style="color:#ffd666">内网攻击源 · 自定义网段</span>' : '')
     + `<br/><span style="color:#7d8db3">${esc(COORD[p.coord_source] || '')} · 点击查看攻击源</span>`;
 }
 
-// 持续动画的攻击源数量。每个涟漪、飞线每秒都要重绘几十次，其余攻击源用静态点显示
+// 带涟漪动画的攻击来源数量（涟漪只是突出重点，其余来源用静态点）。飞线不限数量：服务端返回的每个来源地点
+// （最多 800 个）都有指向受保护资产的动画飞线，线宽随攻击次数变化，尽量贴合真实的攻击分布。
 const MAP_ANIMATED = 60;
 async function renderMap(reset) {
   // 地图所在标签页隐藏时不渲染（容器尺寸为 0），切回态势总览时由 loadMap 补上
@@ -649,11 +664,25 @@ async function renderMap(reset) {
   const home = mapCtl.home || { lat: 0, lon: 0, name: '' };
   const homeXY = [home.lon, home.lat];
   const homeVisible = mapCtl.view === 'world' || inChina(home.lon, home.lat);
-  const pts = [...visiblePoints()].sort((a, b) => b.attacks - a.attacks).slice(0, 400);
+  // 服务端返回的全部来源地点（最多 800 个）与内部对外的目标（最多 300 个）都上图、都有飞线
+  const pts = [...visiblePoints()].sort((a, b) => b.attacks - a.attacks);
+  const outs = visibleOutbound(); // 服务端已按等级、次数排序
   mapCtl.flashes = mapCtl.flashes.filter((f) => Date.now() - f.t < 6000).slice(-30);
   const regions = regionData();
   const maxV = Math.max(1, ...regions.map((r) => r.value));
   const maxA = Math.max(1, ...pts.map((p) => p.attacks));
+  const maxO = Math.max(1, ...outs.map((o) => o.hits));
+  // 线宽与透明度随攻击次数变化：攻击集中的来源一眼可见，零星的来源也有线但不喧宾夺主
+  const weight = (v, m) => Math.sqrt(v / m);
+  const inLine = (p) => {
+    const w = weight(p.attacks, maxA);
+    return { coords: [[p.lon, p.lat], homeXY], lineStyle: { color: LV_COLOR[p.level], width: 0.6 + 1.8 * w, opacity: 0.25 + 0.4 * w } };
+  };
+  const outLine = (o) => {
+    const w = weight(o.hits, maxO);
+    return { coords: [homeXY, [o.lon, o.lat]], lineStyle: { width: 1.2 + 1.6 * w, opacity: 0.55 + 0.35 * w } };
+  };
+  const stagger = (i) => (i * 137) % 4000; // 错开各条飞线的出发时间，避免同时脉动
   const size = (a) => 7 + 18 * Math.sqrt(a / maxA);
   const labelN = mapCtl.view === 'world' ? 16 : 30;
   const pointItem = (p, i) => ({
@@ -696,11 +725,25 @@ async function renderMap(reset) {
             : esc(x.name)),
         },
       },
-      {
+      { // 外部对内：每个来源地点飞向受保护资产
         type: 'lines', coordinateSystem: 'geo', zlevel: 1, silent: true,
-        effect: { show: true, period: 4, trailLength: 0.35, symbol: 'arrow', symbolSize: 5 },
-        lineStyle: { width: 1, opacity: 0.45, curveness: 0.25 },
-        data: homeVisible ? pts.slice(0, MAP_ANIMATED).map((p) => ({ coords: [[p.lon, p.lat], homeXY], lineStyle: { color: LV_COLOR[p.level] } })) : [],
+        effect: { show: true, period: 4, delay: stagger, trailLength: 0.3, symbol: 'arrow', symbolSize: 5 },
+        lineStyle: { curveness: 0.25 },
+        data: homeVisible ? pts.map(inLine) : [],
+      },
+      { // 内部对外：受保护资产飞向内网主机攻击、异常连接的外部目标（虚线、反向弯曲，与外部对内区分）
+        type: 'lines', coordinateSystem: 'geo', zlevel: 1, silent: true,
+        effect: { show: true, period: 3.5, delay: stagger, trailLength: 0.3, symbol: 'arrow', symbolSize: 5, color: OUT_COLOR },
+        lineStyle: { curveness: -0.3, type: 'dashed', color: OUT_COLOR },
+        data: homeVisible ? outs.map(outLine) : [],
+      },
+      {
+        type: 'scatter', coordinateSystem: 'geo', zlevel: 2, symbol: 'triangle',
+        data: outs.map((o) => ({
+          name: placeShort(o), value: [o.lon, o.lat, o.hits], o, symbolSize: 8 + 8 * Math.sqrt(o.hits / maxO),
+          itemStyle: { color: OUT_COLOR, borderColor: LV_COLOR[o.level], borderWidth: 1.5 },
+        })),
+        tooltip: { formatter: (x) => outTip(x.data.o) },
       },
       {
         type: 'effectScatter', coordinateSystem: 'geo', zlevel: 2, rippleEffect: { scale: 3, brushType: 'stroke' },
@@ -729,10 +772,10 @@ async function renderMap(reset) {
   if (reset) chart('cMap').clear();
   chart('cMap').setOption(option, reset ? { notMerge: true } : { replaceMerge: ['series'] });
   mapCtl.rendered = true;
-  updateMapChrome(pts, regions);
+  updateMapChrome(pts, regions, outs);
 }
 
-function updateMapChrome(pts, regions) {
+function updateMapChrome(pts, regions, outs = []) {
   const d = mapCtl.data || {};
   const exact = pts.filter((p) => isExact(p.coord_source)).length;
   const attackers = pts.reduce((s, p) => s + p.attackers, 0);
@@ -740,10 +783,16 @@ function updateMapChrome(pts, regions) {
   if (mapCtl.view === 'world') stats = `来源国家/地区<b>${(d.countries || []).length}</b> 地点<b>${pts.length}</b> 攻击源<b>${attackers}</b>`;
   else if (!mapCtl.province) stats = `国内来源省份<b>${(d.provinces || []).length}</b> 城市<b>${pts.length}</b> 攻击源<b>${attackers}</b>`;
   else stats = `${esc(mapCtl.province)} 来源地市<b>${regions.length}</b> 攻击源<b>${attackers}</b>`;
+  if (outs.length) {
+    const targets = outs.reduce((s, o) => s + o.targets, 0);
+    stats += ` <span style="color:${OUT_COLOR}">内部对外</span><b>${targets}</b>`;
+  }
   if (pts.length) stats += `<br/>精确坐标占比<b>${Math.round((exact * 100) / pts.length)}%</b>`;
   $('#mapStats').innerHTML = stats;
   const notes = [];
   if (d.no_coord > 0) notes.push(`${d.no_coord} 个攻击源无法定位（未配置自定义网段的内网地址或定位库中无记录）`);
+  if (outs.length) notes.push('紫色虚线为内网主机对外的攻击或异常连接（木马回连、周期性外连、数据外传、对外扫描等），从受保护资产指向外部目标');
+  if (d.out_no_coord > 0) notes.push(`${d.out_no_coord} 个内部对外的目标无法定位`);
   if (pts.some((p) => p.internal)) notes.push('菱形为命中自定义网段的内网攻击源');
   if (pts.length && exact < pts.length) notes.push('空心点为按城市/省份/国家中心换算的近似位置，配置 MaxMind 或开启在线溯源可获得精确坐标');
   $('#mapNote').textContent = notes.join('；');
@@ -774,6 +823,23 @@ function showPop(p) {
   $('#popAll').onclick = () => { hidePop(); drillTo('attackers', { params: { place: p.key }, label: `攻击来源地点 = ${p.name || placeShort(p)}` }); };
 }
 
+// 内部对外的目标：列出外部地址、攻击类型与发起的内网主机；点主机看其画像，点“告警”看与该外部地址相关的告警
+function showOutPop(o) {
+  const pop = $('#mapPop');
+  const items = o.items || [];
+  pop.innerHTML = `<div class="pt">${badge(o.level)} <span style="color:${OUT_COLOR}">内部对外</span> → ${esc(o.name || placeShort(o))}<span class="x" id="popClose">✕</span></div>
+    <div class="meta">外部地址 ${o.targets} 个 · 内网主机 ${o.hosts} 台 · ${num(o.hits)} 次</div>
+    <table>${items.map((x) => `<tr><td class="ip">${esc(x.ip)}</td><td>${badge(x.level)}</td><td>${esc(x.name || x.category)}</td>
+      <td>${x.hosts.map((h) => `<a class="clickable" data-ip="${esc(h)}">${esc(h)}</a>`).join(' ')}</td>
+      <td><a class="clickable" data-out="${esc(x.ip)}">告警 ›</a></td></tr>`).join('')}</table>
+    <div class="pop-foot">${o.targets > items.length ? `<span class="muted">仅显示等级最高的 ${items.length} 个</span>` : '<span></span>'}<span></span></div>`;
+  pop.hidden = false;
+  $('#popClose').onclick = hidePop;
+  $$('[data-out]', pop).forEach((a) => {
+    a.onclick = () => { hidePop(); drillTo('alerts', { native: { q: a.dataset.out } }); };
+  });
+}
+
 function switchMapView(v) {
   mapCtl.view = v;
   mapCtl.province = null;
@@ -785,6 +851,7 @@ function switchMapView(v) {
 // 地图点击事件随实例创建绑定，实例重建后自动恢复
 chartSetup.cMap = (c) => c.on('click', (x) => {
   if (x.data && x.data.p) { showPop(x.data.p); return; }
+  if (x.data && x.data.o) { showOutPop(x.data.o); return; }
   if (x.seriesType !== 'map' || !x.data) return; // 没有攻击来源的区域不下钻
   const label = x.data.label || x.name;
   if (mapCtl.view === 'world') {

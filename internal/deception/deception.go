@@ -450,7 +450,7 @@ func accountIn(text, acct string) bool {
 
 func truncate(s string, n int) string {
 	if len(s) > n {
-		return s[:n] + "…"
+		return model.Clip(s, n) + "…"
 	}
 	return s
 }

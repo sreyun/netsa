@@ -632,13 +632,11 @@ func isHexish(s string) bool {
 	return true
 }
 
+// clipShape 截断请求形态（进化日志、页面显示用）：不截断多字节字符，控制字符转义。
 func clipShape(s string) string {
+	s = model.Printable(s, 0)
 	if len(s) > 160 {
-		s = s[:160]
-		for len(s) > 0 && s[len(s)-1]&0xC0 == 0x80 {
-			s = s[:len(s)-1]
-		}
-		return s + "…"
+		return model.Clip(s, 160) + "…"
 	}
 	return s
 }

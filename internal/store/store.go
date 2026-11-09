@@ -296,8 +296,9 @@ type Store struct {
 	categories  map[string]int64
 	rules       map[string]int64
 	ruleNames   map[string]string
-	ruleMeta    map[string]ruleMeta // 规则 → 攻击类型与阶段（剔除误报规则的命中时按此调整评分与排行）
-	excluded    map[string]bool     // 命中不计入攻击源评分与排行的规则：被判定为误报而停用的自学习观察规则
+	ruleMeta    map[string]ruleMeta     // 规则 → 攻击类型与阶段（剔除误报规则的命中时按此调整评分与排行）
+	excluded    map[string]bool         // 命中不计入攻击源评分与排行的规则：被判定为误报而停用的自学习观察规则
+	outbound    map[string]*OutboundDst // 内部对外的攻击与异常连接的外部目标（地图上从受保护资产飞出的线）
 	sevCount    [5]int64
 	phases      map[string]int64
 	results     map[string]int64
@@ -345,7 +346,7 @@ func New(maxIPs, maxAlerts, alertsPerRule int, retention time.Duration) *Store {
 	return &Store{
 		maxIPs: maxIPs, maxAlerts: maxAlerts, perRule: alertsPerRule, retention: retention,
 		ips: map[string]*IPProfile{}, buckets: map[int64]*Bucket{},
-		categories: map[string]int64{}, rules: map[string]int64{}, ruleNames: map[string]string{}, ruleMeta: map[string]ruleMeta{}, excluded: map[string]bool{},
+		categories: map[string]int64{}, rules: map[string]int64{}, ruleNames: map[string]string{}, ruleMeta: map[string]ruleMeta{}, excluded: map[string]bool{}, outbound: map[string]*OutboundDst{},
 		phases: map[string]int64{}, results: map[string]int64{}, surf: newSurface(), ruleBits: map[string]int{},
 		incidents: map[uint64]*Incident{}, incByKey: map[string]uint64{},
 		agg: newAggregate(), days: map[string]*DayStat{}, chains: map[chainKey]*chainTrack{},
@@ -360,6 +361,8 @@ type RecordResult struct {
 	LevelUp bool    // 等级提升
 	NewIP   bool
 	Profile string
+	// NewOutbound 是本次新记录的内部对外目标（外部地址），由调用方发起在线溯源以便在地图上定位
+	NewOutbound string
 }
 
 const throttleWindow = 10 * time.Minute
@@ -556,11 +559,11 @@ func (s *Store) recordLocked(ev *model.Event, hits []model.Hit) RecordResult {
 		p.WebReqs++
 		incBounded(&p.Status, ev.Status, 50)
 		if ev.UA != "" {
-			incBounded(&p.UAs, truncate(ev.UA, 200), 10)
+			incBounded(&p.UAs, printable(truncate(ev.UA, 200)), 10)
 		}
 		if ev.PeerIP != "" {
 			incBounded(&p.Proxies, ev.PeerIP, 20)
-			p.LastXFF = ev.XFF
+			p.LastXFF = printable(truncate(ev.XFF, 300)) // 请求头内容，可能被伪造成任意字节
 		}
 	default:
 		p.FwEvents++
@@ -686,6 +689,11 @@ func (s *Store) recordLocked(ev *model.Event, hits []model.Hit) RecordResult {
 		}
 		day.Alerts += int64(len(res.Alerts))
 	}
+	if attacked && count {
+		if s.observeOutboundLocked(ev, hits, t) { // 内部对外的攻击与异常连接：记录外部目标（攻击来源地图的外连飞线）
+			res.NewOutbound = ev.DstIP
+		}
+	}
 	if attacked && !p.inAgg {
 		s.agg.add(p) // 兜底：确保首次攻击一定进入总览统计（目标表已满时 addTarget 可能未被调用）
 	}
@@ -737,7 +745,7 @@ func (p *IPProfile) setTag(tag, detail string) {
 		p.Tags = map[string]string{}
 	}
 	if _, ok := p.Tags[tag]; ok || len(p.Tags) < 32 {
-		p.Tags[tag] = detail
+		p.Tags[tag] = printable(detail) // 说明来自日志（UA、主机名）
 	}
 }
 
@@ -772,7 +780,7 @@ func (s *Store) newAlert(ev *model.Event, h *model.Hit, p *IPProfile) *model.Ale
 	a := &model.Alert{
 		ID: s.nextID, Time: ev.Time, Kind: ev.Kind, SrcIP: ev.SrcIP, RuleID: h.RuleID, Name: h.Name,
 		Category: h.Category, Severity: h.Severity, Phase: h.Phase, Result: h.Result, Target: truncate(ev.Target(), 300),
-		Method: ev.Method, Status: ev.Status, Evidence: h.Evidence, UA: truncate(ev.UA, 200), Source: ev.Source, Proven: h.Proven, Learned: h.Learned,
+		Method: ev.Method, Status: ev.Status, Evidence: printable(h.Evidence), UA: printable(truncate(ev.UA, 200)), Source: ev.Source, Proven: h.Proven, Learned: h.Learned,
 	}
 	if r := ev.Asset; r != nil {
 		a.Asset, a.AssetLevel, a.Owner = r.Name, r.Level, r.Owner
@@ -804,6 +812,9 @@ func (s *Store) UpdateGeo(ip string, info *geo.Info) {
 		old := p.Geo
 		p.Geo = info
 		s.agg.setGeo(p, old)
+	}
+	if d := s.outbound[ip]; d != nil { // 内部对外的外部目标同样更新归属地（地图定位）
+		d.Geo = info
 	}
 }
 
@@ -866,6 +877,7 @@ func (s *Store) Maintain() {
 		// 「近 1 小时」只用到 60 分钟，保留 2 小时的分钟桶即可
 		s.agg.prune(s.maxTime.Add(-2 * time.Hour))
 		s.pruneChainsLocked(s.maxTime)
+		s.pruneOutboundLocked(s.maxTime)
 	}
 	if len(s.ips) > s.maxIPs {
 		s.evictLocked()

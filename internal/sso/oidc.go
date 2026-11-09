@@ -20,6 +20,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"netsa/internal/config"
 )
@@ -417,8 +418,11 @@ func (o *OIDC) identity(claims map[string]any) (*Identity, error) {
 }
 
 func clipName(s string) string {
-	if len(s) > 64 {
-		return s[:64]
+	if n := 64; len(s) > n {
+		for n > 0 && !utf8.RuneStart(s[n]) { // 不截断多字节字符（中文显示名）
+			n--
+		}
+		return s[:n]
 	}
 	return s
 }

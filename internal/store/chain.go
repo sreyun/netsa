@@ -583,8 +583,8 @@ func (tr *chainTrack) step(stage int, h *model.Hit, ev *model.Event, src, peer s
 			tr.Dropped++
 			return
 		}
-		st = &chainStep{Stage: stage, Category: h.Category, Src: src, Peer: k.peer, First: t, Last: t, Rule: h.RuleID, Name: h.Name,
-			Severity: h.Severity, Result: h.Result, Proven: h.Proven, Evidence: truncate(h.Evidence, 300), Target: truncate(ev.Target(), 200)}
+		st = &chainStep{Stage: stage, Category: h.Category, Src: src, Peer: printable(k.peer), First: t, Last: t, Rule: h.RuleID, Name: h.Name,
+			Severity: h.Severity, Result: h.Result, Proven: h.Proven, Evidence: printable(truncate(h.Evidence, 300)), Target: truncate(ev.Target(), 200)}
 		tr.Steps = append(tr.Steps, st)
 		tr.idx[k] = st
 		if stage == stRecon {
@@ -601,7 +601,7 @@ func (tr *chainTrack) step(stage int, h *model.Hit, ev *model.Event, src, peer s
 	if hitRank(h.Severity, h.Result, h.Proven) > hitRank(st.Severity, st.Result, st.Proven) {
 		st.Rule, st.Name, st.Severity, st.Result = h.RuleID, h.Name, h.Severity, h.Result
 		st.Proven = st.Proven || h.Proven
-		st.Evidence, st.Target = truncate(h.Evidence, 300), truncate(ev.Target(), 200)
+		st.Evidence, st.Target = printable(truncate(h.Evidence, 300)), truncate(ev.Target(), 200)
 		if alert != 0 {
 			st.Alert = alert
 		}

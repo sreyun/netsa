@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"time"
 
+	"netsa/internal/model"
 	"netsa/internal/rawlog"
 )
 
@@ -72,6 +73,10 @@ func (s *Server) rawlogSearch(w http.ResponseWriter, r *http.Request) {
 	}
 	if q.Cursor.Ms == 0 { // 翻页是同一次检索，不重复记录
 		s.audit(r, "检索原始日志", rawDesc(q)+"，命中 "+strconv.Itoa(len(res.Records))+" 条", nil)
+	}
+	// 页面显示时转义控制字符与非法字节（导出保持原样，用于取证留档）
+	for i := range res.Records {
+		res.Records[i].Raw = model.Printable(res.Records[i].Raw, 0)
 	}
 	writeJSON(w, res)
 }

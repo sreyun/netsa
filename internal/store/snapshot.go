@@ -36,6 +36,7 @@ type snapshotHead struct {
 	Rules      map[string]int64     `json:"rules"`
 	RuleNames  map[string]string    `json:"rule_names"`
 	RuleMeta   map[string]ruleMeta  `json:"rule_meta,omitempty"`
+	Outbound   []*OutboundDst       `json:"outbound,omitempty"`
 	SevCount   [5]int64             `json:"sev_count"`
 	Phases     map[string]int64     `json:"phases"`
 	Results    map[string]int64     `json:"results"`
@@ -104,7 +105,7 @@ func (s *Store) writeSnapshot(f io.Writer, compress bool) error {
 	head := snapshotHead{
 		Version: snapshotVersion, SavedAt: time.Now(), NextID: s.nextID, Buckets: s.buckets, Totals: s.totals,
 		Categories: s.categories, Rules: s.rules, RuleNames: s.ruleNames, RuleMeta: s.ruleMeta, SevCount: s.sevCount, Phases: s.phases,
-		Results: s.results, MinTime: s.minTime, MaxTime: s.maxTime, Surface: s.surf, Scores: s.scores, Incidents: s.incidents, NextInc: s.nextInc, Days: s.days, Chains: s.chainTracks(),
+		Results: s.results, MinTime: s.minTime, MaxTime: s.maxTime, Surface: s.surf, Scores: s.scores, Incidents: s.incidents, NextInc: s.nextInc, Days: s.days, Chains: s.chainTracks(), Outbound: s.outboundList(),
 	}
 	n := len(s.alerts)
 	head.Alerts = make([]*model.Alert, 0, n)
@@ -268,6 +269,7 @@ func (s *Store) Load(path string) error {
 		if p.Attacks > 0 {
 			p.ensureAttackMaps() // 兼容旧版本快照中缺失的字段
 		}
+		cleanProfile(p) // 旧版本保存的二进制请求目标、日志中的控制字符
 		if p.Attacks > 0 || len(p.Intel) > 0 {
 			p.recompute(nil, nil) // 评分规则可能已更新，按当前规则重新计算等级
 		}
@@ -372,6 +374,13 @@ func (s *Store) Load(path string) error {
 		}
 		tr.reindex()
 		s.chains[chainKey{tr.Kind, tr.Key}] = tr
+	}
+	s.cleanTargetsLocked()
+	s.outbound = map[string]*OutboundDst{}
+	for _, d := range snap.Outbound {
+		if d != nil && d.IP != "" && len(s.outbound) < maxOutbound {
+			s.outbound[d.IP] = d
+		}
 	}
 	s.incByKey = map[string]uint64{}
 	for id, inc := range s.incidents {

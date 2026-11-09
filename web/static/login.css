@@ -160,9 +160,16 @@ body {
   .brand-en { display: none; }
   .legal { position: static; padding: 0 16px 20px; }
 }
+/* 系统要求减少动态效果时关闭闪烁类动画（动态背景按舒缓模式播放）；在页面上明确开启动效后恢复，明确关闭时全部停止 */
 @media (prefers-reduced-motion: reduce) {
-  .fx-scan, .card-glow, .login-btn::after, .hud-status .dot { animation: none !important; }
+  :root:not([data-motion="full"]) .fx-scan, :root:not([data-motion="full"]) .card-glow,
+  :root:not([data-motion="full"]) .login-btn::after, :root:not([data-motion="full"]) .hud-status .dot { animation: none !important; }
 }
+:root[data-motion="off"] .fx-scan, :root[data-motion="off"] .card-glow, :root[data-motion="off"] .login-btn::after,
+:root[data-motion="off"] .hud-status .dot { animation: none !important; }
+.hud-motion { background: none; border: 1px solid rgba(143, 233, 255, .3); color: var(--muted); font: inherit; font-size: 12px; letter-spacing: 1px;
+  padding: 1px 8px; border-radius: 10px; cursor: pointer; }
+.hud-motion:hover, .hud-motion:focus-visible { color: #8fe9ff; border-color: #8fe9ff; outline: none; }
 
 /* 双因素认证（第二步） */
 .two-tip { margin: 0 0 4px; font-size: 13px; line-height: 1.7; color: #9fb3d9; }

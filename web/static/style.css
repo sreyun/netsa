@@ -207,6 +207,7 @@ main { padding: 14px 16px 30px; }
 .map-stats b { color: var(--hl); font-family: var(--mono); font-size: 14px; margin: 0 2px; }
 .map-legend { position: absolute; left: 10px; bottom: 8px; display: flex; gap: 10px; flex-wrap: wrap; font-size: 12px; background: rgba(7,13,28,.7); padding: 3px 8px; border-radius: 4px; }
 .map-legend i { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 4px; vertical-align: middle; }
+.map-legend i.out-line { width: 14px; height: 0; border-radius: 0; border-top: 2px dashed #c77dff; background: none; }
 .map-tools { position: absolute; right: 8px; top: 6px; }
 .map-note { font-size: 12px; color: var(--muted); margin-top: 4px; min-height: 16px; }
 .map-pop { position: absolute; right: 8px; top: 40px; width: 300px; max-height: 420px; overflow: auto; background: rgba(8,16,34,.96);

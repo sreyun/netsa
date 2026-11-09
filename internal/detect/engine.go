@@ -548,9 +548,7 @@ func isIPHost(h string) bool {
 
 // nonHTTPRequest 判断请求行是否根本不是 HTTP：TLS 握手、Oracle TNS、RDP 等二进制协议发往 HTTP 端口时，
 // nginx 记录的“请求行”是一串二进制，里面的 \x00 与符号不是 Web 攻击载荷。
-func nonHTTPRequest(ev *model.Event) bool {
-	return ev.Method == "" && ev.URI != "" && ev.URI[0] != '/'
-}
+func nonHTTPRequest(ev *model.Event) bool { return model.NonHTTPRequest(ev.Method, ev.URI) }
 
 // maxLuaArgs 是 OpenResty ngx.req.get_uri_args 默认最多读取的参数个数：之后的参数 Lua WAF 看不到（CVE-2018-9230）。
 const maxLuaArgs = 100
@@ -647,7 +645,7 @@ func specialWebChecks(ev *model.Event, uri, result string) []model.Hit {
 		case strings.Contains(raw, "(DESCRIPTION=") || strings.Contains(raw, "(CONNECT_DATA="):
 			name = "Oracle TNS协议探测"
 		}
-		add("proto-nonhttp", name, CatProtocol, model.SevLow, model.PhaseRecon, Printable(raw, 80))
+		add("proto-nonhttp", name, CatProtocol, model.SevLow, model.PhaseRecon, model.PrintableBinary(raw, 80))
 	case ev.Method == "CONNECT":
 		add("proto-connect", "代理隧道探测(CONNECT)", CatProtocol, model.SevMedium, model.PhaseRecon, ev.Method+" "+Printable(raw, 120))
 	case strings.HasPrefix(uri, "http://") || strings.HasPrefix(uri, "https://"):

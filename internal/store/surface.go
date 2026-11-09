@@ -671,11 +671,13 @@ var techRules = []struct {
 }
 
 // normPath 去掉查询串并将 ID 类路径段（纯数字、UUID、16 位以上十六进制）泛化，避免资产数量爆炸。
+// 控制字符与非法字节转义（与攻击目标 Event.Target 的写法一致，入口、发现的键在记录与核对时相同，页面上也不出现乱码）。
 // 单次扫描实现，位于单线程聚合路径上，避免正则开销。
 func normPath(uri string) string {
 	if i := strings.IndexAny(uri, "?#"); i >= 0 {
 		uri = uri[:i]
 	}
+	uri = model.Printable(uri, 0)
 	if uri == "" {
 		return "/"
 	}
@@ -1016,6 +1018,7 @@ func (sf *surface) deviceExposure(ev *model.Event, sv *Service, key string) {
 }
 
 func (sf *surface) finding(id, title, cat string, sev model.Severity, asset, evidence, remediation, ip string, t time.Time) {
+	evidence = printable(evidence) // 证据来自日志内容
 	f := sf.Findings[id]
 	if f == nil {
 		if len(sf.Findings) >= maxFindings {

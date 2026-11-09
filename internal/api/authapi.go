@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"netsa/internal/audit"
 	"netsa/internal/auth"
@@ -668,6 +669,9 @@ func (s *Server) oidcCallback(w http.ResponseWriter, r *http.Request) {
 
 func clip(s string, n int) string {
 	if len(s) > n {
+		for n > 0 && !utf8.RuneStart(s[n]) { // 不截断多字节字符
+			n--
+		}
 		return s[:n]
 	}
 	return s

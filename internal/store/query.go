@@ -693,6 +693,10 @@ type MapResult struct {
 	Provinces []*MapRegion `json:"provinces"`
 	NoCoord   int          `json:"no_coord"`
 	Total     int          `json:"total"`
+	// 内部对外：内网主机攻击、异常连接的外部目标（按地点汇总），地图上从受保护资产飞向这些地点
+	Outbound   []*MapOutbound `json:"outbound"`
+	OutTotal   int            `json:"out_total"`
+	OutNoCoord int            `json:"out_no_coord"`
 }
 
 func addRegion(m map[string]*MapRegion, key, name string, p *IPProfile) {
@@ -793,6 +797,7 @@ func (s *Store) MapData(minLevel model.Severity) *MapResult {
 	if len(res.Points) > 800 {
 		res.Points = res.Points[:800]
 	}
+	res.Outbound, res.OutTotal, res.OutNoCoord = s.outboundPoints(minLevel)
 	res.Countries, res.Provinces = sortedRegions(countries), sortedRegions(provinces)
 	return res
 }

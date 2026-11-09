@@ -438,22 +438,32 @@ const LAND = 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
     ctx.globalAlpha = 1;
   }
 
+  // 动效模式：full 完整动画；calm 舒缓（自转减半、轨迹更少）；off 静态画面。
+  // 系统要求“减少动态效果”时默认 calm 而不是完全静止：Windows Server、远程桌面会话默认关闭系统动画，
+  // 浏览器据此报告 reduce，登录页因此一直是一帧静态画面。页面右上角的“动效”开关可以明确开启或关闭（记住选择）。
+  let mode = reduce ? 'calm' : 'full';
+  let running = false;
   let last = 0;
   function loop(now) {
+    if (mode === 'off') {
+      running = false;
+      return;
+    }
     const dt = last ? Math.min(now - last, 100) : 16;
     last = now;
-    theta += dt * 0.00006; // 约 105 秒自转一周
-    if (now > nextSpawn && arcs.length < 32) {
+    const calm = mode === 'calm';
+    theta += dt * (calm ? 0.00003 : 0.00006); // 约 105 秒（舒缓模式 210 秒）自转一周
+    if (now > nextSpawn && arcs.length < (calm ? 12 : 32)) {
       spawn(now);
-      nextSpawn = now + 140 + Math.random() * 340;
+      nextSpawn = now + (calm ? 2.5 : 1) * (140 + Math.random() * 340);
     }
     frame(now);
     requestAnimationFrame(loop);
   }
 
   layout();
-  window.addEventListener('resize', () => { layout(); if (reduce) still(); });
-  // 减少动态效果：只绘制一帧静态画面，攻击轨迹定格在飞行途中
+  window.addEventListener('resize', () => { layout(); if (mode === 'off') still(); });
+  // 静态画面：只绘制一帧，攻击轨迹定格在飞行途中
   function still() {
     const now = performance.now();
     arcs.length = 0;
@@ -464,9 +474,31 @@ const LAND = 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
     }
     frame(now);
   }
-  if (reduce) {
-    still();
-  } else {
-    requestAnimationFrame(loop);
+  function apply(m) {
+    mode = m;
+    document.documentElement.dataset.motion = m;
+    if (m === 'off') {
+      still();
+    } else if (!running) {
+      running = true;
+      last = 0;
+      requestAnimationFrame(loop);
+    }
+    const btn = $('#motionToggle');
+    if (btn) {
+      btn.textContent = m === 'off' ? '动效：关' : '动效：开';
+      btn.setAttribute('aria-pressed', String(m !== 'off'));
+    }
+  }
+  let pref = null;
+  try { pref = localStorage.getItem('netsa.login.motion'); } catch (_) { /* 隐私模式 */ }
+  apply(pref === 'off' ? 'off' : pref === 'on' ? 'full' : mode);
+  const btn = $('#motionToggle');
+  if (btn) {
+    btn.addEventListener('click', () => {
+      const next = mode === 'off' ? 'full' : 'off';
+      try { localStorage.setItem('netsa.login.motion', next === 'off' ? 'off' : 'on'); } catch (_) { /* 隐私模式 */ }
+      apply(next);
+    });
   }
 })();

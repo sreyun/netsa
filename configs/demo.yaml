@@ -49,6 +49,11 @@ geo:
   online:
     enabled: true      # 演示 IP 为随机生成，开启在线溯源以便在地图上显示坐标
     rdap: true
+  # 演示情报中的外连目标是 RFC 5737 文档地址，定位库里没有记录：给出示意位置，地图上能看到“内部对外”的飞线
+  custom:
+    - { cidr: 203.0.113.66/32, name: "演示 C2 服务器（阿姆斯特丹）", country: "荷兰", country_code: NL, city: "阿姆斯特丹", lat: 52.37, lon: 4.90 }
+    - { cidr: 203.0.113.77/32, name: "演示载荷服务器（法兰克福）", country: "德国", country_code: DE, city: "法兰克福", lat: 50.11, lon: 8.68 }
+    - { cidr: 203.0.113.99/32, name: "演示矿池（新加坡）", country: "新加坡", country_code: SG, city: "新加坡", lat: 1.35, lon: 103.82 }
 
 detect:
   rules_file: configs/rules.example.yaml

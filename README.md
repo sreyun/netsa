@@ -115,7 +115,7 @@ go build -o bin/netsa ./cmd/netsa
 | [主机与 DNS 检测](docs/log-sources.md#主机认证日志与-dns-日志) | SSH / RDP / VPN 暴力破解与破解成功、密码喷洒、日志被清除、新建账号与提权、[账号盗用](docs/detection.md#账号盗用)；[主机进程检测](docs/detection.md#主机进程检测)（Web 进程执行命令、反弹 Shell、凭证窃取、持久化）；DNSLog 带外回连、DNS 隧道、DGA、矿池域名 |
 | [攻击源溯源](docs/traceability.md) | 融合 ip2region、MaxMind、ip-api、rDNS、RDAP / WHOIS，支持内网自定义网段；同源关联按网段、工具指纹、攻击手法找出疑似同一团伙 |
 | [资产攻击链路](docs/detection.md#资产攻击链路) | 以站点 / 主机为中心串起侦察、利用、突破、植入、控制、横向、窃取、影响，每一步注明证据、来源与 ATT&CK 技术，研判是否失陷并给出处置建议 |
-| [态势大屏](docs/deployment.md#演示环境) | 世界 / 中国双视图攻击地图，可下钻到省和地市；实时飞线与告警推送；KPI、趋势、分布图均可点击下钻 |
+| [态势大屏](docs/deployment.md#演示环境) | 世界 / 中国双视图攻击地图，可下钻到省和地市；外部对内与内部对外的实时飞线、告警推送；KPI、趋势、分布图均可点击下钻 |
 | [攻击面分析](docs/log-sources.md#未做-dnat-映射的端口探测) | 梳理对外服务，发现源码、密钥、备份泄露与管理接口暴露；结合 DNAT 映射与防火墙会话证据，过滤打不到任何服务的背景扫描 |
 | [安全评估与失陷研判](docs/detection.md#安全评估与失陷研判) | 七个维度打分并给出 A~E 总评与 P0~P3 处置建议；C2 心跳、恶意 TLS 指纹、攻击载荷落地、[被攻击后回连](docs/detection.md#防火墙与-web-日志联动被攻击后回连)；MITRE ATT&CK 矩阵 |
 | [自学习与 AI 研判](docs/self-learning.md) | 规则级、目标级与情报源准确率自动校准；从日志学习内网网段、攻击源、攻击活动、[参数正常取值与站点产品](docs/self-learning.md#参数的正常取值与站点产品)；[自我纠错闭环](docs/self-learning.md#自我纠错闭环)：客观核实、纠错回溯、自动归档；AI 研判支持 OpenAI 兼容与 Anthropic 接口 |

@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"netsa/internal/parser"
 )
@@ -209,7 +210,11 @@ func (s *Store) Search(ctx context.Context, q Query) (Result, error) {
 			res.Matched++
 			if q.MaxRaw > 0 && len(r.Raw) > q.MaxRaw {
 				r.RawLen = len(r.Raw)
-				r.Raw = strings.ToValidUTF8(r.Raw[:q.MaxRaw], "")
+				n := q.MaxRaw
+				for n > 0 && !utf8.RuneStart(r.Raw[n]) { // 不截断多字节字符；其中的二进制字节由接口转义显示
+					n--
+				}
+				r.Raw = r.Raw[:n]
 			}
 			found = append(found, r)
 			if len(found) >= 2*keep { // 只保留按时间最新的 keep 条（写入顺序不一定是时间顺序）

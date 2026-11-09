@@ -318,7 +318,7 @@ func (ss *syslogSource) handleLine(ctx context.Context, st *senderStat, line str
 	case lineFailed:
 		if st.failed.Add(1)%64 == 1 {
 			st.mu.Lock()
-			st.sample = truncateLine(line)
+			st.sample = model.Printable(truncateLine(line), 0)
 			st.mu.Unlock()
 		}
 		return

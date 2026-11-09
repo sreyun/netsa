@@ -77,7 +77,7 @@ func (s *Store) noSourceAlertLocked(ev *model.Event, h *model.Hit) *model.Alert 
 	a := &model.Alert{
 		ID: s.nextID, Time: ev.Time, Kind: ev.Kind, Location: noSourceLabel, RuleID: h.RuleID, Name: h.Name,
 		Category: h.Category, Severity: h.Severity, Phase: h.Phase, Result: h.Result, Target: truncate(ev.Target(), 300),
-		Evidence: h.Evidence, Source: ev.Source, Vuln: h.Vuln, Proven: h.Proven,
+		Evidence: printable(h.Evidence), Source: ev.Source, Vuln: h.Vuln, Proven: h.Proven,
 	}
 	if r := ev.Asset; r != nil {
 		a.Asset, a.AssetLevel, a.Owner = r.Name, r.Level, r.Owner

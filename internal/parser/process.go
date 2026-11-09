@@ -173,10 +173,7 @@ func Printable(s string, n int) string {
 		}
 		return r
 	}, s)
-	if len(s) > n {
-		s = s[:n]
-	}
-	return s
+	return model.Clip(s, n)
 }
 
 // Auditd 解析 Linux auditd 的 EXECVE 记录。同一事件的 SYSCALL 记录（进程路径、账号、父进程号）先于 EXECVE 输出，

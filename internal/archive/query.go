@@ -133,6 +133,8 @@ func scanRow(rows pgx.Rows) (Row, error) {
 	err := rows.Scan(&r.Time, &r.AlertID, &r.Instance, &r.SrcIP, &r.Location, &r.RuleID, &r.Name, &r.Category, &sev,
 		&r.Phase, &r.Result, &r.Kind, &r.Method, &status, &r.Target, &r.Evidence, &r.UA, &r.Source)
 	r.Severity, r.Status = model.Severity(sev), int(status)
+	r.Target = model.CleanTarget(r.Target) // 旧版本写入的二进制请求目标（非 HTTP 协议探测的原始字节）按协议说明显示
+	r.Evidence, r.UA = model.Printable(r.Evidence, 0), model.Printable(r.UA, 0)
 	return r, err
 }
 

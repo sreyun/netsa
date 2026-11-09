@@ -532,10 +532,7 @@ func targetKey(t string) string {
 		t = t[:i]
 	}
 	t = strings.TrimSpace(t)
-	if len(t) > 120 {
-		t = t[:120]
-	}
-	return t
+	return model.Clip(t, 120)
 }
 
 // targets 返回样本中归一化后的不同目标：同一接口不同参数的多个目标只算一次，避免一个事件被重复计数。

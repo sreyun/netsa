@@ -227,7 +227,7 @@ func (s *source) parseLineStatus(p *parser.Auto, line string) (ev *model.Event, 
 		s.failed.Add(1)
 		line = truncateLine(line)
 		s.mu.Lock()
-		s.sample = line
+		s.sample = model.Printable(line, 0) // 页面显示：控制字符转义
 		s.mu.Unlock()
 		return nil, lineFailed
 	}

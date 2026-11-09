@@ -273,8 +273,11 @@ type ProcInfo struct {
 	Mitre       []string
 }
 
-// Target 返回事件的攻击目标描述。
-func (e *Event) Target() string {
+// Target 返回事件的攻击目标描述。其中来自日志的内容（账号、域名、进程、URI）里的控制字符与非法字节转义为 \xHH，
+// 页面、告警推送与导出中不会出现乱码。
+func (e *Event) Target() string { return Printable(e.target(), 0) }
+
+func (e *Event) target() string {
 	switch e.Kind {
 	case KindProcess:
 		t := e.Host
@@ -315,11 +318,7 @@ func (e *Event) Target() string {
 		return e.SrcIP + " ← " + e.DstIP + " 文件 " + e.File.Name
 	}
 	if e.Kind == KindWeb {
-		h := e.Host
-		if h == "" {
-			h = "-"
-		}
-		return h + " " + e.URI
+		return webTarget(e.Host, e.Method, e.URI)
 	}
 	dst := e.DstIP
 	if dst == "" {
