@@ -127,7 +127,7 @@ CRS 依赖完整的请求头与请求体，只看日志时误报偏高，且每�
 
 ## 国产 OA、中间件漏洞接口签名
 
-内置 261 条签名，覆盖致远、泛微、用友、通达、蓝凌、万户、金和、宏景、红帆 OA，帆软、Smartbi、亿赛通、畅捷通 T+、若依、JeecgBoot、Nacos、XXL-JOB、ThinkPHP、织梦、骑士等 CMS，APISIX、Nginx UI，以及深信服、天融信、奇安信、锐捷、H3C、海康威视、大华等设备，共 43 个国产产品。签名由 `tools/vulnpaths` 从 [nuclei-templates](https://github.com/projectdiscovery/nuclei-templates)（MIT 许可，见 [NOTICE](../NOTICE)）中提取，另有少量人工补充。
+内置 261 条签名，覆盖致远、泛微、用友、通达、蓝凌、万户、金和、宏景、红帆 OA，帆软、Smartbi、亿赛通、畅捷通 T+、若依、JeecgBoot、Nacos、XXL-JOB、ThinkPHP、织梦、骑士等 CMS，APISIX、Nginx UI，以及深信服、天融信、奇安信、锐捷、H3C、海康威视、大华等设备，共 42 个国产产品。签名由 `tools/vulnpaths` 从 [nuclei-templates](https://github.com/projectdiscovery/nuclei-templates)（MIT 许可，见 [NOTICE](../NOTICE)）中提取，另有少量人工补充。
 
 签名只有路径与查询参数名（以及 `method=`、`action=` 这类选择功能的参数值），不含载荷：日志看不到请求体，攻击者换载荷也能认出。
 

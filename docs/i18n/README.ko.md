@@ -9,7 +9,7 @@ Web, 방화벽 / IDS, 네트워크 플로, 호스트 인증과 프로세스, DNS
 
 [![CI](https://github.com/sreyun/netsa/actions/workflows/ci.yml/badge.svg)](https://github.com/sreyun/netsa/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/tag/sreyun/netsa?label=release)](https://github.com/sreyun/netsa/tags)
-![Go](https://img.shields.io/badge/Go-1.25%2B-00ADD8?logo=go&logoColor=white)
+![Go](https://img.shields.io/badge/Go-1.26%2B-00ADD8?logo=go&logoColor=white)
 ![Docker](https://img.shields.io/badge/docker-amd64%20%7C%20arm64-2496ED?logo=docker&logoColor=white)
 
 [简体中文](../../README.md) · [English](README.en.md) · [繁體中文](README.zh-TW.md) · [日本語](README.ja.md) · **한국어** · [Español](README.es.md) · [Français](README.fr.md) · [Deutsch](README.de.md) · [Русский](README.ru.md)
@@ -31,6 +31,8 @@ Web, 방화벽 / IDS, 네트워크 플로, 호스트 인증과 프로세스, DNS
 - **도시 단위까지 추적하고 그룹까지 연관**: CDN과 프록시 뒤의 실제 IP를 복원하고, XFF 위조와 CDN을 우회한 원본 서버 직접 접속을 탐지합니다. 여러 위치 정보 출처를 교차 검증해 신뢰도를 제시합니다. 동일 출처 연관 분석과 공격 캠페인 병합으로 같은 공격자가 바꿔 가며 쓰는 출구 주소(같은 도구 핑거프린트, 같은 OAST 상관 ID, TLS 핑거프린트, 같은 미끼 토큰)를 찾습니다. [미끼](../detection.md#诱饵)(미끼 경로, 토큰, 계정, 허니팟)에 걸리면 높은 신뢰도로 공격자로 판단합니다. 자산 공격 체인은 서버 한 대가 스캔되고, 악용되고, 제어되고, 측면 이동에 쓰이기까지의 전 과정을 시간순으로 연결합니다.
 - **쓸수록 정확해짐**: 분석가의 처리 결론에서 학습해, 오탐을 반복하는 규칙과 엔드포인트는 자동으로 등급을 낮추고, 확인된 공격자가 다시 나타나면 자동으로 등급을 올립니다. 허용 목록을 수작업으로 정리할 필요 없이, 정상 트래픽에서 각 매개변수의 평소 값을 학습하고 각 사이트가 쓰는 제품과 프런트엔드 프레임워크를 수동적으로 식별합니다. 검색창에 입력한 평범한 문자열이나 사이트에 없는 제품에 대한 취약점 탐색이 더 이상 고위험 경보를 일으키지 않습니다. AI 판정은 OpenAI와 Anthropic API를 모두 지원해 내부망 vLLM과 클라우드 모델을 모두 연결할 수 있고, 모델 차이에 자동으로 적응하며 분석가의 결론으로 모델의 신뢰도를 평가합니다.
 - **보안 운영의 전 과정**: 인시던트 집계와 처리 기한, 오탐 억제, DingTalk / WeCom / Feishu 알림, 자산·취약점 연관, 원본 로그 보존과 원클릭 증거 패키지, 주간·월간 보고서, MLPS 2.0(중국 등급 보호 제도) 자체 점검, 위변조 탐지 감사 체인을 갖추고 있습니다.
+- **검색창 하나로 모든 것을**: `Ctrl+K`를 누르고 IP, 인시던트 번호, 자산, 사이트, 규칙, 공격 유형을 입력하면 유형별로 묶어 보여 주고, 키보드만으로 공격원 프로필, 인시던트, 공격 체인, 공격 캠페인을 열 수 있습니다. 찾지 못하면 알림 검색이나 원시 로그 검색으로 바로 넘어갑니다.
+- **안팎 양방향을 모두 표시**: 공격 지도에 외부에서 내부로의 공격뿐 아니라 내부 호스트에서 외부로의 공격과 비정상 연결(위협 인텔리전스에 등록된 주소로의 연결, 트로이 목마 콜백, 데이터 유출, 외부 스캔. 정상적인 외부 통신은 선을 그리지 않음)도 표시합니다. 공격선 밀도는 '중점 / 전체 / 끄기'로 바꿀 수 있고, 지도는 전체 화면으로 대형 화면에 띄울 수 있습니다.
 - **한 대로도 충분히 빠름**: 개발 장비(i7-10700, 16스레드)에서 엔드투엔드 초당 약 46만 건. Aho-Corasick 사전 필터 덕분에 정상 요청은 거의 정규식을 실행할 필요가 없으며, 탐지는 건당 약 3µs입니다.
 
 ## 빠른 시작

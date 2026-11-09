@@ -9,7 +9,7 @@
 
 [![CI](https://github.com/sreyun/netsa/actions/workflows/ci.yml/badge.svg)](https://github.com/sreyun/netsa/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/tag/sreyun/netsa?label=release)](https://github.com/sreyun/netsa/tags)
-![Go](https://img.shields.io/badge/Go-1.25%2B-00ADD8?logo=go&logoColor=white)
+![Go](https://img.shields.io/badge/Go-1.26%2B-00ADD8?logo=go&logoColor=white)
 ![Docker](https://img.shields.io/badge/docker-amd64%20%7C%20arm64-2496ED?logo=docker&logoColor=white)
 
 [简体中文](../../README.md) · [English](README.en.md) · **繁體中文** · [日本語](README.ja.md) · [한국어](README.ko.md) · [Español](README.es.md) · [Français](README.fr.md) · [Deutsch](README.de.md) · [Русский](README.ru.md)
@@ -31,6 +31,8 @@
 - **能溯源到城市，能關聯到團夥**：還原 CDN 與代理背後的真實 IP，識別 XFF 偽造和繞過 CDN 直連；多來源定位交叉比對並給出信賴度；同源關聯與攻擊活動歸併找出同一攻擊者輪換的出口（同一工具指紋、同一 OAST 關聯標識、TLS 指紋、同一誘餌線索）；[誘餌](../detection.md#诱饵)（誘餌路徑、線索、帳號、蜜罐）命中即高信賴攻擊者；資產攻擊鏈路把一台伺服器從被掃描、被利用到被控制、橫向移動的全過程依時間串起來。
 - **越用越準**：從分析師的處置結論中學習，反覆誤報的規則和介面自動降級，已確認的攻擊者再次出現自動升級；不需要人工整理白名單，自動從正常流量學習每個參數平時的取值、被動識別每個網站使用的產品與前端框架，搜尋框裡的普通文字、網站上根本不存在的產品的弱點探測不再刷出高風險。AI 研判同時支援 OpenAI 與 Anthropic 介面，內網 vLLM、雲端模型都能接入，自動適配模型差異，並用分析師的結論評估模型可信度。
 - **安全維運閉環**：事件聚合與處置時限、誤報抑制、釘釘 / 企業微信 / 飛書推播、資產弱點關聯、原始日誌留存與一鍵取證包、週報月報、等保 2.0 自查、防竄改稽核鏈。
+- **一個搜尋框直達一切**：`Ctrl+K` 輸入 IP、事件編號、資產、站點、規則或攻擊類型，依類別分組，用鍵盤直達攻擊源畫像、事件、攻擊鏈路與攻擊活動；搜不到時一鍵轉到告警與原始日誌檢索。
+- **內外雙向都看得見**：攻擊地圖同時畫出外部對內的攻擊，以及內網主機對外的攻擊與異常連線（外連威脅情資位址、木馬回連、資料外洩、對外掃描；正常的出站存取不畫線）；飛線可在「重點 / 全部 / 關閉」間調整密度，地圖可全螢幕投到大螢幕上。
 - **單機就夠快**：開發機（i7-10700，16 執行緒）端到端約 46 萬條/秒；Aho-Corasick 預篩讓正常請求基本不必執行正規表示式，偵測約 3µs/條。
 
 ## 快速開始

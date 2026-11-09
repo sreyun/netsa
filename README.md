@@ -10,7 +10,7 @@
 [![CI](https://github.com/sreyun/netsa/actions/workflows/ci.yml/badge.svg)](https://github.com/sreyun/netsa/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/tag/sreyun/netsa?label=release&color=36cfc9)](https://github.com/sreyun/netsa/tags)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
-![Go](https://img.shields.io/badge/Go-1.25%2B-00ADD8?logo=go&logoColor=white)
+![Go](https://img.shields.io/badge/Go-1.26%2B-00ADD8?logo=go&logoColor=white)
 ![Docker](https://img.shields.io/badge/docker-amd64%20%7C%20arm64-2496ED?logo=docker&logoColor=white)
 [![Stars](https://img.shields.io/github/stars/sreyun/netsa?style=flat&logo=github&color=yellow)](https://github.com/sreyun/netsa/stargazers)
 [![Last commit](https://img.shields.io/github/last-commit/sreyun/netsa)](https://github.com/sreyun/netsa/commits/master)
@@ -88,15 +88,16 @@ go build -o bin/netsa ./cmd/netsa
 
 ### 你会喜欢的细节
 
-- **告警可信**：已拦截的攻击不会被标成“严重”，真正利用成功的不会被漏掉；等级由统一裁决决定，防火墙“放行”、响应 200、多次失败后登录成功都要再用证据复核。
+- **告警可信、看得懂**：已拦截的攻击不会被标成“严重”，真正利用成功的不会被漏掉；等级由统一裁决决定，防火墙“放行”、响应 200、多次失败后登录成功都要再用证据复核。扫描器发往 Web 端口的 TLS、RDP、DNS 等二进制探测按协议显示（如“非 HTTP 请求：RDP”），日志里的控制字符统一转义，页面上不出现乱码。
 - **认得国产 OA 和中间件**：致远、泛微、用友、通达、蓝凌、万户、帆软、亿赛通、若依、Nacos、APISIX，以及深信服、锐捷、海康、大华等 42 个产品；正常业务在用的漏洞接口自动学习，不会一直刷告警。
 - **防火墙与 Web 日志联动**：Web 攻击之后内网主机连接攻击者、或连接攻击载荷里写着的回连地址，直接判为失陷迹象。
+- **内外双向都看得见**：攻击地图同时画出外部对内的攻击，和内网主机对外的攻击与异常连接（外连威胁情报地址、木马回连、数据外传、对外扫描；正常的出站访问不画线）；飞线按“重点 / 全部 / 关闭”调节密度，地图可全屏投到大屏上。
 - **能溯源到城市，能关联到团伙**：还原 CDN 与代理背后的真实 IP，识别 XFF 伪造；同一工具指纹、同一 OAST 关联标识、TLS 指纹、诱饵线索把轮换出口的同一攻击者归并到一起；资产攻击链路把一台服务器从被扫描到被控制、横向移动的过程按时间串起来。
-- **会自我纠错的自学习**：从分析员的结论中学习；没有人工结论时，用成功证据、攻击后回连、诱饵命中、授权扫描登记等客观结论核实自己与 AI 的判断。学错了自动撤销、回溯修正已经产生的事件，纠错本身错了也能自动恢复；已经结束的低风险事件自动归档，待处置列表只留真正需要处理的。
+- **会自我纠错的自学习**：从分析员的结论中学习；没有人工结论时，用成功证据、攻击后回连、诱饵命中、授权扫描登记等客观结论核实自己与 AI 的判断。学错了自动撤销、回溯修正已经产生的事件，停用的误报规则也不再抬高攻击源的评分与排行；纠错本身错了也能自动恢复。从防火墙日志学习内网网段时要求多个地址作证，不会把防火墙自己的公网接口所在网段学成内网。已经结束的低风险事件自动归档，待处置列表只留真正需要处理的。
 - **AI 研判可选、可评估**：支持 OpenAI 兼容接口与 Anthropic Messages 接口，内网 vLLM、云端模型都能接入；按人工结论与客观结论统计模型一致率，模型误判多了自动收紧它的权限。
 - **安全运营闭环**：事件聚合与处置时限、误报抑制、授权扫描登记、钉钉 / 企业微信 / 飞书推送、封禁名单联动、原始日志留存与一键取证包、周报月报、等保 2.0 自查、防篡改审计链。
 - **一个搜索框直达一切**：`Ctrl+K` 输入 IP、事件编号、资产、站点、规则或攻击类型，按类别分组、键盘直达攻击源画像、事件、攻击链路与攻击活动，搜不到时一键转到告警与原始日志检索。
-- **单机就够快**：开发机（i7-10700，16 线程）端到端约 46 万条/秒；Aho-Corasick 预筛让正常请求基本不必执行正则，检测约 3µs/条；画像数与检测窗口都有硬上限，扫描洪峰下内存可控。
+- **单机就够快**：开发机（i7-10700，16 线程）端到端约 46 万条/秒；Aho-Corasick 预筛让正常请求基本不必执行正则，检测约 3µs/条；数量最多的防火墙会话日志剥离报文头约 1µs/条。查询接口大多在毫秒级，攻击源、攻击面等列表只取页面需要的部分；页面脚本按内容缓存，再次打开只需确认是否更新。画像数与检测窗口都有硬上限，扫描洪峰下内存可控。
 
 ### 适合谁
 
@@ -113,12 +114,12 @@ go build -o bin/netsa ./cmd/netsa
 | [攻击检测](docs/detection.md) | SQL 注入、XSS、命令执行、Log4Shell、SSRF、XXE、反序列化、WebShell、已知漏洞利用等特征规则，部分规则改编自 OWASP CRS；[libinjection 语法分析](docs/detection.md#语法分析libinjection)；[国产 OA、中间件漏洞接口签名](docs/detection.md#国产-oa中间件漏洞接口签名)；CC、暴力破解、撞库、接口遍历、端口扫描、WebShell 行为画像、数据外传、横向移动、带宽型 DDoS 等行为检测；多轮解码对抗常见绕过 |
 | [结果研判](docs/detection.md#研判复核用证据排除表面成功) | 按响应与会话证据区分已拦截、失败、未拦截、疑似成功；排除单页应用兜底页、统一错误页、未到达服务的“放行”、长连接重连、页面资源加载等表面现象 |
 | [主机与 DNS 检测](docs/log-sources.md#主机认证日志与-dns-日志) | SSH / RDP / VPN 暴力破解与破解成功、密码喷洒、日志被清除、新建账号与提权、[账号盗用](docs/detection.md#账号盗用)；[主机进程检测](docs/detection.md#主机进程检测)（Web 进程执行命令、反弹 Shell、凭证窃取、持久化）；DNSLog 带外回连、DNS 隧道、DGA、矿池域名 |
-| [攻击源溯源](docs/traceability.md) | 融合 ip2region、MaxMind、ip-api、rDNS、RDAP / WHOIS，支持内网自定义网段；同源关联按网段、工具指纹、攻击手法找出疑似同一团伙 |
+| [攻击源溯源](docs/traceability.md) | 融合 ip2region、MaxMind、ip-api、rDNS、RDAP / WHOIS，支持内网自定义网段；同源关联按网段、工具指纹、攻击手法找出疑似同一团伙；内网主机对外攻击与异常连接的外部目标同样定位上图 |
 | [资产攻击链路](docs/detection.md#资产攻击链路) | 以站点 / 主机为中心串起侦察、利用、突破、植入、控制、横向、窃取、影响，每一步注明证据、来源与 ATT&CK 技术，研判是否失陷并给出处置建议 |
-| [态势大屏](docs/deployment.md#演示环境) | 世界 / 中国双视图攻击地图（可全屏），可下钻到省和地市；外部对内与内部对外的实时飞线、告警推送；KPI、趋势、分布图均可点击下钻 |
+| [态势大屏](docs/deployment.md#演示环境) | 世界 / 中国双视图攻击地图，可全屏、可下钻到省和地市；外部对内与内部对外的实时飞线，密度可调；全局搜索（`Ctrl+K`）；KPI、趋势、分布图均可点击下钻 |
 | [攻击面分析](docs/log-sources.md#未做-dnat-映射的端口探测) | 梳理对外服务，发现源码、密钥、备份泄露与管理接口暴露；结合 DNAT 映射与防火墙会话证据，过滤打不到任何服务的背景扫描 |
 | [安全评估与失陷研判](docs/detection.md#安全评估与失陷研判) | 七个维度打分并给出 A~E 总评与 P0~P3 处置建议；C2 心跳、恶意 TLS 指纹、攻击载荷落地、[被攻击后回连](docs/detection.md#防火墙与-web-日志联动被攻击后回连)；MITRE ATT&CK 矩阵 |
-| [自学习与 AI 研判](docs/self-learning.md) | 规则级、目标级与情报源准确率自动校准；从日志学习内网网段、攻击源、攻击活动、[参数正常取值与站点产品](docs/self-learning.md#参数的正常取值与站点产品)；[自我纠错闭环](docs/self-learning.md#自我纠错闭环)：客观核实、纠错回溯、自动归档；AI 研判支持 OpenAI 兼容与 Anthropic 接口 |
+| [自学习与 AI 研判](docs/self-learning.md) | 规则级、目标级与情报源准确率自动校准；从日志学习内网网段、攻击源、攻击活动、[参数正常取值与站点产品](docs/self-learning.md#参数的正常取值与站点产品)；[自我纠错闭环](docs/self-learning.md#自我纠错闭环)：客观核实、纠错回溯（停用规则不再计入评分与排行）、撤销纠错、自动归档；AI 研判支持 OpenAI 兼容与 Anthropic 接口 |
 | [事件处置与推送](docs/operations.md#事件处置与误报抑制) | 告警自动聚合为事件，指派、处置时限与超时提醒；误报抑制；[授权扫描登记](docs/detection.md#授权扫描登记)；[钉钉 / 企业微信 / 飞书推送](docs/operations.md#告警推送钉钉--企业微信--飞书)；导出 nginx、iptables、ipset 等封禁列表 |
 | [留存、合规与审计](docs/operations.md#原始日志留存与检索) | 原始日志按小时压缩留存，哈希链防篡改；[PostgreSQL 长期归档](docs/operations.md#告警归档可选postgresql)（可选）；周报月报、等保 2.0 自查；[三种角色、双因素认证与防篡改审计链](docs/operations.md#登录账号与审计)；Prometheus 指标 |
 
@@ -170,6 +171,8 @@ flowchart LR
 
 **需要多少资源？** 单机即可。检测窗口与画像数都有上限，扫描洪峰下内存可控；吞吐见上面的性能数据，更大的规模可按数据源拆分部署。
 
+**地图上的飞线代表什么？** 实线是外部来源对受保护资产的攻击，颜色表示等级、粗细表示攻击次数；紫色虚线是内网主机对外的攻击或异常连接。攻击源很多时默认只画重点（高危、严重与攻击最多的地点），可在地图右上角切换为全部或关闭，所有地点始终以点标注。见[攻击源溯源](docs/traceability.md)。
+
 **误报多怎么办？** 先看告警里的证据与“需核实”说明；把事件处置为误报后，自学习会生成抑制建议、自动校准反复误报的规则与目标；内部漏洞扫描可一键登记为授权扫描。
 
 **支持哪些部署方式？** Docker / Docker Compose（amd64、arm64）、直接运行二进制、内网离线镜像包，详见[部署指南](docs/deployment.md)。
@@ -181,8 +184,8 @@ flowchart LR
 | [部署指南](docs/deployment.md) | 生产部署、`.env` 变量、升级回滚、内网离线、演示环境、从源码运行 |
 | [日志接入](docs/log-sources.md) | Web、防火墙、认证、DNS、流量（Zeek、NetFlow / sFlow、云抗 D）、主机进程、应用登录接入，syslog 发送端管理，时区，DNAT 与会话证据 |
 | [检测与研判](docs/detection.md) | 威胁等级判定、研判复核、攻击活动与资产攻击链路、数据窃取与横向移动、诱饵、主机进程检测、账号盗用、威胁评分、安全评估与失陷研判 |
-| [攻击源溯源](docs/traceability.md) | 多源定位、内网网段、定位库热更新、同源关联分析 |
-| [自学习与 AI 研判](docs/self-learning.md) | 自动生效的范围与边界、自我纠错闭环、行为基线、合规自检、外部模型配置与模型适配 |
+| [攻击源溯源](docs/traceability.md) | 多源定位、内网网段、定位库热更新、同源关联分析、攻击地图飞线与密度 |
+| [自学习与 AI 研判](docs/self-learning.md) | 自动生效的范围与边界、自我纠错闭环与撤销纠错、行为基线、合规自检、外部模型配置与模型适配 |
 | [安全运营](docs/operations.md) | 事件处置、告警推送、原始日志、资产漏洞、报表合规、账号审计、监控指标、告警归档 |
 | [配置参考](docs/configuration.md) | 常用配置项与运行注意事项 |
 | [API](docs/api.md) | REST 接口一览 |
