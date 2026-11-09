@@ -203,6 +203,8 @@ func TestHuaweiOperationLogsSkipped(t *testing.T) {
 		`<190>2026/11/5 04:22:59 USG6300 %%01SHELL/6/DISPLAY_CMDRECORD(s)[82531]:记录显示命令信息。（任务＝FW，地址＝**，VPN实例名=，用户＝_system_，认证方式="Null"，命令＝"display ipsec backup statistics send"）`,
 		`<190>Nov  5 2026 04:44:58 USG6630E %%01SHELL/6/DISPLAY_CMDRECORD(s)[108663]:Recorded display command information. (Task=FW, Ip=**, VpnName=, User=_system_, AuthenticationMethod="Null", Command="display firewall statistics system normal")`,
 		`<188>Nov  5 2026 04:45:00 H3C %%10IFNET/3/PHY_UPDOWN: Physical state on the interface GigabitEthernet1/0/1 changed to down.`,
+		// 告警（trap）转成的日志没有 %% 前缀，以 OID 开头（生产环境中的配置变更日志此前一直计为解析失败）
+		`<188>2026/11/9 01:47:19 USG6630E CONFIG/4/CONFIGCHANGE:OID 1.3.6.1.4.1.2011.6.122.83.1.2.1 配置发生变更。( 登录用户=**, 终端IP=**, 虚拟系统=public, 模块类型=Interface, 操作对象=Virtual-Template4, 动作=MERGE, 目的对象= )`,
 	} {
 		if _, ok := p.Parse(line); ok {
 			t.Errorf("不应产生事件: %s", line)
@@ -213,5 +215,8 @@ func TestHuaweiOperationLogsSkipped(t *testing.T) {
 	}
 	if p.Known(`<190>Nov  5 2026 04:45:00 USG %%01SECIF/6/POLICYDENY(l)[0]:SourceIP=bad-value`) {
 		t.Error("带地址字段却解析失败的行应计为失败")
+	}
+	if p.Known(`<188>2026/11/9 01:47:19 USG6630E SEC/4/ATTACK:OID 1.3.6.1.4.1.2011.6.122.1.1 检测到攻击。(源IP地址=203.0.113.9, 目的IP地址=10.0.0.5)`) {
+		t.Error("带中文地址字段的告警日志解析失败时应计为失败")
 	}
 }

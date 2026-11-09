@@ -38,6 +38,9 @@ func (Nginx) Parse(line string) (*model.Event, bool) {
 	var ip, user, tm, req, status, bytes, ref, ua, xff, host, tail string
 	if f, ok := fastCombined(line); ok && isIP(f.ip) {
 		ip, user, tm, req, status, bytes, ref, ua, xff, tail = f.ip, f.user, f.tm, f.req, f.status, f.bytes, f.ref, f.ua, f.xff, f.tail
+	} else if !strings.Contains(line, `] "`) {
+		// 两个正则都要求时间字段后紧跟请求（`] "`）：防火墙、syslog 等其他格式的日志不必进入正则匹配
+		return nil, false
 	} else if m := reNginxCombined.FindStringSubmatch(line); m != nil && isIP(m[1]) {
 		ip, user, tm, req, status, bytes, ref, ua, xff, tail = m[1], m[2], m[3], m[4], m[5], m[6], m[7], m[8], m[9], m[10]
 	} else if m := reNginxVhost.FindStringSubmatch(line); m != nil && isIP(m[2]) && !isIP(m[1]) {

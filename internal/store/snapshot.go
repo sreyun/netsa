@@ -35,6 +35,7 @@ type snapshotHead struct {
 	Categories map[string]int64     `json:"categories"`
 	Rules      map[string]int64     `json:"rules"`
 	RuleNames  map[string]string    `json:"rule_names"`
+	RuleMeta   map[string]ruleMeta  `json:"rule_meta,omitempty"`
 	SevCount   [5]int64             `json:"sev_count"`
 	Phases     map[string]int64     `json:"phases"`
 	Results    map[string]int64     `json:"results"`
@@ -102,7 +103,7 @@ func (s *Store) writeSnapshot(f io.Writer, compress bool) error {
 	s.mu.RLock()
 	head := snapshotHead{
 		Version: snapshotVersion, SavedAt: time.Now(), NextID: s.nextID, Buckets: s.buckets, Totals: s.totals,
-		Categories: s.categories, Rules: s.rules, RuleNames: s.ruleNames, SevCount: s.sevCount, Phases: s.phases,
+		Categories: s.categories, Rules: s.rules, RuleNames: s.ruleNames, RuleMeta: s.ruleMeta, SevCount: s.sevCount, Phases: s.phases,
 		Results: s.results, MinTime: s.minTime, MaxTime: s.maxTime, Surface: s.surf, Scores: s.scores, Incidents: s.incidents, NextInc: s.nextInc, Days: s.days, Chains: s.chainTracks(),
 	}
 	n := len(s.alerts)
@@ -268,7 +269,7 @@ func (s *Store) Load(path string) error {
 			p.ensureAttackMaps() // 兼容旧版本快照中缺失的字段
 		}
 		if p.Attacks > 0 || len(p.Intel) > 0 {
-			p.recompute() // 评分规则可能已更新，按当前规则重新计算等级
+			p.recompute(nil, nil) // 评分规则可能已更新，按当前规则重新计算等级
 		}
 		s.rebuildSketch(p)
 	}
@@ -293,6 +294,25 @@ func (s *Store) Load(path string) error {
 	}
 	if snap.RuleNames != nil {
 		s.ruleNames = snap.RuleNames
+	}
+	if snap.RuleMeta != nil {
+		s.ruleMeta = snap.RuleMeta
+	}
+	// 旧版本快照没有规则的攻击类型与阶段：按保留的告警补齐（停用的误报规则据此从评分与排行中剔除）
+	for _, a := range s.alerts {
+		if a != nil && a.RuleID != "" {
+			if _, ok := s.ruleMeta[a.RuleID]; !ok {
+				s.ruleMeta[a.RuleID] = ruleMeta{Category: a.Category, Phase: a.Phase}
+			}
+		}
+	}
+	if len(s.excluded) > 0 { // 运行中重新载入快照（如恢复备份）：已停用的误报规则继续不计入评分
+		for _, p := range s.ips {
+			if p.Attacks > 0 {
+				p.recompute(s.excluded, s.ruleMeta)
+			}
+		}
+		s.agg.rebuild(s.ips)
 	}
 	s.sevCount = snap.SevCount
 	s.minTime, s.maxTime = snap.MinTime, snap.MaxTime

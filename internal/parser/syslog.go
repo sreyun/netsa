@@ -13,14 +13,39 @@ type SyslogHeader struct {
 	Tag  string
 }
 
+// 报文头正则只匹配头部，正文按匹配结束的位置截取（headMatch）。以 (.*)$ 捕获正文会让正则引擎逐字节扫描整条日志
+// （华为会话日志每条约 9µs），而几乎每条日志都要先经过这里。
 var (
-	reSyslog5424 = regexp.MustCompile(`^<\d{1,3}>1 (\S+) (\S+) (\S+) \S+ \S+ (?:-|(?:\[[^\]]*\])+) ?(.*)$`)
-	reSyslogISO  = regexp.MustCompile(`^(?:<\d{1,3}>)?(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})?)\s+(\S+)\s+(.*)$`)
+	reSyslog5424 = regexp.MustCompile(`^<\d{1,3}>1 (\S+) (\S+) (\S+) \S+ \S+ (?:-|(?:\[[^\]]*\])+) ?`)
+	reSyslogISO  = regexp.MustCompile(`^(?:<\d{1,3}>)?(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})?)\s+(\S+)\s+`)
 	// 兼容 "Oct 22 2026 10:15:01"（华为/思科）与 "Oct 22 10:15:01 2026"（H3C）两种带年份写法
-	reSyslog3164 = regexp.MustCompile(`^(?:<\d{1,3}>)?([A-Z][a-z]{2}\s+\d{1,2}(?:\s+\d{4})?\s+\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:\s+\d{4}\b)?)\s+(\S+)\s+(.*)$`)
+	reSyslog3164 = regexp.MustCompile(`^(?:<\d{1,3}>)?([A-Z][a-z]{2}\s+\d{1,2}(?:\s+\d{4})?\s+\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:\s+\d{4}\b)?)\s+(\S+)\s+`)
 	reSyslogPRI  = regexp.MustCompile(`^<\d{1,3}>\s*`)
-	reSyslogTag  = regexp.MustCompile(`^([A-Za-z0-9_\-./]+)(?:\[\d+\])?:\s?(.*)$`)
+	reSyslogTag  = regexp.MustCompile(`^([A-Za-z0-9_\-./]+)(?:\[\d+\])?:\s?`)
 )
+
+// headMatch 用只匹配头部的正则匹配 s，返回各捕获组与头部之后的正文；不匹配时返回 nil。
+func headMatch(re *regexp.Regexp, s string) ([]string, string) {
+	idx := re.FindStringSubmatchIndex(s)
+	if idx == nil {
+		return nil, ""
+	}
+	m := make([]string, len(idx)/2)
+	for i := range m {
+		if a, b := idx[2*i], idx[2*i+1]; a >= 0 {
+			m[i] = s[a:b]
+		}
+	}
+	return m, s[idx[1]:]
+}
+
+// headMatchIf 在 ok 为真时才进行匹配。
+func headMatchIf(ok bool, re *regexp.Regexp, s string) ([]string, string) {
+	if !ok {
+		return nil, ""
+	}
+	return headMatch(re, s)
+}
 
 // StripSyslog 识别并剥离 RFC3164 / RFC5424 / RFC3339 风格的 syslog 头。
 func StripSyslog(line string) (string, SyslogHeader, bool) {
@@ -36,15 +61,27 @@ func StripSyslog(line string) (string, SyslogHeader, bool) {
 	default:
 		return line, h, false
 	}
-	if m := reSyslog5424.FindStringSubmatch(line); m != nil {
-		h.Time, h.Host, h.Tag = ParseTime(m[1]), m[2], m[3]
-		return m[4], h, true
+	// PRI 之后的第一个字符决定可能的格式（5424 为 "1 "，RFC3339 时间以数字开头，3164 以月份缩写开头），
+	// 不可能匹配的正则不再尝试
+	p := 0
+	if line[0] == '<' {
+		if j := strings.IndexByte(line[:min(len(line), 5)], '>'); j > 0 {
+			p = j + 1
+		}
 	}
+	c := line[p]
+	if p > 0 && c == '1' && p+1 < len(line) && line[p+1] == ' ' {
+		if m, body := headMatch(reSyslog5424, line); m != nil {
+			h.Time, h.Host, h.Tag = ParseTime(m[1]), m[2], m[3]
+			return body, h, true
+		}
+	}
+	digit, upper := c >= '0' && c <= '9', c >= 'A' && c <= 'Z'
 	var rest string
-	if m := reSyslogISO.FindStringSubmatch(line); m != nil {
-		h.Time, h.Host, rest = ParseTime(m[1]), m[2], m[3]
-	} else if m := reSyslog3164.FindStringSubmatch(line); m != nil {
-		h.Time, h.Host, rest = ParseTime(strings.Join(strings.Fields(m[1]), " ")), m[2], m[3]
+	if m, body := headMatchIf(digit, reSyslogISO, line); m != nil {
+		h.Time, h.Host, rest = ParseTime(m[1]), m[2], body
+	} else if m, body := headMatchIf(upper, reSyslog3164, line); m != nil {
+		h.Time, h.Host, rest = ParseTime(strings.Join(strings.Fields(m[1]), " ")), m[2], body
 	} else if loc := reSyslogPRI.FindStringIndex(line); loc != nil {
 		// 只有 PRI，没有时间头（FortiGate 等设备常见）
 		return line[loc[1]:], h, true
@@ -57,9 +94,9 @@ func StripSyslog(line string) (string, SyslogHeader, bool) {
 		h.Host = ""
 		return rest, h, true
 	}
-	if m := reSyslogTag.FindStringSubmatch(rest); m != nil {
+	if m, body := headMatch(reSyslogTag, rest); m != nil {
 		h.Tag = m[1]
-		rest = m[2]
+		rest = body
 	}
 	return rest, h, true
 }

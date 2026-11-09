@@ -2,6 +2,7 @@
 package store
 
 import (
+	"maps"
 	"math"
 	"os"
 	"strings"
@@ -110,13 +111,79 @@ var sevWeight = [...]float64{0, 5, 12, 25, 45}
 // levelFloor 为各等级对应的最低威胁评分（低危 >0、中危 25、高危 50、严重 80）。
 var levelFloor = [...]float64{0, 1, 25, 50, 80}
 
+// ruleMeta 是规则的攻击类型与阶段（第一次命中时记录）。
+type ruleMeta struct {
+	Category string `json:"category"`
+	Phase    string `json:"phase"`
+}
+
+// scoreInputs 返回评分使用的攻击类型计数、类型等级、阶段计数与最高等级。被判定为误报而停用的规则（ex）的命中不计入：
+// 例如被业务轮询停用的自学习观察规则，员工出口地址因它累计了数万次命中，不剔除会一直显示为高危攻击源。
+// 原始计数保持不变（停用的规则重新启用后恢复计入）；画像中没有这些规则的命中时直接返回原始统计。
+func (p *IPProfile) scoreInputs(ex map[string]bool, meta map[string]ruleMeta) (cats map[string]int, catSev map[string]model.Severity, phases map[string]int, maxSev model.Severity) {
+	cats, catSev, phases, maxSev = p.Categories, p.CatSev, p.Phases, p.MaxSev
+	hit := false
+	for r := range ex {
+		if p.Rules[r] > 0 {
+			hit = true
+			break
+		}
+	}
+	if !hit {
+		return
+	}
+	cats, phases = maps.Clone(p.Categories), maps.Clone(p.Phases)
+	catSev = maps.Clone(p.CatSev)
+	touched := map[string]bool{}
+	for r := range ex {
+		n := p.Rules[r]
+		if n <= 0 {
+			continue
+		}
+		m := meta[r]
+		if m.Category != "" {
+			if cats[m.Category] -= n; cats[m.Category] <= 0 {
+				delete(cats, m.Category)
+				delete(catSev, m.Category)
+			} else {
+				touched[m.Category] = true
+			}
+		}
+		if m.Phase != "" {
+			if phases[m.Phase] -= n; phases[m.Phase] <= 0 {
+				delete(phases, m.Phase)
+			}
+		}
+	}
+	// 类型等级与最高等级按其余规则重新取最大值（类型的其余命中来自没有记录类型的规则时保持原值）
+	maxSev = model.SevInfo
+	bySev := map[string]model.Severity{}
+	for r, n := range p.Rules {
+		if n <= 0 || ex[r] {
+			continue
+		}
+		sev := p.RuleSev[r]
+		maxSev = max(maxSev, sev)
+		if c := meta[r].Category; touched[c] {
+			bySev[c] = max(bySev[c], sev)
+		}
+	}
+	for c := range touched {
+		if sev, ok := bySev[c]; ok {
+			catSev[c] = sev
+		}
+	}
+	return
+}
+
 // recompute 根据命中规则重新计算威胁分（0-100）与等级。
 // 按攻击分类累计：同类重复命中按对数递增（最多 2 倍），侦察类打 6 折，避免单一扫描器刷高分；
-// 疑似成功、多阶段攻击链、情报命中额外加分。
-func (p *IPProfile) recompute() {
+// 疑似成功、多阶段攻击链、情报命中额外加分。ex 中的规则（停用的误报规则）的命中不计入，见 scoreInputs。
+func (p *IPProfile) recompute(ex map[string]bool, meta map[string]ruleMeta) {
+	cats, catSev, phaseCount, maxSev := p.scoreInputs(ex, meta)
 	sum := 0.0
-	for cat, n := range p.Categories {
-		c := sevWeight[p.CatSev[cat]] * math.Min(1+math.Log2(float64(n))/3, 2)
+	for cat, n := range cats {
+		c := sevWeight[catSev[cat]] * math.Min(1+math.Log2(float64(n))/3, 2)
 		if p.CatPhase[cat] == model.PhaseRecon {
 			c *= 0.6
 		}
@@ -126,7 +193,7 @@ func (p *IPProfile) recompute() {
 		sum += 20
 	}
 	phases := 0
-	for ph, n := range p.Phases {
+	for ph, n := range phaseCount {
 		if n > 0 && ph != model.PhaseRecon {
 			phases++
 		}
@@ -144,7 +211,7 @@ func (p *IPProfile) recompute() {
 	// 严重级额外要求佐证：单条「严重」告警若既没有成功命中、也没有失陷迹象类分类
 	// （带外、远控、挖矿、主机事件），只按高危封顶。否则一条误判的设备告警就能把
 	// 任意 IP 抬到严重，污染整体评级与处置排序。
-	floorSev := p.MaxSev
+	floorSev := maxSev
 	if floorSev >= model.SevCritical && p.Successes == 0 && !p.hasCompromiseEvidence() {
 		floorSev = model.SevHigh
 	}
@@ -229,6 +296,8 @@ type Store struct {
 	categories  map[string]int64
 	rules       map[string]int64
 	ruleNames   map[string]string
+	ruleMeta    map[string]ruleMeta // 规则 → 攻击类型与阶段（剔除误报规则的命中时按此调整评分与排行）
+	excluded    map[string]bool     // 命中不计入攻击源评分与排行的规则：被判定为误报而停用的自学习观察规则
 	sevCount    [5]int64
 	phases      map[string]int64
 	results     map[string]int64
@@ -276,7 +345,7 @@ func New(maxIPs, maxAlerts, alertsPerRule int, retention time.Duration) *Store {
 	return &Store{
 		maxIPs: maxIPs, maxAlerts: maxAlerts, perRule: alertsPerRule, retention: retention,
 		ips: map[string]*IPProfile{}, buckets: map[int64]*Bucket{},
-		categories: map[string]int64{}, rules: map[string]int64{}, ruleNames: map[string]string{},
+		categories: map[string]int64{}, rules: map[string]int64{}, ruleNames: map[string]string{}, ruleMeta: map[string]ruleMeta{}, excluded: map[string]bool{},
 		phases: map[string]int64{}, results: map[string]int64{}, surf: newSurface(), ruleBits: map[string]int{},
 		incidents: map[uint64]*Incident{}, incByKey: map[string]uint64{},
 		agg: newAggregate(), days: map[string]*DayStat{}, chains: map[chainKey]*chainTrack{},
@@ -539,6 +608,9 @@ func (s *Store) recordLocked(ev *model.Event, hits []model.Hit) RecordResult {
 		s.categories[h.Category]++
 		s.rules[h.RuleID]++
 		s.ruleNames[h.RuleID] = h.Name
+		if _, ok := s.ruleMeta[h.RuleID]; !ok {
+			s.ruleMeta[h.RuleID] = ruleMeta{Category: h.Category, Phase: h.Phase}
+		}
 		s.phases[h.Phase]++
 		s.results[h.Result]++
 		if h.Result == model.ResultBlocked {
@@ -618,7 +690,7 @@ func (s *Store) recordLocked(ev *model.Event, hits []model.Hit) RecordResult {
 		s.agg.add(p) // 兜底：确保首次攻击一定进入总览统计（目标表已满时 addTarget 可能未被调用）
 	}
 	if attacked || len(p.Intel) > 0 {
-		p.recompute()
+		p.recompute(s.excluded, s.ruleMeta)
 		s.agg.setLevel(p, oldLevel)
 	}
 	if p.Attacks > 0 && count { // 攻击源的行为节奏（活跃时段与请求间隔），同源关联据此比对轮换出口的同一攻击者

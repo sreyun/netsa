@@ -197,7 +197,7 @@ func (WindowsFirewall) Parse(line string) (*model.Event, bool) {
 
 var (
 	reProtoWord = regexp.MustCompile(`(?i)\b(tcp|udp|icmp)\b`)
-	reASA       = regexp.MustCompile(`%(?:ASA|FTD)-\d-(\d{6}):\s*(.*)$`)
+	reASA       = regexp.MustCompile(`%(?:ASA|FTD)-\d-(\d{6}):\s*`)
 	reASAAddr   = regexp.MustCompile(`(?i)(deny|denied|built inbound|teardown)\s+(tcp|udp|icmp)?.*?(?:src|from|for)\s+(?:\S+?:)?(\d{1,3}(?:\.\d{1,3}){3}|[0-9a-fA-F:]+:[0-9a-fA-F:]*)/?(\d+)?.*?(?:dst|to)\s+(?:\S+?:)?(\d{1,3}(?:\.\d{1,3}){3}|[0-9a-fA-F:]+:[0-9a-fA-F:]*)/?(\d+)?`)
 )
 
@@ -207,17 +207,25 @@ type CiscoASA struct{}
 func (CiscoASA) Name() string { return "cisco_asa" }
 
 func (CiscoASA) Parse(line string) (*model.Event, bool) {
-	m := reASA.FindStringSubmatch(line)
-	if m == nil {
+	// 先按字面量定位消息头：其他格式的日志（尤其是带大量 %XX 编码的 Web 请求）不必进入正则匹配
+	i := strings.Index(line, "%ASA-")
+	if j := strings.Index(line, "%FTD-"); j >= 0 && (i < 0 || j < i) {
+		i = j
+	}
+	if i < 0 {
 		return nil, false
 	}
-	a := reASAAddr.FindStringSubmatch(m[2])
+	m, msg := headMatch(reASA, line[i:])
+	if m == nil || strings.IndexByte(msg, '\n') >= 0 {
+		return nil, false
+	}
+	a := reASAAddr.FindStringSubmatch(msg)
 	if a == nil || !isIP(a[3]) {
 		return nil, false
 	}
 	ev := &model.Event{Kind: model.KindFirewall, Format: "cisco_asa", Action: normAction(a[1]), Proto: normProto(a[2]), SrcIP: a[3], DstIP: a[5]}
 	if ev.Proto == "ip" {
-		ev.Proto = normProto(reProtoWord.FindString(m[2]))
+		ev.Proto = normProto(reProtoWord.FindString(msg))
 	}
 	ev.SrcPort, _ = strconv.Atoi(a[4])
 	ev.DstPort, _ = strconv.Atoi(a[6])
@@ -307,13 +315,21 @@ func (KVFirewall) Name() string { return "kv_firewall" }
 var (
 	// 华为 / H3C 信息中心格式的日志头：%%01SHELL/6/DISPLAY_CMDRECORD(s)、%%10FILTER/6/FILTER_ZONE_IPV4_EXECUTION
 	reInfoCenter = regexp.MustCompile(`%%\d{2}[A-Z][A-Z0-9_\-]*/\d/[A-Z0-9_\-]+`)
+	// 华为设备的告警（trap）以日志形式发出时没有 %% 前缀，消息以 OID 开头：
+	// USG6630E CONFIG/4/CONFIGCHANGE:OID 1.3.6.1.4.1.2011.6.122.83.1.2.1 配置发生变更。( 登录用户=**, ...)
+	reTrapHeader = regexp.MustCompile(`(^|\s)[A-Z][A-Z0-9_\-]*/\d/[A-Z0-9_\-]+(\([a-z]\))?(\[\d+\])?:\s*OID \d+(\.\d+)+`)
 	reKVAddrKey  = regexp.MustCompile(`(?i)(src|source|dst|dest|destination)[ _\-]?(ip|addr|address)`)
+	// 中文日志的地址字段（源IP地址=、目的地址=）
+	reKVAddrKeyCN = regexp.MustCompile(`(源|目的)\s*(IP|地址|ip)`)
 )
 
-// Skip 识别华为、H3C 设备的运维日志（命令记录、配置变更、接口状态、CPU 告警等）：格式正确，但没有源 / 目的地址，
-// 不是流量或安全事件，计为跳过而不是解析失败。带地址字段却解析失败的行仍计为失败，便于发现日志格式变化。
+// Skip 识别华为、H3C 设备的运维日志（命令记录、配置变更、接口状态、CPU 告警等，含无 %% 前缀的告警日志）：
+// 格式正确，但没有源 / 目的地址，不是流量或安全事件，计为跳过而不是解析失败。
+// 带地址字段（英文或中文）却解析失败的行仍计为失败，便于发现日志格式变化。
 func (KVFirewall) Skip(line string) bool {
-	return strings.Contains(line, "%%") && reInfoCenter.MatchString(line) && !reKVAddrKey.MatchString(line)
+	header := strings.Contains(line, "%%") && reInfoCenter.MatchString(line) ||
+		strings.Contains(line, "OID ") && reTrapHeader.MatchString(line)
+	return header && !reKVAddrKey.MatchString(line) && !reKVAddrKeyCN.MatchString(line)
 }
 
 func (KVFirewall) Parse(line string) (*model.Event, bool) {

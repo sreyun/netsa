@@ -2,6 +2,7 @@ package store
 
 import (
 	"fmt"
+	"maps"
 	"math"
 	"sort"
 	"strconv"
@@ -101,8 +102,19 @@ func (s *Store) Overview() *Overview {
 	for i, v := range s.sevCount {
 		o.SevCounts[model.Severity(i).String()] = v
 	}
-	o.Categories = topN(s.categories, 0, ident)
-	o.TopRules = topN(s.rules, 10, func(id string) string { return s.ruleNames[id] })
+	cats, rules := s.categories, s.rules
+	if len(s.excluded) > 0 { // 停用的误报规则不进入高频规则与攻击类型排行（攻击总数等原始命中统计不变）
+		cats, rules = maps.Clone(s.categories), maps.Clone(s.rules)
+		for r := range s.excluded {
+			n := rules[r]
+			delete(rules, r)
+			if c := s.ruleMeta[r].Category; c != "" && n > 0 {
+				aggBump(cats, c, -n)
+			}
+		}
+	}
+	o.Categories = topN(cats, 0, ident)
+	o.TopRules = topN(rules, 10, func(id string) string { return s.ruleNames[id] })
 
 	// 攻击源画像的分布统计由增量计数器维护（写入 / 淘汰 / 归属地更新时更新），
 	// 这里只做一次小规模拷贝与排序，不再遍历全部画像。

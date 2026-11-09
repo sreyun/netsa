@@ -5,6 +5,7 @@ import (
 	"net/netip"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -149,14 +150,48 @@ func (l *Learner) RecordLoop(kind string, n int, detail string) {
 // retract 通知状态库回溯修正（异步：调用方可能在检测流水线上，不能与状态库的锁交叉）。
 func (l *Learner) retract(rule, ip, why string) {
 	if f := l.OnRetract; f != nil {
-		go f(rule, ip, why)
+		l.cbq.do(func() { f(rule, ip, why) })
 	}
 }
 
 // restore 通知状态库撤销纠错（异步，同 retract）。
 func (l *Learner) restore(rule, ip, why string) {
 	if f := l.OnRestore; f != nil {
-		go f(rule, ip, why)
+		l.cbq.do(func() { f(rule, ip, why) })
+	}
+}
+
+// callbackQueue 按调用顺序串行执行回调，不阻塞调用方。回溯与恢复各开一个协程会乱序：
+// 管理员停用观察规则后随即重新启用，恢复可能先于回溯执行，规则已启用、告警却停留在已撤销的状态。
+type callbackQueue struct {
+	mu      sync.Mutex
+	q       []func()
+	running bool
+}
+
+func (c *callbackQueue) do(f func()) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.q = append(c.q, f)
+	if !c.running {
+		c.running = true
+		go c.drain()
+	}
+}
+
+func (c *callbackQueue) drain() {
+	for {
+		c.mu.Lock()
+		if len(c.q) == 0 {
+			c.running = false
+			c.mu.Unlock()
+			return
+		}
+		f := c.q[0]
+		c.q[0] = nil
+		c.q = c.q[1:]
+		c.mu.Unlock()
+		f()
 	}
 }
 

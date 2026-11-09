@@ -84,31 +84,38 @@ func (c *captureWriter) WriteHeader(code int)        { c.code = code }
 func (rc *respCache) wrap(ttl time.Duration, h http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		e := rc.entry(r.URL.Path + "?" + r.URL.RawQuery)
-
-		e.mu.Lock()
-		if time.Now().After(e.expires) {
-			rc.miss.Add(1)
-			cw := &captureWriter{header: http.Header{}, code: http.StatusOK}
-			h(cw, r)
-			if cw.code != http.StatusOK {
-				e.mu.Unlock()
-				for k, v := range cw.header {
-					w.Header()[k] = v
-				}
-				w.WriteHeader(cw.code)
-				w.Write(cw.buf.Bytes())
-				return
+		body, ctype, failed := rc.load(e, ttl, h, r)
+		if failed != nil { // 非 200 响应原样返回，不缓存
+			for k, v := range failed.header {
+				w.Header()[k] = v
 			}
-			e.body, e.ctype, e.expires = cw.buf.Bytes(), cw.header.Get("Content-Type"), time.Now().Add(ttl)
-		} else {
-			rc.hits.Add(1)
+			w.WriteHeader(failed.code)
+			w.Write(failed.buf.Bytes())
+			return
 		}
-		body, ctype := e.body, e.ctype
-		e.mu.Unlock()
 		w.Header().Set("Content-Type", ctype)
 		w.Header().Set("Cache-Control", "no-store")
 		w.Write(body)
 	}
+}
+
+// load 返回条目的缓存内容，过期时调用处理器重新计算（同一个键只有一个请求在计算，其余等待）。
+// 用 defer 释放条目锁：处理器 panic 时 net/http 只结束该请求，锁若不释放，之后这个键的请求会全部永久挂起。
+func (rc *respCache) load(e *cacheEntry, ttl time.Duration, h http.HandlerFunc, r *http.Request) (body []byte, ctype string, failed *captureWriter) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if !time.Now().After(e.expires) {
+		rc.hits.Add(1)
+		return e.body, e.ctype, nil
+	}
+	rc.miss.Add(1)
+	cw := &captureWriter{header: http.Header{}, code: http.StatusOK}
+	h(cw, r)
+	if cw.code != http.StatusOK {
+		return nil, "", cw
+	}
+	e.body, e.ctype, e.expires = cw.buf.Bytes(), cw.header.Get("Content-Type"), time.Now().Add(ttl)
+	return e.body, e.ctype, nil
 }
 
 // ---------------- gzip 压缩 ----------------

@@ -821,9 +821,13 @@ const (
 //
 // 事件等级按保留的告警重新计算，只会下调；全部告警都被撤销的事件标为误报（之后出现更高等级的告警会自动重新打开）。
 // 告警已被淘汰、无从核对的事件不动；被模型下调过的事件以下调记录为准，不重复调整。
+// 停用的规则同时不再计入攻击源评分与总览排行（见 ExcludeRule）。
 func (s *Store) Retract(rule, ip, why string) int {
 	if rule == "" && ip == "" {
 		return 0
+	}
+	if rule != "" {
+		s.ExcludeRule(rule, true)
 	}
 	return s.retractWhere(why, func(a *model.Alert) int {
 		switch {
@@ -834,6 +838,43 @@ func (s *Store) Retract(rule, ip, why string) int {
 		}
 		return retractNone
 	})
+}
+
+// ExcludeRule 设置规则的命中是否计入攻击源评分与总览排行，返回等级发生变化的攻击源数。
+// 停用的自学习观察规则被判定为误报（如业务轮询）：它累计的命中保留在原始统计中，但不再抬高攻击源的评分与等级，
+// 也不出现在高频规则与攻击类型排行里；规则重新启用后恢复计入。幂等。
+func (s *Store) ExcludeRule(rule string, on bool) int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.excludeRuleLocked(rule, on)
+}
+
+func (s *Store) excludeRuleLocked(rule string, on bool) int {
+	if rule == "" || s.excluded[rule] == on {
+		return 0
+	}
+	if on {
+		s.excluded[rule] = true
+		if _, ok := s.ruleMeta[rule]; !ok && strings.HasPrefix(rule, "learn-") {
+			// 告警已全部淘汰、快照里也没有记录：自学习观察规则的类型与阶段是固定的
+			s.ruleMeta[rule] = ruleMeta{Category: "未知攻击（自学习）", Phase: model.PhaseExploit}
+		}
+	} else {
+		delete(s.excluded, rule)
+	}
+	changed := 0
+	for _, p := range s.ips {
+		if p.Rules[rule] <= 0 {
+			continue
+		}
+		old := p.Level
+		p.recompute(s.excluded, s.ruleMeta)
+		s.agg.setLevel(p, old)
+		if p.Level != old {
+			changed++
+		}
+	}
+	return changed
 }
 
 // RetractLegacyCC 修正旧版本把长连接 / 轮询传输（SockJS xhr_send、SSE、WebSocket 降级）上的消息请求判成的 CC 告警
@@ -971,6 +1012,7 @@ func (s *Store) Restore(rule, ip, why string) int {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.excludeRuleLocked(rule, false) // 重新启用的规则恢复计入攻击源评分与排行
 	byInc := map[uint64][]int{}
 	for _, a := range s.alerts {
 		if match(a) {

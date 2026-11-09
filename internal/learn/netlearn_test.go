@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -72,5 +73,44 @@ func TestDropDeviceZoneNets(t *testing.T) {
 	r2 := newLearner(t, path).Report()
 	if r2.Loop.NetsOff != 1 || len(r2.Intranet) != 1 {
 		t.Fatalf("撤销应只执行一次: loop=%+v nets=%+v", r2.Loop, r2.Intranet)
+	}
+}
+
+// 回溯与恢复按发生顺序执行：停用后随即重新启用，状态库必须先回溯再恢复。
+func TestRetractRestoreOrdered(t *testing.T) {
+	l := newLearner(t, filepath.Join(t.TempDir(), "learn.json"))
+	var mu sync.Mutex
+	var got []string
+	done := make(chan struct{})
+	const rounds = 200
+	l.OnRetract = func(rule, _, _ string) {
+		mu.Lock()
+		got = append(got, "retract "+rule)
+		mu.Unlock()
+		time.Sleep(time.Microsecond) // 模拟状态库的写锁等待
+	}
+	l.OnRestore = func(rule, _, _ string) {
+		mu.Lock()
+		got = append(got, "restore "+rule)
+		if len(got) == 2*rounds {
+			close(done)
+		}
+		mu.Unlock()
+	}
+	for i := 0; i < rounds; i++ {
+		r := "learn-" + strconv.Itoa(i)
+		l.retract(r, "", "停用")
+		l.restore(r, "", "启用")
+	}
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("回调没有全部执行")
+	}
+	for i := 0; i < rounds; i++ {
+		r := "learn-" + strconv.Itoa(i)
+		if got[2*i] != "retract "+r || got[2*i+1] != "restore "+r {
+			t.Fatalf("第 %d 组顺序错误: %v", i, got[2*i:2*i+2])
+		}
 	}
 }
