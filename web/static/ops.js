@@ -873,9 +873,9 @@ async function loadReports() {
     <div class="rp-title"><b>${esc(r.title)}</b> <span class="muted">对比 ${esc(r.prev_from)} ~ ${esc(r.prev_to)}</span></div>
     <div class="kpis rp-kpis">
       <div class="kpi"><span class="label">安全评分</span><span class="value">${r.score}</span><span class="sub">${esc(r.grade_label)}${r.score_from >= 0 ? ` · 期初 ${r.score_from}` : ''}</span></div>
-      <div class="kpi"><span class="label">攻击</span><span class="value">${num(t.attacks)}</span><span class="sub">上期 ${num(r.prev.attacks)} ${chg(t.attacks, r.prev.attacks)}</span></div>
-      <div class="kpi"><span class="label">攻击源</span><span class="value">${num(t.attackers)}</span><span class="sub">新增 ${num(t.new_attackers)}</span></div>
-      <div class="kpi"><span class="label">疑似成功</span><span class="value ${t.success ? 'lv-critical' : ''}">${num(t.success)}</span><span class="sub">已拦截 ${num(t.blocked)}</span></div>
+      <div class="kpi"><span class="label">攻击</span><span class="value">${num(t.attacks)}</span><span class="sub" title="上期 ${num(r.prev.attacks)} 次">上期 ${numShort(r.prev.attacks)} ${chg(t.attacks, r.prev.attacks)}</span></div>
+      <div class="kpi"><span class="label">攻击源</span><span class="value">${num(t.attackers)}</span><span class="sub" title="新增 ${num(t.new_attackers)} 个">新增 ${numShort(t.new_attackers)}</span></div>
+      <div class="kpi"><span class="label">疑似成功</span><span class="value ${t.success ? 'lv-critical' : ''}">${num(t.success)}</span><span class="sub" title="已拦截 ${num(t.blocked)} 次">已拦截 ${numShort(t.blocked)}</span></div>
       <div class="kpi"><span class="label">事件 新建 / 关闭</span><span class="value">${num(ic.created)} / ${num(ic.closed)}</span><span class="sub">按时处置 ${pctText(ic.sla_rate)}${ic.mttr ? ` · 平均 ${esc(fmtDur(ic.mttr))}` : ''}</span></div>
     </div>
     <ul class="rp-summary">${r.summary.map((s) => `<li>${esc(s)}</li>`).join('')}</ul>
@@ -1145,7 +1145,7 @@ async function loadLearn() {
       `撤销确认 ${num(loop.revoked)} · 停用规则 ${num(loop.rules_off)} · 回溯事件 ${num(loop.retracted)}${loop.restored ? ` · 撤销纠错 ${num(loop.restored)}` : ''}${loop.nets_off ? ` · 撤销内网段 ${num(loop.nets_off)}` : ''} · 自动归档 ${num(loop.archived)}`],
     ['待确认建议', num(r.suggestions.length), '采纳后创建误报抑制'],
     ['平台安全异常', num(r.anomalies.length), r.options.sentinel ? '最近 100 条' : '已关闭'],
-    ['合规符合率', lastComp ? Math.round(lastComp.rate * 100) + '%' : '-', lastComp ? `不符合 ${num(lastComp.fail)} 项 · ${esc(fmtShort(lastComp.time))}` : (r.options.compliance ? '启动后约 2 分钟首次自检' : '已关闭')],
+    ['合规符合率', lastComp ? Math.round(lastComp.rate * 100) + '%' : '-', lastComp ? `不符合 ${num(lastComp.fail)} 项 · ${esc(fmtShort(lastComp.time))}` : (r.options.compliance ? '启动后约 30 分钟首次自检' : '已关闭')],
   ].map(([l, v, s]) => `<div class="kpi"><span class="label">${l}</span><span class="value">${v}</span><span class="sub">${s}</span></div>`).join('');
   const incLinks = (ids) => (ids || []).slice(0, 6).map((id) => `<a href="#tab=incidents&incident=${id}">#${id}</a>`).join(' ');
   $('#lnSugs').innerHTML = r.suggestions.length

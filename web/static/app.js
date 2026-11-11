@@ -112,6 +112,17 @@ const numBig = (n) => {
   if (n >= 1e7) return `${Math.round(n / 1e4).toLocaleString('zh-CN')}<small>万</small>`;
   return num(n);
 };
+// 指标卡片副标题里的数：1 万以上按万 / 亿显示（纯文本，保留约三位有效数字），精确值写在卡片的提示里。
+// 副标题一行放两三个数，75,294,228 这样的原始数字会被截断成“防火墙 75…”
+const numShort = (n) => {
+  n = n ?? 0;
+  const trim = (s) => s.replace(/\.0+$|(\.\d*?)0+$/, '$1');
+  if (n < 1e4) return num(n);
+  const w = n / 1e4;
+  if (Math.round(w) >= 1e4) return `${trim((n / 1e8).toFixed(2))}亿`;
+  if (w >= 999.95) return `${Math.round(w).toLocaleString('zh-CN')}万`; // 四舍五入后达到 1000 万的同样带千位分隔
+  return `${trim(w.toFixed(w >= 10 ? 1 : 2))}万`;
+};
 const zero = (t) => !t || t.startsWith('0001');
 const pad = (n) => String(n).padStart(2, '0');
 // 时间统一按服务端配置的 timezone 展示（未配置时用浏览器本地时区）：值班电脑的系统时区设置不同
@@ -408,17 +419,20 @@ async function loadOverview() {
   // 两类“等级”含义不同：攻击事件按单次攻击的告警等级统计；攻击源按 IP 的综合威胁等级统计
   // （不低于其触发过的最高告警等级）。一个同时触发高危与严重告警的 IP 计为严重攻击源。
   const kpis = [
-    ['总事件', numBig(t.events), `Web ${num(t.web)} · 防火墙 ${num(t.firewall)}`, 'var(--hl)', `共 ${num(t.events)} 条。点击查看各日志数据源的采集与解析情况`, 'sources:'],
-    ['攻击事件', numBig(t.attacks), `严重 ${num(sc.critical || 0)} · 高危 ${num(sc.high || 0)} · 中危 ${num(sc.medium || 0)}`, LV_COLOR.high,
+    // 副标题按万 / 亿显示（numShort），提示里给出精确值
+    ['总事件', numBig(t.events), `Web ${numShort(t.web)} · 防火墙 ${numShort(t.firewall)}`, 'var(--hl)',
+      `共 ${num(t.events)} 条（Web ${num(t.web)} · 防火墙 ${num(t.firewall)}）。点击查看各日志数据源的采集与解析情况`, 'sources:'],
+    ['攻击事件', numBig(t.attacks), `严重 ${numShort(sc.critical || 0)} · 高危 ${numShort(sc.high || 0)} · 中危 ${numShort(sc.medium || 0)}`, LV_COLOR.high,
       `共 ${num(t.attacks)} 次。按告警等级统计的攻击命中次数：严重 ${num(sc.critical || 0)} · 高危 ${num(sc.high || 0)} · 中危 ${num(sc.medium || 0)} · 低危 ${num(sc.low || 0)}；近 1 小时 ${num(o.recent.attacks)} 次`, 'alerts:'],
-    ['攻击源 IP', num(o.attackers), `独立来源 ${num(o.unique_ips)} · 近 1 小时活跃 ${num(o.recent.attackers)}`, '#ffc53d', '', 'attackers:'],
-    ['高危以上攻击源', num((lc.critical || 0) + (lc.high || 0)), `严重 ${lc.critical || 0} · 高危 ${lc.high || 0}`, LV_COLOR.critical,
-      `按攻击源 IP 的综合威胁等级统计：严重 ${lc.critical || 0} · 高危 ${lc.high || 0} · 中危 ${lc.medium || 0} · 低危 ${lc.low || 0}。触发过高危告警的 IP 至少为高危`, 'attackers:high'],
-    ['攻击拦截率', `${o.block_rate}%`, `已拦截 ${num(t.blocked)}`, o.block_rate >= 80 ? '#52c41a' : o.block_rate >= 40 ? 'var(--hl)' : LV_COLOR.medium, `已拦截 ${num(t.blocked)} 次，点击查看已拦截的告警`, 'alerts:blocked'],
+    ['攻击源 IP', num(o.attackers), `独立来源 ${numShort(o.unique_ips)} · 近 1 小时活跃 ${numShort(o.recent.attackers)}`, '#ffc53d',
+      `攻击源 ${num(o.attackers)} 个；独立来源 ${num(o.unique_ips)} 个（含正常访客）· 近 1 小时活跃 ${num(o.recent.attackers)} 个`, 'attackers:'],
+    ['高危以上攻击源', num((lc.critical || 0) + (lc.high || 0)), `严重 ${numShort(lc.critical || 0)} · 高危 ${numShort(lc.high || 0)}`, LV_COLOR.critical,
+      `按攻击源 IP 的综合威胁等级统计：严重 ${num(lc.critical || 0)} · 高危 ${num(lc.high || 0)} · 中危 ${num(lc.medium || 0)} · 低危 ${num(lc.low || 0)}。触发过高危告警的 IP 至少为高危`, 'attackers:high'],
+    ['攻击拦截率', `${o.block_rate}%`, `已拦截 ${numShort(t.blocked)}`, o.block_rate >= 80 ? '#52c41a' : o.block_rate >= 40 ? 'var(--hl)' : LV_COLOR.medium, `已拦截 ${num(t.blocked)} 次，点击查看已拦截的告警`, 'alerts:blocked'],
     ['疑似成功攻击', num(t.success), '需优先排查是否失陷', t.success > 0 ? LV_COLOR.critical : '#52c41a', '', 'alerts:success'],
-    ['攻击面风险指数', `${o.surface_score}`, `风险发现 ${num(o.findings)} 项`,
-      o.surface_score >= 60 ? LV_COLOR.critical : o.surface_score >= 30 ? LV_COLOR.high : o.surface_score > 0 ? LV_COLOR.medium : '#52c41a', '', 'surface:'],
-    ['攻击来源地域', num(o.country_count), `国家/地区 · 城市 ${num(o.city_count)}`, 'var(--hl)', '点击查看全部攻击源（可在下方“来源国家/地区”“攻击来源城市”图表中点击具体地域）', 'attackers:'],
+    ['攻击面风险指数', `${o.surface_score}`, `风险发现 ${numShort(o.findings)} 项`,
+      o.surface_score >= 60 ? LV_COLOR.critical : o.surface_score >= 30 ? LV_COLOR.high : o.surface_score > 0 ? LV_COLOR.medium : '#52c41a', `风险发现 ${num(o.findings)} 项`, 'surface:'],
+    ['攻击来源地域', num(o.country_count), `国家/地区 · 城市 ${numShort(o.city_count)}`, 'var(--hl)', '点击查看全部攻击源（可在下方“来源国家/地区”“攻击来源城市”图表中点击具体地域）', 'attackers:'],
   ];
   $('#kpis').innerHTML = kpis.map(([l, v, s, c, tip, go]) => `<div class="kpi${go ? ' clickable' : ''}"${go ? ` data-go="${go}"` : ''} title="${esc(tip || s)}"><div class="label">${l}</div><div class="value" style="color:${c}">${v}</div><div class="sub">${esc(s)}</div></div>`).join('');
   const tb = $('#threatBadge');
