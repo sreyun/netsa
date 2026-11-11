@@ -95,11 +95,18 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
+      # 优先使用运行环境自带的 Chrome：下载 Playwright 的浏览器与系统依赖曾多次卡住到超时，前端回归根本没有执行
       - name: 安装 Playwright
         working-directory: test/e2e
+        timeout-minutes: 8
         run: |
           npm ci
-          npx playwright install --with-deps chromium
+          if command -v google-chrome >/dev/null 2>&1; then
+            echo "NETSA_E2E_CHROME=$(command -v google-chrome)" >> "$GITHUB_ENV"
+            google-chrome --version
+          else
+            npx playwright install --with-deps chromium
+          fi
       - name: 运行
         working-directory: test/e2e
         run: npx playwright test
