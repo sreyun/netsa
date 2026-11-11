@@ -62,7 +62,7 @@ func ConvertSigma(data []byte) (*SigmaResult, error) {
 			break
 		}
 		if err != nil {
-			return nil, fmt.Errorf("Sigma 规则不是有效的 YAML: %w", err)
+			return nil, fmt.Errorf("不是有效的 YAML（Sigma 规则）: %w", err)
 		}
 		docs++
 		if doc.Detection == nil { // 多文档 Sigma 规则的公共部分，或空文档

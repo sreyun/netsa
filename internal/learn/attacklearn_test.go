@@ -155,7 +155,7 @@ func TestDiscoverUnknownAttack(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "learn.json")
 	l := attackLearner(t, path)
 	now := time.Now()
-	attackers := []string{"203.0.113.1", "203.0.113.2", "203.0.113.3"}
+	attackers := []string{"203.0.113.1", "198.51.100.2", "192.0.2.3"} // 分布在不同网段
 	for _, ip := range attackers {
 		l.ConfirmSource(ip, "evidence", "有证据", now)
 	}
@@ -205,10 +205,10 @@ func TestDiscoverUnknownAttack(t *testing.T) {
 func TestDiscoverIgnoresLaterConfirmed(t *testing.T) {
 	l := attackLearner(t, "")
 	now := time.Now()
-	ips := []string{"203.0.113.11", "203.0.113.12", "203.0.113.13"}
+	ips := []string{"203.0.113.11", "198.51.100.12", "192.0.2.13"}
 	l.ObserveAttack(webEv(ips[2], "GET", "/vuln/probe.do?a=1", now), nil) // 当时还没确认
 	for _, ip := range ips {
-		l.ConfirmSource(ip, "ai", "模型判为攻击", now)
+		l.ConfirmSource(ip, "evidence", "攻击成功且有证据", now)
 	}
 	for _, ip := range ips[:2] {
 		l.ObserveAttack(webEv(ip, "GET", "/vuln/probe.do?a=2", now), nil)
@@ -548,5 +548,56 @@ func TestRestoreAfterCorrection(t *testing.T) {
 	l.RecordLoop("unretract", 2, "撤销纠错，恢复 2 个事件的等级")
 	if r := l.Report(); r.Loop.Restored != 2 || r.Changes[0].Kind != "unretract" {
 		t.Fatalf("应统计撤销纠错: %+v %+v", r.Loop, r.Changes[0])
+	}
+}
+
+// 模型的结论不作为学习样本：只凭模型判断确认的攻击源、同一网段的几个来源都不足以生成观察规则；
+// 已经学成的规则被停用后，不会被候选晋升重新生成。
+func TestDiscoverNeedsObjectiveDistinctSources(t *testing.T) {
+	now := time.Now()
+	learnWith := func(kind string, ips []string) *Learner {
+		l := attackLearner(t, "")
+		for _, ip := range ips {
+			l.ConfirmSource(ip, kind, "确认", now)
+			l.ObserveAttack(webEv(ip, "GET", "/vuln/probe.do?a=1", now), nil)
+		}
+		l.Refresh(now.Add(2 * time.Hour))
+		return l
+	}
+	if r := learnWith("ai", []string{"203.0.113.21", "198.51.100.22", "192.0.2.23"}).Report().Attack; len(r.Rules) != 0 {
+		t.Fatalf("只凭模型判断确认的来源不应生成规则: %+v", r.Rules)
+	}
+	if r := learnWith("evidence", []string{"180.169.235.202", "180.169.235.203", "180.169.235.204"}).Report().Attack; len(r.Rules) != 0 {
+		t.Fatalf("同一网段的来源不应生成规则: %+v", r.Rules)
+	}
+	l := learnWith("evidence", []string{"203.0.113.21", "198.51.100.22", "192.0.2.23"})
+	r := l.Report().Attack
+	if len(r.Rules) != 1 {
+		t.Fatalf("客观依据确认、分布在不同网段：应生成规则: %+v", r.Rules)
+	}
+	id := r.Rules[0].ID
+	l.SetLearnedRule(id, "admin", false)
+	for _, ip := range []string{"203.0.113.21", "198.51.100.22", "192.0.2.23"} {
+		l.ObserveAttack(webEv(ip, "GET", "/vuln/probe.do?a=2", now.Add(3*time.Hour)), nil)
+	}
+	l.Refresh(now.Add(5 * time.Hour))
+	if r := l.Report().Attack; len(r.Rules) != 1 || !r.Rules[0].Disabled {
+		t.Fatalf("停用的规则不应被重新生成: %+v", r.Rules)
+	}
+}
+
+// 先凭模型判断确认、之后出现客观证据的来源，确认依据升级为客观依据，不再按站点常客撤销。
+func TestObjectiveEvidenceUpgradesAIConfirmation(t *testing.T) {
+	l := attackLearner(t, "")
+	now := time.Now()
+	l.ConfirmSource("203.0.113.31", "ai", "模型判为攻击", now)
+	l.ConfirmSource("203.0.113.31", "evidence", "攻击成功且有证据", now.Add(time.Minute))
+	if a := l.Report().Attack.AutoSources[0]; a.Kind != "evidence" {
+		t.Fatalf("确认依据应升级为客观依据: %+v", a)
+	}
+	l.RegularUser = func(string) bool { return true }
+	l.Refresh(now.Add(2 * time.Minute))
+	if _, ok := l.confirmedSource("203.0.113.31", now.Add(2*time.Minute)); !ok {
+		t.Fatal("有客观证据的来源不应按站点常客撤销")
 	}
 }

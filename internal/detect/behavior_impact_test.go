@@ -79,9 +79,7 @@ func TestSlowRequestByDuration(t *testing.T) {
 	for i := 0; i < 20; i++ {
 		ev := &model.Event{Kind: model.KindWeb, SrcIP: "203.0.113.9", Host: "shop.example.com", Method: "GET", URI: "/search?q=" + strconv.Itoa(i),
 			Status: 200, ReqTime: 15.2, Time: r.now.Add(time.Duration(i*10) * time.Second)}
-		for _, h := range r.b.ObserveHits(ev, nil) {
-			r.fired[ev.SrcIP] = append(r.fired[ev.SrcIP], h)
-		}
+		r.fired[ev.SrcIP] = append(r.fired[ev.SrcIP], r.b.ObserveHits(ev, nil)...)
 	}
 	if r.count("203.0.113.9", "bhv-timeout") != 1 {
 		t.Fatalf("耗时超过阈值应计为超时: %+v", r.fired)
@@ -309,9 +307,7 @@ func TestSlowRequestLongLived(t *testing.T) {
 		if i%5 == 0 {
 			ev.Status = 101
 		}
-		for _, h := range r.b.ObserveHits(ev, nil) {
-			r.fired[ev.SrcIP] = append(r.fired[ev.SrcIP], h)
-		}
+		r.fired[ev.SrcIP] = append(r.fired[ev.SrcIP], r.b.ObserveHits(ev, nil)...)
 	}
 	if n := r.count("60.2.41.105", "bhv-timeout"); n != 0 {
 		t.Fatalf("长连接不应判为慢请求攻击: %+v", r.fired)

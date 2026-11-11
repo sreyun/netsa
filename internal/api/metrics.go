@@ -13,35 +13,61 @@ import (
 )
 
 // promWriter 生成 Prometheus 文本格式（text/plain; version=0.0.4）。
+// 同一指标的样本集中输出（格式要求一个指标的所有行连在一起），HELP / TYPE 只输出一次；
+// 标签完全相同的重复样本只保留第一条（重复的序列会让采集端报错或丢弃样本）。
 type promWriter struct {
-	b    bytes.Buffer
-	seen map[string]bool
+	order []string                 // 指标名，按第一次出现的顺序
+	fam   map[string]*bytes.Buffer // 指标名 → HELP / TYPE 与样本
+	dup   map[string]bool          // 已输出的序列（指标名 + 标签）
+}
+
+func newPromWriter() *promWriter {
+	return &promWriter{fam: map[string]*bytes.Buffer{}, dup: map[string]bool{}}
 }
 
 func promEscape(s string) string {
-	return strings.NewReplacer(`\`, `\\`, `"`, `\"`, "\n", `\n`).Replace(s)
+	return strings.NewReplacer(`\`, `\`, `"`, `\"`, "\n", `\n`).Replace(s)
 }
 
-// metric 写一个样本；同名指标的 HELP / TYPE 只输出一次。labels 为成对的键、值。
+// metric 写一个样本。labels 为成对的键、值。
 func (p *promWriter) metric(name, typ, help string, v float64, labels ...string) {
-	if !p.seen[name] {
-		p.seen[name] = true
-		p.b.WriteString("# HELP " + name + " " + help + "\n# TYPE " + name + " " + typ + "\n")
-	}
-	p.b.WriteString(name)
-	if len(labels) > 0 {
-		p.b.WriteByte('{')
+	var series strings.Builder
+	series.WriteString(name)
+	if len(labels) > 1 {
+		series.WriteByte('{')
 		for i := 0; i+1 < len(labels); i += 2 {
 			if i > 0 {
-				p.b.WriteByte(',')
+				series.WriteByte(',')
 			}
-			p.b.WriteString(labels[i] + `="` + promEscape(labels[i+1]) + `"`)
+			series.WriteString(labels[i] + `="` + promEscape(labels[i+1]) + `"`)
 		}
-		p.b.WriteByte('}')
+		series.WriteByte('}')
 	}
-	p.b.WriteByte(' ')
-	p.b.WriteString(strconv.FormatFloat(v, 'g', -1, 64))
-	p.b.WriteByte('\n')
+	key := series.String()
+	if p.dup[key] {
+		return
+	}
+	p.dup[key] = true
+	b := p.fam[name]
+	if b == nil {
+		b = &bytes.Buffer{}
+		b.WriteString("# HELP " + name + " " + help + "\n# TYPE " + name + " " + typ + "\n")
+		p.fam[name] = b
+		p.order = append(p.order, name)
+	}
+	b.WriteString(key)
+	b.WriteByte(' ')
+	b.WriteString(strconv.FormatFloat(v, 'g', -1, 64))
+	b.WriteByte('\n')
+}
+
+// bytes 按指标第一次出现的顺序输出全部内容。
+func (p *promWriter) bytes() []byte {
+	var out bytes.Buffer
+	for _, name := range p.order {
+		out.Write(p.fam[name].Bytes())
+	}
+	return out.Bytes()
 }
 
 func b2f(b bool) float64 {
@@ -61,7 +87,7 @@ func unixSec(t time.Time) float64 {
 // metrics 输出 Prometheus 指标：采集与数据源健康、syslog 发送端、检测与告警、事件处置、误报抑制、推送与归档、运行时。
 // 可用会话、Basic 认证或 API 令牌（推荐创建“指标采集”角色的只读令牌）访问。
 func (s *Server) metrics(w http.ResponseWriter, r *http.Request) {
-	p := &promWriter{seen: map[string]bool{}}
+	p := newPromWriter()
 	p.metric("netsa_build_info", "gauge", "版本信息", 1, "version", s.Version)
 	p.metric("netsa_uptime_seconds", "gauge", "运行时长（秒）", time.Since(s.started).Seconds())
 	for _, f := range s.Forward.Stats() {
@@ -82,15 +108,40 @@ func (s *Server) metrics(w http.ResponseWriter, r *http.Request) {
 	}
 	p.metric("netsa_events_processed_total", "counter", "已处理的日志事件数", float64(s.Pipeline.Processed()))
 
+	// 同名同类型的数据源合并为一条序列：默认配置里 ssh 有两个候选路径（/var/log/auth.log 与 /var/log/secure），
+	// 各输出一条的话标签完全相同，采集端会报重复序列。行数相加，任一路径在跟踪即视为正常运行。
+	type srcAgg struct {
+		name, typ                      string
+		lines, parsed, failed, skipped int64
+		silent, up                     bool
+		last                           time.Time
+	}
+	var srcs []*srcAgg
+	byKey := map[string]*srcAgg{}
 	for _, st := range s.Ingest.Stats() {
-		l := []string{"source", st.Name, "type", st.Type}
-		p.metric("netsa_source_lines_total", "counter", "数据源读取的日志行数", float64(st.Lines), l...)
-		p.metric("netsa_source_parsed_total", "counter", "数据源解析成功的行数", float64(st.Parsed), l...)
-		p.metric("netsa_source_failed_total", "counter", "数据源无法解析的行数", float64(st.Failed), l...)
-		p.metric("netsa_source_skipped_total", "counter", "数据源跳过的行数（注释、空行等）", float64(st.Skipped), l...)
-		p.metric("netsa_source_silent", "gauge", "数据源是否断流（超过阈值没有新日志）", b2f(st.Silent), l...)
-		p.metric("netsa_source_up", "gauge", "数据源是否正常运行（跟踪 / 监听中）", b2f(st.Status == "tailing" || st.Status == "listening" || st.Status == "done"), l...)
-		p.metric("netsa_source_last_event_timestamp_seconds", "gauge", "数据源最新一条日志的时间", unixSec(st.LastEvent), l...)
+		key := st.Name + "\x00" + st.Type
+		a := byKey[key]
+		if a == nil {
+			a = &srcAgg{name: st.Name, typ: st.Type}
+			byKey[key] = a
+			srcs = append(srcs, a)
+		}
+		a.lines, a.parsed, a.failed, a.skipped = a.lines+st.Lines, a.parsed+st.Parsed, a.failed+st.Failed, a.skipped+st.Skipped
+		a.silent = a.silent || st.Silent
+		a.up = a.up || st.Status == "tailing" || st.Status == "listening" || st.Status == "done"
+		if st.LastEvent.After(a.last) {
+			a.last = st.LastEvent
+		}
+	}
+	for _, a := range srcs {
+		l := []string{"source", a.name, "type", a.typ}
+		p.metric("netsa_source_lines_total", "counter", "数据源读取的日志行数", float64(a.lines), l...)
+		p.metric("netsa_source_parsed_total", "counter", "数据源解析成功的行数", float64(a.parsed), l...)
+		p.metric("netsa_source_failed_total", "counter", "数据源无法解析的行数", float64(a.failed), l...)
+		p.metric("netsa_source_skipped_total", "counter", "数据源跳过的行数（注释、空行等）", float64(a.skipped), l...)
+		p.metric("netsa_source_silent", "gauge", "数据源是否断流（超过阈值没有新日志）", b2f(a.silent), l...)
+		p.metric("netsa_source_up", "gauge", "数据源是否正常运行（跟踪 / 监听中）", b2f(a.up), l...)
+		p.metric("netsa_source_last_event_timestamp_seconds", "gauge", "数据源最新一条日志的时间", unixSec(a.last), l...)
 	}
 	if ss := s.Ingest.Senders; ss != nil {
 		rep := ss.Report()
@@ -148,6 +199,7 @@ func (s *Server) metrics(w http.ResponseWriter, r *http.Request) {
 	if s.cache != nil {
 		entries, hits, misses := s.cache.stats()
 		p.metric("netsa_response_cache_entries", "gauge", "聚合接口响应缓存条目数（LRU）", float64(entries))
+		p.metric("netsa_response_cache_bytes", "gauge", "接口响应缓存占用的字节数", float64(s.cache.size()))
 		p.metric("netsa_response_cache_hits_total", "counter", "响应缓存命中次数", float64(hits))
 		p.metric("netsa_response_cache_misses_total", "counter", "响应缓存未命中（重新计算）次数", float64(misses))
 	}
@@ -211,5 +263,5 @@ func (s *Server) metrics(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
-	w.Write(p.b.Bytes())
+	w.Write(p.bytes())
 }

@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"net/netip"
 	"net/url"
 	"regexp"
 	"slices"
@@ -203,8 +204,18 @@ func (l *Learner) ConfirmSource(ip, kind, reason string, at time.Time) bool {
 	}
 	old := l.auto[ip]
 	if old != nil {
+		changed := false
 		if at.After(old.Time) {
 			old.Time = at
+			changed = true
+		}
+		// 先凭模型判断确认、之后出现了客观证据（成功利用、回连、诱饵、同一攻击活动）：确认依据升级为客观依据。
+		// 否则它仍按“只凭模型判断”处理，会被当作站点常客撤销，客观的攻击结论也被改写为“不是攻击”
+		if old.Kind == "ai" && kind != "ai" {
+			old.Kind, old.Reason = kind, reason
+			changed = true
+		}
+		if changed {
 			l.dirty = true
 			l.publishAutoLocked()
 		}
@@ -272,6 +283,41 @@ func (l *Learner) confirmedSource(ip string, at time.Time) (string, bool) {
 	return "该来源已被自动确认为攻击源（" + a.Reason + "）", true
 }
 
+// objectiveSource 判断来源在 at 时刻是否由客观依据确认为攻击源：分析员确认，或非模型判断的自动确认。
+func (l *Learner) objectiveSource(ip string, at time.Time) bool {
+	reason, ok := l.confirmedSource(ip, at)
+	if !ok {
+		return false
+	}
+	if strings.HasPrefix(reason, "该来源曾被分析员确认为攻击") {
+		return true
+	}
+	p := l.autoSnap.Load()
+	if p == nil {
+		return false
+	}
+	a, found := (*p)[ip]
+	return found && a.Kind != "ai"
+}
+
+// netOf 返回地址所在的网段（IPv4 /24、IPv6 /48），用于判断几个来源是否属于同一出口。
+func netOf(ip string) string {
+	addr, err := netip.ParseAddr(ip)
+	if err != nil {
+		return ip
+	}
+	addr = addr.Unmap()
+	bits := 24
+	if addr.Is6() {
+		bits = 48
+	}
+	p, err := addr.Prefix(bits)
+	if err != nil {
+		return ip
+	}
+	return p.String()
+}
+
 // ObserveAttack 在规则检测之后、校准之前调用：记录攻击活动、收集未知攻击的候选请求、匹配学到的观察规则。
 // 只可能追加命中，不修改已有命中。
 func (l *Learner) ObserveAttack(ev *model.Event, hits []model.Hit) []model.Hit {
@@ -329,9 +375,11 @@ func (l *Learner) ObserveAttack(ev *model.Event, hits []model.Hit) []model.Hit {
 			Evidence: fmt.Sprintf("请求形态 %s 此前只出现在 %d 个已确认攻击源的请求中，正常访客从未使用（%s 自动学习）",
 				clipShape(shape), n, learned.Format("2006-01-02"))})
 	}
-	if attack {
+	if attack || st.rules[shape] != nil {
+		// 已被规则识别的攻击不需要再学；已经学成规则的形态（包括被停用的）不再收集候选：
+		// 否则停用的规则会被候选晋升重新生成并覆盖，管理员每次停用都会在一小时左右被学回来
 		st.mu.Unlock()
-		return hits // 已被规则识别的攻击不需要再学
+		return hits
 	}
 	var ch *Change
 	c := st.cand[shape]
@@ -372,16 +420,23 @@ func (l *Learner) ObserveAttack(ev *model.Event, hits []model.Hit) []model.Hit {
 // promoteLocked 判断候选请求形态能否生成观察规则（调用方持 st.mu），生成时返回进化日志。
 func (l *Learner) promoteLocked(st *attackState, shape string, c *candidate, at time.Time) *Change {
 	// 至少观察一个窗口（一小时）：业务接口的轮询要过一会儿才看得出来，不能第三个来源一出现就生成规则
+	if st.rules[shape] != nil {
+		delete(st.cand, shape) // 已有规则（包括停用、保留的）不被覆盖
+		return nil
+	}
 	if len(c.sources) < discoverSources || len(st.rules) >= maxLearnedRules || c.polled || at.Sub(c.first) < pollWindow {
 		return nil
 	}
-	n := 0 // 期间被撤销确认（分析员判为误报、站点常客）的来源不算
+	// 只认客观依据确认的攻击源（分析员确认、有证据的成功利用、回连、诱饵、同一攻击活动），且要分布在不同网段：
+	// 模型的结论不作为学习样本。生产环境中模型把员工出口的 3 个地址（其中两个在同一个 /24）判为攻击，
+	// 由此学出的观察规则命中了业务心跳接口四万多次，直到这些来源被识别为站点常客、规则被轮询检测停用
+	nets := map[string]bool{} // 期间被撤销确认（分析员判为误报、站点常客）的来源不算
 	for _, ip := range c.sources {
-		if _, ok := l.confirmedSource(ip, at); ok {
-			n++
+		if l.objectiveSource(ip, at) {
+			nets[netOf(ip)] = true
 		}
 	}
-	if n < discoverSources {
+	if len(nets) < discoverSources {
 		return nil
 	}
 	// 用过这个形态的其他来源：当时还没被确认、后来被确认的攻击源不算正常访客；用过的来源太多也不学
@@ -497,6 +552,7 @@ func (l *Learner) SetLearnedRule(id, user string, enabled bool) bool {
 	}
 	found.Disabled = !enabled
 	found.Kept = enabled // 管理员确认要观察：不再因轮询自动停用
+	delete(st.cand, found.Shape)
 	if enabled {
 		found.AutoOff = ""
 	}

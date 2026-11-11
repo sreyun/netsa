@@ -6,6 +6,7 @@ import (
 	"log"
 	"net/http"
 	"slices"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -280,6 +281,16 @@ func (s *Server) takeAIQueue(n int) []uint64 {
 	return out
 }
 
+// requeueAI 把没来得及研判的事件按原顺序放回队首（遇到每小时调用上限时），下一轮继续。
+func (s *Server) requeueAI(ids []uint64) {
+	if len(ids) == 0 {
+		return
+	}
+	s.aiQueueMu.Lock()
+	defer s.aiQueueMu.Unlock()
+	s.aiQueue = append(append([]uint64(nil), ids...), s.aiQueue...)
+}
+
 // aiTick 由后台任务每分钟调用：先处理批量研判队列；开启 ai.auto_triage 时，再对新出现的高危及以上
 // （可扩大到中危）待处理事件自动研判。每轮最多 3 个，受每小时上限约束。
 // 研判在单独的协程中进行，不阻塞其他后台任务。
@@ -290,21 +301,37 @@ func (s *Server) aiTick(ctx context.Context) {
 	if s.aiDone == nil {
 		s.aiDone = map[uint64]bool{}
 	}
+	// 本小时的调用额度已用完：不取队列（取出后限流只能丢弃），也不发起注定失败的研判
+	if st := s.AI.Status(); st.MaxPerHour > 0 && st.UsedHour >= st.MaxPerHour {
+		s.aiBusy.Store(false)
+		return
+	}
 	todo := s.takeAIQueue(aiPerTick)
 	if s.AI.AutoTriage() && len(todo) < aiPerTick {
 		minSev := model.SevHigh
 		if s.AI.AutoTriageMedium() {
 			minSev = model.SevMedium
 		}
-		// 列表按等级从高到低排序，严重的事件优先研判
-		list, _, _ := s.Store.Incidents(store.IncidentQuery{Status: "active", MinSeverity: minSev, Limit: 50})
+		// 候选不用页面的排序加前 50 条：研判过的事件会被顶到前面并一直留在窗口里，占满后新事件再也轮不到。
+		// 取全部待处理事件，去掉研判过的与 24 小时以前的，按等级从高到低、先出现的优先
+		list, _, _ := s.Store.Incidents(store.IncidentQuery{Status: "active", MinSeverity: minSev})
+		var cands []store.IncidentView
 		for _, v := range list {
+			if time.Since(v.Created) < 24*time.Hour && !s.aiDone[v.ID] && !slices.Contains(todo, v.ID) {
+				cands = append(cands, v)
+			}
+		}
+		sort.SliceStable(cands, func(i, j int) bool {
+			if cands[i].Severity != cands[j].Severity {
+				return cands[i].Severity > cands[j].Severity
+			}
+			return cands[i].Created.Before(cands[j].Created)
+		})
+		for _, v := range cands {
 			if len(todo) == aiPerTick {
 				break
 			}
-			if time.Since(v.Created) < 24*time.Hour && !s.aiDone[v.ID] && !slices.Contains(todo, v.ID) {
-				todo = append(todo, v.ID)
-			}
+			todo = append(todo, v.ID)
 		}
 	}
 	if len(todo) == 0 {
@@ -324,11 +351,12 @@ func (s *Server) aiTick(ctx context.Context) {
 				safe.Report("AI 自动研判", p)
 			}
 		}()
-		for _, id := range todo {
+		for i, id := range todo {
 			c, cancel := context.WithTimeout(ctx, s.AI.CallBudget())
 			_, err := s.triage(c, id, "系统", "")
 			cancel()
 			if errors.Is(err, ai.ErrRateLimited) {
+				s.requeueAI(todo[i:]) // 当前这个及之后的放回队首，额度恢复后继续，不丢弃
 				return
 			}
 			if err != nil && !errors.Is(err, store.ErrNoIncident) {

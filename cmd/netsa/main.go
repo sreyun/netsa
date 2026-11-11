@@ -63,7 +63,7 @@ import (
 
 // version 是构建版本号。默认值用于本地构建；镜像构建通过
 // -ldflags "-X main.version=<tag>" 注入，`netsa version` 与 /api/meta 都会显示注入后的值。
-var version = "1.11.6"
+var version = "1.11.7"
 
 func usage() {
 	fmt.Fprintf(os.Stderr, `netsa %s —— 网络安全态势感知与攻击面分析系统
@@ -527,6 +527,7 @@ func cmdServe(args []string) error {
 	defer stop()
 	a.geo.Start(ctx)
 	go a.reloadGeo(ctx, *cfgPath)
+	go a.retryGeo(ctx)
 	go a.notifier.Run(ctx)
 	a.intel.StartTor(ctx, cfg.Intel.TorExitURL)
 	a.intel.StartFeeds(ctx, cfg.Intel.Feeds, dataFile(cfg, "", "intel-feeds"))
@@ -623,6 +624,29 @@ func cmdServe(args []string) error {
 			}
 			return nil
 		}
+	}
+}
+
+// retryGeo 定期为还缺在线定位的攻击源与外连目标重新发起在线查询（启用在线库时）：
+// 查询失败（网络错误、接口限流）或当时没有结果的地址，此前只有等级再次提升才会重试。
+// 每个地址的重试间隔由 geo.Resolver.Enrich 控制（10 分钟起逐次加倍，最长 6 小时），这里只负责把它们找出来。
+func (a *app) retryGeo(ctx context.Context) {
+	if !a.cfg.Geo.Online.Enabled {
+		return
+	}
+	level := model.ParseSeverity(a.cfg.Geo.EnrichLevel)
+	timer := time.NewTimer(2 * time.Minute) // 启动后稍等：先让快照恢复后的重新定位完成
+	defer timer.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-timer.C:
+		}
+		for _, ip := range a.store.GeoPending(level, a.geo.NeedsOnline, 300) {
+			a.geo.Enrich(ip)
+		}
+		timer.Reset(10 * time.Minute)
 	}
 }
 
@@ -819,7 +843,11 @@ func printReport(a *app, files []string, elapsed time.Duration, top int) {
 
 	fmt.Println()
 	fmt.Println("==================== 态势总览 ====================")
-	fmt.Printf("时间范围: %s ~ %s\n", o.From.In(parser.Location).Format("2006-01-02 15:04:05"), o.To.In(parser.Location).Format("2006-01-02 15:04:05"))
+	if o.From.IsZero() { // 没有任何事件时不输出 0000-12-31 这样的时间
+		fmt.Println("时间范围: -")
+	} else {
+		fmt.Printf("时间范围: %s ~ %s\n", o.From.In(parser.Location).Format("2006-01-02 15:04:05"), o.To.In(parser.Location).Format("2006-01-02 15:04:05"))
+	}
 	fmt.Printf("Web 请求 %d | 防火墙事件 %d | 独立来源 IP %d | 攻击 IP %d\n", o.Totals.Web, o.Totals.Firewall, o.UniqueIPs, o.Attackers)
 	fmt.Printf("攻击事件 %d | 已拦截 %d (%.1f%%) | 疑似成功 %d | 攻击面风险指数 %d/100\n",
 		o.Totals.Attacks, o.Totals.Blocked, o.BlockRate, o.Totals.Success, o.SurfaceScore)

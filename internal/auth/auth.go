@@ -130,7 +130,7 @@ type Manager struct {
 	audit   []Record
 	fileMod time.Time            // 账号文件的修改时间（命令行修改密码后自动重新加载）
 	statAt  time.Time            // 最近一次检查账号文件的时间（每个请求都要校验会话，检查频率限制为每秒一次）
-	basicOK sync.Map             // Basic 认证成功结果缓存：摘要 → 到期时间，避免脚本每次请求都做一次耗时的哈希
+	basicOK sync.Map             // Basic 认证成功结果缓存：摘要 → basicHit，避免脚本每次请求都做一次耗时的哈希
 	tokens  map[string]*APIToken // 令牌哈希 → 令牌
 	nowFunc func() time.Time
 }
@@ -648,12 +648,19 @@ func (m *Manager) CheckBasic(user, password, ip string) (*Session, error) {
 	sum := sha256.Sum256([]byte(user + "\x00" + password))
 	key := hex.EncodeToString(sum[:])
 	now := m.now()
-	if v, ok := m.basicOK.Load(key); ok && now.Before(v.(time.Time)) {
+	if v, ok := m.basicOK.Load(key); ok && now.Before(v.(basicHit).exp) {
 		m.mu.Lock()
 		u := m.users[user]
+		var s *Session
+		// 账号代数变了（改过密码、重置过）就不再采信缓存；会话由 sessionLocked 统一构造，
+		// 改密、绑定双因素等要求与登录时一致（手工拼会话会漏掉 MustEnroll，第二次请求起绕过 require_2fa）
+		if u != nil && u.TOTPSecret == "" && u.Gen == v.(basicHit).gen {
+			s = m.sessionLocked(u, "basic", now, now.Add(time.Minute))
+			s.Via = "basic"
+		}
 		m.mu.Unlock()
-		if u != nil && u.TOTPSecret == "" {
-			return &Session{User: u.Name, Role: u.Role, MustChange: u.MustChange, ID: "basic", AuthTime: now, Expires: now.Add(time.Minute), Via: "basic"}, nil
+		if s != nil {
+			return s, nil
 		}
 	}
 	s, _, err := m.Login(user, password, ip, "HTTP Basic")
@@ -665,8 +672,18 @@ func (m *Manager) CheckBasic(user, password, ip string) (*Session, error) {
 		return nil, err
 	}
 	s.Via = "basic"
-	m.basicOK.Store(key, now.Add(5*time.Minute))
+	m.mu.Lock()
+	if u := m.users[user]; u != nil {
+		m.basicOK.Store(key, basicHit{exp: now.Add(5 * time.Minute), gen: u.Gen})
+	}
+	m.mu.Unlock()
 	return s, nil
+}
+
+// basicHit 是 Basic 认证成功结果的缓存项：到期时间与当时的账号代数。
+type basicHit struct {
+	exp time.Time
+	gen int
 }
 
 // ---------------- 账号管理 ----------------

@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"net/netip"
+	"time"
 )
 
 // Reload 检查各离线库文件是否被替换，有更新时重新加载并刷新缓存中全部地址的定位结果，
@@ -62,6 +63,7 @@ func (r *Resolver) refresh() {
 			if private != e.private {
 				// 归属变了（划入或移出内网）：在线定位结果不再适用，移出内网后可以重新补全
 				e.online, e.enriched = nil, false
+				e.onlineTries, e.onlineAt, e.rdnsDone = 0, time.Time{}, false
 			}
 			e.private, e.local = private, local
 			e.info = r.merge(ip, e)
@@ -87,14 +89,18 @@ func (r *Resolver) Relocate(ip string, old *Info) *Info {
 	r.mu.Unlock()
 	e := &entry{private: isPrivate(addr)}
 	e.local = r.lookupLocal(addr, e.private)
-	if old != nil && old.Enriched {
+	if old != nil && !e.private {
+		// 在线定位的结果只要有就沿用（反向解析失败时 Enriched 为 false，但在线结果是完整的）
 		for i := range old.Sources {
 			if r.opt.Online != nil && old.Sources[i].Source == r.opt.Online.Name() {
 				sr := old.Sources[i]
 				e.online = &sr
 			}
 		}
-		e.rdns, e.enriched = old.RDNS, true
+		if old.Enriched {
+			// 没有在线结果的（当时接口失败或没有返回）保持可重试：Enrich 再次调用时补查
+			e.rdns, e.enriched, e.rdnsDone = old.RDNS, true, true
+		}
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()

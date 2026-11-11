@@ -906,7 +906,7 @@ func (sf *surface) observeWeb(ev *model.Event, hits []model.Hit, attacked bool) 
 // observeFw 更新网络服务暴露面（调用方持锁）。published 表示目标端口确实做过对外映射：
 // 未映射的端口即使被默认策略放行，也不存在可访问的服务，不能据此判定「对公网开放」。
 func (sf *surface) observeFw(ev *model.Event, published bool) {
-	if ev.DstPort <= 0 {
+	if ev.DstPort <= 0 || ev.DstPort > 65535 { // 越界的端口（解析错位、伪造的日志）不能让端口表无上限增长
 		return
 	}
 	// 内网主机访问公网（出站流量）不是本方对外提供的服务，不计入暴露面

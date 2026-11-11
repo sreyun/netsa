@@ -45,10 +45,10 @@ var tunnelSkip = domainSet("in-addr.arpa", "ip6.arpa", "spamhaus.org", "spamcop.
 
 func (b *Behavior) maybePrune(ev *model.Event) {
 	now := time.Now()
-	if ev.Time.After(b.latest) && !ev.Time.After(now.Add(time.Hour)) {
-		b.latest = ev.Time
-	}
-	if now.Sub(b.lastPrune) > 30*time.Second || len(b.auth)+len(b.dns) >= maxWindows {
+	b.noteLatest(ev.Time, now)
+	// 表满时提前清理，同样限速（见 ObserveHits）
+	full := len(b.auth)+len(b.dns) >= maxWindows
+	if d := now.Sub(b.lastPrune); d > 30*time.Second || full && d > 2*time.Second {
 		b.prune(b.latest)
 		b.lastPrune = now
 	}

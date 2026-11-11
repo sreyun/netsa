@@ -342,6 +342,10 @@ func (KVFirewall) Parse(line string) (*model.Event, bool) {
 	if strings.Contains(line, "%%") && reATKHeader.MatchString(line) {
 		return nil, false
 	}
+	// 华为的事件型日志（字段在句末括号里、中文键名）：会话日志没有这种写法，先用子串判断，不增加会话日志的开销
+	if strings.Contains(line, "(源地址=") {
+		return huaweiEventLog(line)
+	}
 	kv := kvMapPool.Get().(map[string]string)
 	defer func() {
 		clear(kv)
@@ -354,6 +358,44 @@ func (KVFirewall) Parse(line string) (*model.Event, bool) {
 		}
 	})
 	return kvEvent(kv, "kv_firewall", line) // kvEvent 只在调用期间读取 kv，事件里保存的是取值（日志行的子串）
+}
+
+// 华为防火墙的事件型日志：正文是一句中文说明，字段在句末的括号里、用中文逗号分隔、键名是中文：
+//
+//	%%01IPSEC/5/IPSEC_INBOUND_SA_MISS(l)[124159]:虚墙名=public: 设备收到IPSec加密报文，未找到Inbound SA，
+//	无法解密该报文(源地址=39.105.112.126，目的地址=43.242.97.41，SPI值=824704176，协议=esp)。
+//
+// 这类日志带源、目的地址，是被设备丢弃的报文（互联网上对 IPsec 网关的探测，或对端重启后仍用旧 SA 发来的报文），
+// 解析为一条被拒绝的防火墙事件，计入来源的流量画像。只处理已知含义的日志：其余带地址却不认识的仍计为解析失败，
+// 便于发现新的日志类型。
+var (
+	reHWEvent     = regexp.MustCompile(`%%\d{2}[A-Z][A-Z0-9_\-]*/\d/([A-Z0-9_\-]+)`)
+	hwEventAction = map[string]string{
+		"IPSEC_INBOUND_SA_MISS": model.ActionDeny, // 没有对应的入方向 SA，报文无法解密，被丢弃
+	}
+)
+
+func huaweiEventLog(line string) (*model.Event, bool) {
+	m := reHWEvent.FindStringSubmatch(line)
+	if m == nil {
+		return nil, false
+	}
+	act, ok := hwEventAction[m[1]]
+	if !ok {
+		return nil, false
+	}
+	i := strings.LastIndex(line, "(源地址=")
+	j := strings.LastIndexByte(line, ')')
+	if i < 0 || j <= i {
+		return nil, false
+	}
+	kv := atkPairs(line[i+1:j], false)
+	src, dst := pick(kv, atkSrc...), pick(kv, atkDst...)
+	if !isIP(src) || !isIP(dst) {
+		return nil, false
+	}
+	return &model.Event{Kind: model.KindFirewall, Format: "kv_firewall", SrcIP: src, DstIP: dst, Action: act,
+		Proto: normProto(pick(kv, atkProto...))}, true
 }
 
 // 防火墙会话日志是数量最多的日志（生产环境 95% 以上），每行几十个键值对：

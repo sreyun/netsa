@@ -12,6 +12,11 @@ var overlongUTF8 = strings.NewReplacer("\xc0\xae", ".", "\xc0\xaf", "/", "\xc1\x
 
 // Normalize 对 URL 做多轮解码与归一化，抵抗双重编码、%u 编码、注释混淆等绕过手法。
 func Normalize(s string) string {
+	return stripComments(normalizeKeepComments(s))
+}
+
+// normalizeKeepComments 与 Normalize 相同，但保留 /* */ 注释：注释里的内容同样要检测。
+func normalizeKeepComments(s string) string {
 	if s == "" {
 		return ""
 	}
@@ -32,11 +37,15 @@ func Normalize(s string) string {
 	if strings.ContainsRune(s, '&') {
 		s = html.UnescapeString(s)
 	}
-	s = strings.ToLower(s)
-	if strings.Contains(s, "/*") {
-		s = stripSQLComments(s)
+	return collapseSpace(strings.ToLower(s))
+}
+
+// stripComments 去掉 /* */ 注释（抵御 union/**/select 这类注释混淆）。
+func stripComments(s string) string {
+	if !strings.Contains(s, "/*") {
+		return s
 	}
-	return collapseSpace(s)
+	return collapseSpace(stripSQLComments(s))
 }
 
 func unhex(c byte) (byte, bool) {

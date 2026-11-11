@@ -61,7 +61,7 @@
 | `GET /api/sources` / `GET /api/rules` | 数据源与运行状态 / 规则列表（等级为最终生效值） |
 | `GET /api/rules/stats` | 规则命中统计：已加载条数、本次运行有命中的条数、每条规则命中次数（用于发现长期未触发的规则） |
 | `GET /api/stream` | SSE 实时告警流 |
-| `GET /api/export/blocklist?format=nginx&level=high` | 导出封禁列表：`txt`、`nginx`（nginx / Tengine / OpenResty / Nginx UI）、`iptables`、`ipset`、`firewalld`、`windows`、`csv`、`apisix`、`kong`（ip-restriction 插件 JSON） |
+| `GET /api/export/blocklist?format=nginx&level=high` | 导出封禁列表：`txt`、`nginx`（nginx / Tengine / OpenResty / Nginx UI）、`iptables`、`ipset`、`firewalld`、`windows`、`csv`、`apisix`、`kong`（ip-restriction 插件 JSON）；`level` 为 `low` / `medium` / `high`（默认）/ `critical`，写错时返回 400 |
 | `GET /api/report` | 完整 JSON 报告 |
 | `GET /api/archive/status` | 告警归档状态与分区信息 |
 | `GET /api/archive/alerts?from=&to=&ip=&rule=&severity=&category=&result=&kind=&q=&limit=&offset=` | 历史告警查询（`ip` 可为 CIDR；时间为 RFC3339 或 `2006-01-02T15:04`，按 `timezone` 解析，默认最近 7 天） |

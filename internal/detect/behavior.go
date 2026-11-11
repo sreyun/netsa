@@ -217,11 +217,11 @@ func (b *Behavior) ObserveHits(ev *model.Event, ruleHits []model.Hit) []model.Hi
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	now := time.Now()
-	if ev.Time.After(b.latest) && !ev.Time.After(now.Add(time.Hour)) {
-		b.latest = ev.Time
-	}
-	// 按系统时间定期清理：若按日志时间调度，一条未来时间的异常日志会使清理长期不再执行
-	if now.Sub(b.lastPrune) > 30*time.Second || len(b.web)+len(b.fw) >= maxWindows || len(b.beacons) >= 200000 {
+	b.noteLatest(ev.Time, now)
+	// 按系统时间定期清理：若按日志时间调度，一条未来时间的异常日志会使清理长期不再执行。
+	// 表满时提前清理，但同样限速：表里的条目都还新鲜时一条也删不掉，不限速的话之后每条事件都要在锁内遍历全部表
+	full := len(b.web)+len(b.fw) >= maxWindows || len(b.beacons) >= 200000
+	if d := now.Sub(b.lastPrune); d > 30*time.Second || full && d > 2*time.Second {
 		b.prune(b.latest)
 		b.lastPrune = now
 	}
@@ -838,42 +838,42 @@ func (b *Behavior) prune(now time.Time) {
 	b.pruneBandwidth(now)
 	b.pruneAccounts(now)
 	for k, w := range b.logins {
-		if now.Sub(w.start) > 2*b.th.DistWindow || w.start.Sub(now) > 2*b.th.DistWindow {
+		if stale(now, w.start, 2*b.th.DistWindow) {
 			delete(b.logins, k)
 		}
 	}
 	for k, w := range b.enum {
-		if now.Sub(w.start) > 2*b.th.EnumWindow || w.start.Sub(now) > 2*b.th.EnumWindow {
+		if stale(now, w.start, 2*b.th.EnumWindow) {
 			delete(b.enum, k)
 		}
 	}
 	for k, bc := range b.beacons {
-		if d := now.Sub(bc.seen); d > 3*time.Hour || d < -3*time.Hour {
+		if stale(now, bc.seen, 3*time.Hour) {
 			delete(b.beacons, k)
 		}
 	}
 	for ip, w := range b.web {
-		if now.Sub(w.start) > 2*b.th.WebWindow || w.start.Sub(now) > 2*b.th.WebWindow {
+		if stale(now, w.start, 2*b.th.WebWindow) {
 			delete(b.web, ip)
 		}
 	}
 	for ip, w := range b.fw {
-		if now.Sub(w.start) > 2*b.th.FwWindow || w.start.Sub(now) > 2*b.th.FwWindow {
+		if stale(now, w.start, 2*b.th.FwWindow) {
 			delete(b.fw, ip)
 		}
 	}
 	for ip, w := range b.auth {
-		if outside(now, w.start, 2*b.th.FwWindow) {
+		if stale(now, w.start, 2*b.th.FwWindow) {
 			delete(b.auth, ip)
 		}
 	}
 	for ip, w := range b.dns {
-		if outside(now, w.start, 2*b.th.FwWindow) {
+		if stale(now, w.start, 2*b.th.FwWindow) {
 			delete(b.dns, ip)
 		}
 	}
 	for h, e := range b.errs {
-		if outside(now, e.start, 2*b.th.WebWindow) {
+		if stale(now, e.start, 2*b.th.WebWindow) {
 			delete(b.errs, h)
 		}
 	}
@@ -895,6 +895,29 @@ func fmtDur(d time.Duration) string {
 }
 
 var durText sync.Map // time.Duration → 文字
+
+// noteLatest 记录用于清理的“当前日志时间”：取各日志源中最新的事件时间，但不超过系统时间。
+// 一个时钟偏快的日志源（或一条时间在未来的日志）不能把它拉到未来：清理按它判断窗口是否过期，
+// 拉到未来会让时钟正确的日志源的统计窗口每次清理都被清空，统计类检测整体悄悄失效。
+// 超过系统时间 1 小时的日志忽略（时间明显错误）。
+func (b *Behavior) noteLatest(t, now time.Time) {
+	if t.After(now.Add(time.Hour)) {
+		return
+	}
+	if t.After(now) {
+		t = now
+	}
+	if t.After(b.latest) {
+		b.latest = t
+	}
+}
+
+// stale 判断清理时一个窗口是否已经过期：起点比当前日志时间早 win 以上，或晚 1 小时 + win 以上（时间明显错误）。
+// 起点在未来但不到 1 小时的是时钟偏快的日志源自己的窗口（noteLatest 不超过系统时间），保留到它自然过期。
+func stale(now, start time.Time, win time.Duration) bool {
+	d := now.Sub(start)
+	return d > win || -d > time.Hour+win
+}
 
 // outside 判断事件是否落在窗口之外；允许多数据源之间存在少量乱序。
 func outside(t, start time.Time, win time.Duration) bool {

@@ -21,20 +21,27 @@ type KV struct {
 	Alerts int64 `json:"alerts,omitempty"`
 }
 
+// topN 返回按次数降序（相同按名称升序）排列的前 n 项，n <= 0 时返回全部。只取前若干项时用有界堆选出，
+// 不复制、不整体排序整张表：目标表可达几十万项，总览每次请求都要在读锁内取一次前 10。
 func topN[K comparable](m map[K]int64, n int, name func(K) string) []KV {
+	before := func(a, b KV) bool {
+		if a.Value != b.Value {
+			return a.Value > b.Value
+		}
+		return a.Name < b.Name
+	}
+	if n > 0 && len(m) > n {
+		t := newTopK(n, before)
+		for k, v := range m {
+			t.add(KV{Name: name(k), Value: v})
+		}
+		return t.sorted()
+	}
 	out := make([]KV, 0, len(m))
 	for k, v := range m {
 		out = append(out, KV{Name: name(k), Value: v})
 	}
-	sort.Slice(out, func(i, j int) bool {
-		if out[i].Value != out[j].Value {
-			return out[i].Value > out[j].Value
-		}
-		return out[i].Name < out[j].Name
-	})
-	if n > 0 && len(out) > n {
-		out = out[:n]
-	}
+	sort.Slice(out, func(i, j int) bool { return before(out[i], out[j]) })
 	return out
 }
 
@@ -90,7 +97,8 @@ func bucketWeight(b *Bucket) float64 {
 	return float64(b.Sev[1]) + 3*float64(b.Sev[2]) + 8*float64(b.Sev[3]) + 20*float64(b.Sev[4])
 }
 
-func isAttacker(p *IPProfile) bool { return p.Attacks > 0 || len(p.Intel) > 0 }
+// isAttacker 判断画像是否算作攻击源：有攻击命中或情报命中；全部命中都来自停用的误报规则的不算。
+func isAttacker(p *IPProfile) bool { return (p.Attacks > 0 || len(p.Intel) > 0) && !p.retractedOnly }
 
 func (s *Store) Overview() *Overview {
 	s.mu.RLock()
@@ -135,13 +143,14 @@ func (s *Store) Overview() *Overview {
 	}
 	o.TopISPs = topN(s.agg.isps, 10, ident)
 	o.TopNetTypes = topN(s.agg.nettypes, 0, ident)
-	o.TopTargets = topN(s.agg.targets, 10, ident)
+	o.TopTargets = topN(s.excludedTargetsLocked(), 10, ident)
 	o.TopPorts = topN(s.surf.Ports, 10, func(p int) string {
 		name, _ := serviceInfo(p)
 		return itoa(p) + "/" + name
 	})
-	if s.totals.Attacks > 0 {
-		o.BlockRate = math.Round(float64(s.totals.Blocked)/float64(s.totals.Attacks)*1000) / 10
+	s.excludeTotalsLocked(o)
+	if o.Totals.Attacks > 0 {
+		o.BlockRate = math.Round(float64(o.Totals.Blocked)/float64(o.Totals.Attacks)*1000) / 10
 	}
 
 	// 威胁指数：最近 60 分钟按严重程度加权的攻击量，经指数饱和映射到 0-100。
@@ -176,6 +185,82 @@ func (s *Store) Overview() *Overview {
 	return o
 }
 
+// excludeTotalsLocked 从总览的攻击次数、等级分布、阶段与研判结果中剔除停用的误报规则的命中（调用方持读锁），
+// 与攻击类型、高频规则排行的口径一致：被业务轮询停用的观察规则累计几万次命中时，总览不再显示几万次“攻击”。
+// 原始计数保持不变，规则重新启用后恢复计入。
+func (s *Store) excludeTotalsLocked(o *Overview) {
+	sub := func(m map[string]int64, k string, n int64) {
+		if v := m[k] - n; v > 0 {
+			m[k] = v
+		} else {
+			delete(m, k)
+		}
+	}
+	for r := range s.excluded {
+		n := s.rules[r]
+		if n <= 0 {
+			continue
+		}
+		o.Totals.Attacks = max(o.Totals.Attacks-n, 0)
+		if ph := s.ruleMeta[r].Phase; ph != "" {
+			sub(o.Phases, ph, n)
+		}
+		t := s.tally[r]
+		if t == nil { // 旧版本没有记录命中构成：按观察规则生成命中时的取值（低危、结果未知）剔除
+			t = &ruleTally{Results: map[string]int64{model.ResultUnknown: n}}
+			t.Sev[model.SevLow] = n
+		}
+		for i, v := range t.Sev {
+			if v > 0 {
+				name := model.Severity(i).String()
+				o.SevCounts[name] = max(o.SevCounts[name]-v, 0)
+			}
+		}
+		for k, v := range t.Results {
+			sub(o.Results, k, v)
+		}
+		o.Totals.Blocked = max(o.Totals.Blocked-t.Results[model.ResultBlocked], 0)
+		o.Totals.Success = max(o.Totals.Success-t.Results[model.ResultSuccess], 0)
+	}
+}
+
+// excludedTargetsLocked 返回总览目标排行用的计数：剔除停用规则在仍算作攻击源的画像上留下的目标命中
+// （只剩停用规则命中的画像已整体移出统计）。没有停用规则时直接返回增量统计。
+func (s *Store) excludedTargetsLocked() map[string]int64 {
+	if len(s.excluded) == 0 {
+		return s.agg.targets
+	}
+	var out map[string]int64
+	for r := range s.excluded {
+		t := s.tally[r]
+		if t == nil {
+			continue
+		}
+		for tg, n := range t.Targets {
+			for ip := range s.retracted { // 已移出统计的画像在这个目标上的命中不再重复扣除
+				if p := s.ips[ip]; p != nil {
+					n -= int64(p.Targets[tg])
+				}
+			}
+			if n <= 0 || s.agg.targets[tg] == 0 {
+				continue
+			}
+			if out == nil {
+				out = maps.Clone(s.agg.targets)
+			}
+			if v := out[tg] - n; v > 0 {
+				out[tg] = v
+			} else {
+				delete(out, tg)
+			}
+		}
+	}
+	if out == nil {
+		return s.agg.targets
+	}
+	return out
+}
+
 // geoKeys 返回攻击源在总览排行中的国家、省份、城市、运营商与网络类型。总览下钻时按相同的值筛选攻击源，
 // 保证点击排行条目后列出的攻击源数量与图表一致。
 func geoKeys(p *IPProfile) (country, prov, city, isp, nt string) {
@@ -195,7 +280,11 @@ func geoKeysInfo(g *geo.Info) (country, prov, city, isp, nt string) {
 	prov = g.ProvinceMap
 	if g.City != "" {
 		if prov != "" {
-			city = placeName(prov, "", g.City)
+			c := g.City
+			if g.CityMap != "" { // 城市同样用地图中的规范名称（"广州市" 与 "广州" 合并统计）
+				c = g.CityMap
+			}
+			city = placeName(prov, "", c)
 		} else {
 			city = placeName(country, g.Province, g.City)
 		}
@@ -219,7 +308,18 @@ func mapKey(g *geo.Info) string {
 		// 只有精确坐标、没有地名时按约 10km 网格聚合
 		return fmt.Sprintf("xy|%.1f|%.1f", g.Lat, g.Lon)
 	}
-	return g.CountryCode + "|" + g.Province + "|" + g.City
+	// 国内地点按地名库归一后的省、市聚合：同一地点不因数据源写法不同而拆成几个标注
+	prov, city := g.PlaceKey()
+	return g.CountryCode + "|" + prov + "|" + city
+}
+
+// betterPlaceName 在同一地点的多个写法中选出展示名：取更完整的写法（"中国 广东省 广州市" 优于 "中国 广东 广州市"），
+// 长度相同时取字典序靠前的，结果不随遍历顺序变化。
+func betterPlaceName(cur, cand string) string {
+	if cur == "" || len(cand) > len(cur) || len(cand) == len(cur) && cand < cur {
+		return cand
+	}
+	return cur
 }
 
 func copyMap[K comparable, V any](m map[K]V) map[K]V {
@@ -762,11 +862,16 @@ func (s *Store) MapData(minLevel model.Severity) *MapResult {
 		if mp == nil {
 			mp = &MapPoint{Key: key, Country: g.Country, Province: g.Province, City: g.City, WorldName: g.WorldName,
 				ProvinceMap: g.ProvinceMap, CityMap: g.CityMap, CoordSource: g.CoordSource}
-			mp.Name = placeName(g.Country, g.Province, g.City)
 			if g.Label != "" {
 				mp.Label, mp.Internal, mp.Name = g.Label, g.Private, g.Label
 			}
 			pts[key] = mp
+		}
+		if g.Label == "" {
+			// 同一地点的成员可能来自写法不同的数据源：展示名取更完整的写法，不随遍历顺序变化
+			if name := placeName(g.Country, g.Province, g.City); betterPlaceName(mp.Name, name) != mp.Name {
+				mp.Name, mp.Province, mp.City = name, g.Province, g.City
+			}
 		}
 		if g.CoordSource == "maxmind" || g.CoordSource == "ip-api" {
 			// 精确坐标优先：同一城市多个 IP 取精确坐标的均值
@@ -800,7 +905,12 @@ func (s *Store) MapData(minLevel model.Severity) *MapResult {
 		}
 		res.Points = append(res.Points, mp)
 	}
-	sort.Slice(res.Points, func(i, j int) bool { return res.Points[i].Attacks > res.Points[j].Attacks })
+	sort.Slice(res.Points, func(i, j int) bool {
+		if res.Points[i].Attacks != res.Points[j].Attacks {
+			return res.Points[i].Attacks > res.Points[j].Attacks
+		}
+		return res.Points[i].Key < res.Points[j].Key // 攻击次数相同时顺序固定：超出上限时每次截掉的是同一批
+	})
 	if len(res.Points) > 800 {
 		res.Points = res.Points[:800]
 	}
@@ -809,13 +919,16 @@ func (s *Store) MapData(minLevel model.Severity) *MapResult {
 	return res
 }
 
-// placeName 生成地点展示名，例如 "中国 广东省 深圳市"，省市相同（直辖市）时去重。
+// placeName 生成地点展示名，例如 "中国 广东省 深圳市"，省市相同（直辖市）时去重：
+// "北京市 / 北京市"、"北京 / 北京市"、"北京市 / 北京" 都只保留一个。
 func placeName(country, province, city string) string {
 	parts := []string{country}
 	for _, s := range []string{province, city} {
-		if s != "" && s != parts[len(parts)-1] && !strings.HasPrefix(s, parts[len(parts)-1]) {
-			parts = append(parts, s)
+		last := parts[len(parts)-1]
+		if s == "" || s == last || strings.HasPrefix(s, last) || s == strings.TrimSuffix(last, "市") {
+			continue
 		}
+		parts = append(parts, s)
 	}
 	return strings.TrimSpace(strings.Join(parts, " "))
 }

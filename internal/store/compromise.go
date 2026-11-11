@@ -258,6 +258,11 @@ func (s *Store) verifySuccess(ev *model.Event, hits []model.Hit) []model.Hit {
 		if h.Result != model.ResultSuccess {
 			continue
 		}
+		// 只复核能由响应判断成败的分类（注入、穿越、敏感文件、WebShell 等）。暴力破解的“成功”是登录接口返回了正常响应，
+		// 与接口基线一致恰恰说明登录成功；大量下载、破坏性攻击同样不能按响应大小判为未成功
+		if !risk.ResponseProvable(h.Category) {
+			continue
+		}
 		if h.Category == "敏感文件探测" || h.Category == "WebShell后门" {
 			// 敏感文件与 WebShell 以资源存在 / 交互成功为准，不按接口基线复核；但兜底页返回的 200（单页应用、统一错误页）不算
 			if s.surf.catchAll(host, normPath(ev.URI), ev.Bytes) {

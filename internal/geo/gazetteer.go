@@ -253,6 +253,54 @@ var provSuffix = strings.NewReplacer("特别行政区", "", "维吾尔自治区"
 
 func normProvince(s string) string { return provSuffix.Replace(strings.TrimSpace(s)) }
 
+// provinceOf 返回一组省、市名称在中国地图中的省级区域名；认不出来（如英文地名）时返回空。
+func (g *Gazetteer) provinceOf(province, city string) string {
+	if g == nil {
+		return ""
+	}
+	if p := g.provinces[normProvince(province)]; p != nil {
+		return p.Name
+	}
+	if p := g.provinces[normProvince(city)]; p != nil { // 直辖市：有的数据源只在城市字段给出“上海”
+		return p.Name
+	}
+	if c := normPlace(city); c != "" {
+		if p := g.provinceOfCity(c); p != nil {
+			return p.Name
+		}
+	}
+	return ""
+}
+
+// outsideProvince 判断一个坐标是否不属于省级区域 provMap（china.json 中的名称）：
+// 坐标来源给出的省、市能认出来时按名称比较；认不出来（在线库配置为英文等）时按到省中心的距离判断，
+// 超出该省的大致范围（省中心到最远地市中心的距离再加 150 公里，至少 200 公里）才算不属于。
+func (g *Gazetteer) outsideProvince(provMap, srcProvince, srcCity string, lat, lon float64) bool {
+	if g == nil || provMap == "" {
+		return false
+	}
+	if name := g.provinceOf(srcProvince, srcCity); name != "" {
+		return name != provMap
+	}
+	prov := g.provinces[normProvince(provMap)]
+	if prov == nil {
+		return false
+	}
+	radius := 0.0
+	for _, c := range prov.cities {
+		radius = math.Max(radius, distKM(prov.CP.Lat, prov.CP.Lon, c.CP.Lat, c.CP.Lon))
+	}
+	return distKM(prov.CP.Lat, prov.CP.Lon, lat, lon) > math.Max(radius+150, 200)
+}
+
+// distKM 返回两点间的大圆距离（公里）。
+func distKM(lat1, lon1, lat2, lon2 float64) float64 {
+	const rad = math.Pi / 180
+	dLat, dLon := (lat2-lat1)*rad, (lon2-lon1)*rad
+	a := math.Sin(dLat/2)*math.Sin(dLat/2) + math.Cos(lat1*rad)*math.Cos(lat2*rad)*math.Sin(dLon/2)*math.Sin(dLon/2)
+	return 2 * 6371 * math.Asin(math.Min(1, math.Sqrt(a)))
+}
+
 // ChinaMaps 返回省级地图名称 → 地图文件名，供前端下钻加载。
 func (g *Gazetteer) ChinaMaps() map[string]string {
 	out := map[string]string{}

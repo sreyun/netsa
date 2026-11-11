@@ -93,7 +93,7 @@ func (r *Robot) Validate(strict bool) error {
 	}
 	u, err := url.Parse(r.URL)
 	if err != nil || u.Host == "" || (u.Scheme != "https" && u.Scheme != "http") {
-		return errors.New("Webhook 地址无效")
+		return errors.New("无效的 Webhook 地址")
 	}
 	if strict {
 		ok := false

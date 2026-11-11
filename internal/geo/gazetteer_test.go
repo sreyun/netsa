@@ -91,3 +91,63 @@ func TestCoordFollowsChosenCity(t *testing.T) {
 		t.Fatalf("坐标应跟随采信的城市(江门): %+v", info)
 	}
 }
+
+// 直辖市在地名库中是省级：坐标来源的省份与采信的省份不一致时，坐标同样要跟随采信的地点。
+// 生产环境中归属北京、在线库坐标在上海 / 广州的云主机地址把“北京”的标注拉到了山东。
+func TestCoordFollowsChosenProvince(t *testing.T) {
+	gaz := loadGaz(t)
+	lookup := func(local, online *SourceResult) *Info {
+		t.Helper()
+		ps := []Provider{fakeProvider{"ip2region", map[string]*SourceResult{"1.0.8.1": local}}}
+		if online != nil {
+			ps = append(ps, fakeProvider{"ip-api", map[string]*SourceResult{"1.0.8.1": online}})
+		}
+		return NewResolver(Options{Providers: ps, Gazetteer: gaz}).Lookup("1.0.8.1")
+	}
+	beijing := &SourceResult{Source: "ip2region", Country: "中国", CountryCode: "CN", Province: "北京市", City: "北京市"}
+
+	// 在线库说在上海：改用北京的中心点
+	info := lookup(beijing, &SourceResult{Source: "ip-api", Country: "中国", CountryCode: "CN", Province: "上海市", City: "上海", Lat: 31.2222, Lon: 121.4581})
+	if info.ProvinceMap != "北京" || info.CoordSource != "province" || !near(info.Lat, 39.9, 0.5) || !near(info.Lon, 116.4, 0.5) {
+		t.Fatalf("归属北京、坐标在上海：应改用北京的中心点，得到 %+v", info)
+	}
+	// 在线库只在城市字段给出直辖市名（广东 / 广州市 之外的写法）
+	info = lookup(beijing, &SourceResult{Source: "ip-api", Country: "中国", CountryCode: "CN", Province: "广东", City: "广州市", Lat: 23.1181, Lon: 113.2539})
+	if info.CoordSource != "province" || !near(info.Lat, 39.9, 0.5) {
+		t.Fatalf("归属北京、坐标在广州：应改用北京的中心点，得到 %+v", info)
+	}
+	// 在线库同样说在北京：保留它的精确坐标
+	info = lookup(beijing, &SourceResult{Source: "ip-api", Country: "中国", CountryCode: "CN", Province: "北京市", City: "北京", Lat: 39.911, Lon: 116.395})
+	if info.CoordSource != "ip-api" || info.Lat != 39.911 || info.Lon != 116.395 {
+		t.Fatalf("两个数据源都在北京：应保留精确坐标，得到 %+v", info)
+	}
+	// 在线库配置为英文：地名认不出来，按到省中心的距离判断
+	info = lookup(beijing, &SourceResult{Source: "ip-api", Country: "China", CountryCode: "CN", Province: "Shanghai", City: "Shanghai", Lat: 31.2222, Lon: 121.4581})
+	if info.CoordSource != "province" || !near(info.Lat, 39.9, 0.5) {
+		t.Fatalf("英文地名、坐标远离北京：应改用北京的中心点，得到 %+v", info)
+	}
+	info = lookup(beijing, &SourceResult{Source: "ip-api", Country: "China", CountryCode: "CN", Province: "Beijing", City: "Beijing", Lat: 39.911, Lon: 116.395})
+	if info.CoordSource != "ip-api" || info.Lat != 39.911 {
+		t.Fatalf("英文地名、坐标就在北京：应保留精确坐标，得到 %+v", info)
+	}
+	// 采信的城市地名库里没有（只能定位到省）、在线库在同一个省：保留精确坐标
+	hunan := &SourceResult{Source: "ip2region", Country: "中国", CountryCode: "CN", Province: "湖南省", City: "某不存在的地名"}
+	info = lookup(hunan, &SourceResult{Source: "ip-api", Country: "中国", CountryCode: "CN", Province: "湖南", City: "长沙", Lat: 28.1142, Lon: 112.983})
+	if info.ProvinceMap != "湖南" || info.CoordSource != "ip-api" || info.Lat != 28.1142 {
+		t.Fatalf("同一个省内：应保留精确坐标，得到 %+v", info)
+	}
+	// 同一个省、在线库在另一个省：改用省中心
+	info = lookup(hunan, &SourceResult{Source: "ip-api", Country: "中国", CountryCode: "CN", Province: "广东", City: "深圳", Lat: 22.547, Lon: 114.0859})
+	if info.CoordSource != "province" || !near(info.Lat, 27.6, 1.2) {
+		t.Fatalf("归属湖南、坐标在深圳：应改用湖南的中心点，得到 %+v", info)
+	}
+}
+
+func TestDistKM(t *testing.T) {
+	if d := distKM(39.9, 116.4, 31.23, 121.47); d < 1000 || d > 1150 {
+		t.Fatalf("北京到上海约 1070 公里，得到 %.0f", d)
+	}
+	if d := distKM(31.23, 121.47, 31.23, 121.47); d != 0 {
+		t.Fatalf("同一点距离应为 0，得到 %v", d)
+	}
+}

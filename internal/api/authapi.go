@@ -40,6 +40,10 @@ var mustChangeAllowed = map[string]bool{"/api/auth/session": true, "/api/auth/pa
 // mustEnrollAllowed 是策略要求启用双因素认证、尚未绑定时仍可访问的接口。
 var mustEnrollAllowed = map[string]bool{"/api/auth/session": true, "/api/auth/logout": true, "/api/auth/2fa/setup": true, "/api/auth/2fa/enable": true}
 
+// credentialPaths 是修改本账号凭据的接口：只能在交互式登录的会话里操作。API 令牌只代表一组受限的权限，
+// 不能用来给所属账号绑定 / 关闭身份验证器或修改密码（这些接口会换发完整权限的登录会话）。
+var credentialPaths = map[string]bool{"/api/auth/password": true, "/api/auth/2fa/setup": true, "/api/auth/2fa/enable": true, "/api/auth/2fa/disable": true}
+
 // selfService 是任何已登录账号都可以执行的写操作（只作用于自己的账号）。
 var selfService = map[string]bool{
 	"/api/auth/login": true, "/api/auth/login/2fa": true, "/api/auth/logout": true, "/api/auth/password": true,
@@ -127,8 +131,14 @@ func (s *Server) authenticate(next http.Handler) http.Handler {
 			writeErrorCode(w, http.StatusForbidden, "请先修改初始密码", "must_change_password")
 			return
 		}
-		if sess.MustEnroll && strings.HasPrefix(path, "/api/") && !mustEnrollAllowed[path] {
+		// 两道检查按顺序生效：先改初始密码，改完（换发的新会话不再要求改密）再绑定身份验证器。
+		// 同时检查会互相卡死：改密接口被绑定检查拦住、绑定接口被改密检查拦住
+		if !sess.MustChange && sess.MustEnroll && strings.HasPrefix(path, "/api/") && !mustEnrollAllowed[path] {
 			writeErrorCode(w, http.StatusForbidden, "安全策略要求启用双因素认证，请先绑定身份验证器", "must_enroll_2fa")
+			return
+		}
+		if credentialPaths[path] && sess.Via != "session" {
+			writeErrorCode(w, http.StatusForbidden, "修改密码与双因素认证只能在登录页面登录后操作，不能使用 API 令牌或 HTTP Basic 认证", "interactive_only")
 			return
 		}
 		// 监控令牌只能读取 /metrics
@@ -208,7 +218,9 @@ func (s *Server) releaseHash() { <-s.hashSem }
 
 func (s *Server) clientIP(r *http.Request) string {
 	if s.Pipeline != nil && s.Pipeline.RealIP != nil {
-		return s.Pipeline.RealIP.ClientIP(r.RemoteAddr, r.Header.Get("X-Forwarded-For"))
+		// 同名请求头的多行等价于一行逗号分隔的列表（RFC 9110）：HAProxy 等代理把自己的值另起一行追加，
+		// 只取第一行会采信客户端自己写的值（绕过来源白名单与登录锁定、伪造审计中的地址）
+		return s.Pipeline.RealIP.ClientIP(r.RemoteAddr, strings.Join(r.Header.Values("X-Forwarded-For"), ","))
 	}
 	if host, _, err := net.SplitHostPort(r.RemoteAddr); err == nil {
 		return host
@@ -365,7 +377,7 @@ func (s *Server) auth2FAEnable(w http.ResponseWriter, r *http.Request) {
 		writeErrorCode(w, http.StatusBadRequest, err.Error(), "bad_request")
 		return
 	}
-	if ns, _, ok := s.Auth.Verify(token); ok {
+	if ns, _, ok := s.Auth.Verify(token); ok && sessionOf(r).Via == "session" { // 不把令牌、Basic 凭据换成登录会话
 		s.setCookie(w, r, token, ns.Expires)
 	}
 	writeJSON(w, map[string]any{"ok": true, "recovery": recovery})
@@ -391,7 +403,7 @@ func (s *Server) auth2FADisable(w http.ResponseWriter, r *http.Request) {
 		writeErrorCode(w, http.StatusBadRequest, err.Error(), "bad_request")
 		return
 	}
-	if ns, _, ok := s.Auth.Verify(token); ok {
+	if ns, _, ok := s.Auth.Verify(token); ok && sessionOf(r).Via == "session" { // 不把令牌、Basic 凭据换成登录会话
 		s.setCookie(w, r, token, ns.Expires)
 	}
 	writeJSON(w, map[string]any{"ok": true})
@@ -491,7 +503,7 @@ func (s *Server) authPassword(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// 修改密码后其他会话全部失效，当前会话换发新令牌
-	if ns, _, ok := s.Auth.Verify(token); ok {
+	if ns, _, ok := s.Auth.Verify(token); ok && sessionOf(r).Via == "session" { // 不把令牌、Basic 凭据换成登录会话
 		s.setCookie(w, r, token, ns.Expires)
 	}
 	writeJSON(w, map[string]any{"ok": true})

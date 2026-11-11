@@ -45,10 +45,11 @@ func ParseWeekly(s string) (day time.Weekday, hm string, ok bool, err error) {
 	if !known {
 		return 0, "", false, fmt.Errorf("report.weekly 的星期无效（mon ~ sun 或 周一 ~ 周日）: %q", s)
 	}
-	if _, err := time.Parse("15:04", f[1]); err != nil {
+	t, err := time.Parse("15:04", f[1])
+	if err != nil {
 		return 0, "", false, fmt.Errorf("report.weekly 时间格式应为 HH:MM: %q", s)
 	}
-	return d, f[1], true, nil
+	return d, t.Format("15:04"), true, nil // 规范为两位小时：9:00 → 09:00，调度按 HH:MM 比较
 }
 
 // ParseMonthly 解析月报发送时间（如 "1 09:00"，日期为 1 ~ 28），off 或空返回 ok=false。
@@ -65,10 +66,11 @@ func ParseMonthly(s string) (day int, hm string, ok bool, err error) {
 	if err != nil || d < 1 || d > 28 {
 		return 0, "", false, fmt.Errorf("report.monthly 的日期应为 1 ~ 28: %q", s)
 	}
-	if _, err := time.Parse("15:04", f[1]); err != nil {
+	t, err := time.Parse("15:04", f[1])
+	if err != nil {
 		return 0, "", false, fmt.Errorf("report.monthly 时间格式应为 HH:MM: %q", s)
 	}
-	return d, f[1], true, nil
+	return d, t.Format("15:04"), true, nil
 }
 
 func (c *Config) validateReport() error {

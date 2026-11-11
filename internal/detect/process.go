@@ -69,6 +69,11 @@ func procName(p string) string {
 		p = p[i+1:]
 	}
 	p = strings.TrimSuffix(strings.TrimSuffix(p, ".exe"), ".com")
+	// 名称本身就带数字的进程（rundll32、regsvr32、apache2、net1）按原名识别：去掉数字后 rundll32 变成 rundll，
+	// 针对它们的系统工具滥用、Web 进程派生与外连规则全部失效
+	if webServers[p] || shellTools[p] || suspNetProc[p] {
+		return p
+	}
 	if t := strings.TrimRight(strings.TrimRight(p, "0123456789."), "-_"); t != "" {
 		p = t
 	}

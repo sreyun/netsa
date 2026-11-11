@@ -4,6 +4,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 )
@@ -51,5 +52,44 @@ func TestRespCacheLRU(t *testing.T) {
 	}
 	if hits == 0 || misses == 0 {
 		t.Fatalf("命中计数缺失: hits=%d misses=%d", hits, misses)
+	}
+}
+
+// 内存上限：响应体总量超过上限时从最久未使用的一端淘汰；太大的响应不缓存；过期的条目新建键时被清掉。
+func TestRespCacheByteBudget(t *testing.T) {
+	rc := newRespCache()
+	rc.maxBytes, rc.maxEntry = 1000, 600
+	size := map[string]int{}
+	h := rc.wrap(time.Minute, func(w http.ResponseWriter, r *http.Request) {
+		io.WriteString(w, strings.Repeat("x", size[r.URL.Query().Get("k")]))
+	})
+	get := func(k string) {
+		h(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/api/x?k="+k, nil))
+	}
+	size["a"], size["b"], size["c"], size["big"] = 400, 400, 400, 700
+	get("a")
+	get("b")
+	get("c") // 1200 > 1000：淘汰最久未使用的 a
+	if n, b := len(rc.items), rc.size(); n != 2 || b != 800 {
+		t.Fatalf("超出总量应淘汰最旧的条目: %d 个 %d 字节", n, b)
+	}
+	get("big") // 超过单个上限：不缓存
+	if rc.size() != 800 {
+		t.Fatalf("太大的响应不应计入缓存: %d", rc.size())
+	}
+	// 过期的条目在新建键时清掉
+	ttl := rc.wrap(time.Millisecond, func(w http.ResponseWriter, r *http.Request) { io.WriteString(w, "yy") })
+
+	for _, k := range []string{"p", "q"} {
+		ttl(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/api/y?k="+k, nil))
+	}
+	time.Sleep(5 * time.Millisecond)
+	get("d")
+	rc.mu.Lock()
+	defer rc.mu.Unlock()
+	for k := range rc.items {
+		if strings.HasPrefix(k, "/api/y") {
+			t.Fatalf("过期的条目应被清掉: %s", k)
+		}
 	}
 }

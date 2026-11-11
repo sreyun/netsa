@@ -26,28 +26,29 @@ var ErrSnapshotTooNew = errors.New("快照由更新版本的程序写入，当�
 
 // snapshotHead 是快照中除画像以外的部分。
 type snapshotHead struct {
-	Version    int                  `json:"version"`
-	SavedAt    time.Time            `json:"saved_at"`
-	Alerts     []*model.Alert       `json:"alerts"`
-	NextID     uint64               `json:"next_id"`
-	Buckets    map[int64]*Bucket    `json:"buckets"`
-	Totals     Totals               `json:"totals"`
-	Categories map[string]int64     `json:"categories"`
-	Rules      map[string]int64     `json:"rules"`
-	RuleNames  map[string]string    `json:"rule_names"`
-	RuleMeta   map[string]ruleMeta  `json:"rule_meta,omitempty"`
-	Outbound   []*OutboundDst       `json:"outbound,omitempty"`
-	SevCount   [5]int64             `json:"sev_count"`
-	Phases     map[string]int64     `json:"phases"`
-	Results    map[string]int64     `json:"results"`
-	MinTime    time.Time            `json:"min_time"`
-	MaxTime    time.Time            `json:"max_time"`
-	Surface    *surface             `json:"surface"`
-	Scores     []ScorePoint         `json:"score_history,omitempty"`
-	Incidents  map[uint64]*Incident `json:"incidents,omitempty"`
-	NextInc    uint64               `json:"next_incident,omitempty"`
-	Days       map[string]*DayStat  `json:"days,omitempty"`
-	Chains     chainList            `json:"asset_chains,omitempty"` // 资产攻击链路
+	Version    int                   `json:"version"`
+	SavedAt    time.Time             `json:"saved_at"`
+	Alerts     []*model.Alert        `json:"alerts"`
+	NextID     uint64                `json:"next_id"`
+	Buckets    map[int64]*Bucket     `json:"buckets"`
+	Totals     Totals                `json:"totals"`
+	Categories map[string]int64      `json:"categories"`
+	Rules      map[string]int64      `json:"rules"`
+	RuleNames  map[string]string     `json:"rule_names"`
+	RuleMeta   map[string]ruleMeta   `json:"rule_meta,omitempty"`
+	RuleTally  map[string]*ruleTally `json:"rule_tally,omitempty"`
+	Outbound   []*OutboundDst        `json:"outbound,omitempty"`
+	SevCount   [5]int64              `json:"sev_count"`
+	Phases     map[string]int64      `json:"phases"`
+	Results    map[string]int64      `json:"results"`
+	MinTime    time.Time             `json:"min_time"`
+	MaxTime    time.Time             `json:"max_time"`
+	Surface    *surface              `json:"surface"`
+	Scores     []ScorePoint          `json:"score_history,omitempty"`
+	Incidents  map[uint64]*Incident  `json:"incidents,omitempty"`
+	NextInc    uint64                `json:"next_incident,omitempty"`
+	Days       map[string]*DayStat   `json:"days,omitempty"`
+	Chains     chainList             `json:"asset_chains,omitempty"` // 资产攻击链路
 }
 
 type snapshot struct {
@@ -75,6 +76,11 @@ func (s *Store) Save(path string) error {
 		return err
 	}
 	err = s.writeSnapshot(f, strings.HasSuffix(path, ".gz"))
+	if err == nil {
+		// 先落盘再改名：随后会按这份快照整理已落盘的处置记录日志，断电时快照若只改了名、内容还没写回，
+		// 快照是残缺的、日志里对应的处置记录又已丢弃
+		err = f.Sync()
+	}
 	if cerr := f.Close(); err == nil {
 		err = cerr
 	}
@@ -104,7 +110,7 @@ func (s *Store) writeSnapshot(f io.Writer, compress bool) error {
 	s.mu.RLock()
 	head := snapshotHead{
 		Version: snapshotVersion, SavedAt: time.Now(), NextID: s.nextID, Buckets: s.buckets, Totals: s.totals,
-		Categories: s.categories, Rules: s.rules, RuleNames: s.ruleNames, RuleMeta: s.ruleMeta, SevCount: s.sevCount, Phases: s.phases,
+		Categories: s.categories, Rules: s.rules, RuleNames: s.ruleNames, RuleMeta: s.ruleMeta, RuleTally: s.tally, SevCount: s.sevCount, Phases: s.phases,
 		Results: s.results, MinTime: s.minTime, MaxTime: s.maxTime, Surface: s.surf, Scores: s.scores, Incidents: s.incidents, NextInc: s.nextInc, Days: s.days, Chains: s.chainTracks(), Outbound: s.outboundList(),
 	}
 	n := len(s.alerts)
@@ -300,6 +306,10 @@ func (s *Store) Load(path string) error {
 	if snap.RuleMeta != nil {
 		s.ruleMeta = snap.RuleMeta
 	}
+	if snap.RuleTally != nil {
+		s.tally = snap.RuleTally
+	}
+	s.retracted = map[string]bool{}
 	// 旧版本快照没有规则的攻击类型与阶段：按保留的告警补齐（停用的误报规则据此从评分与排行中剔除）
 	for _, a := range s.alerts {
 		if a != nil && a.RuleID != "" {
@@ -312,6 +322,9 @@ func (s *Store) Load(path string) error {
 		for _, p := range s.ips {
 			if p.Attacks > 0 {
 				p.recompute(s.excluded, s.ruleMeta)
+				if p.retractedOnly = retractedOnlyOf(p, s.excluded); p.retractedOnly {
+					s.retracted[p.IP] = true
+				}
 			}
 		}
 		s.agg.rebuild(s.ips)
@@ -319,6 +332,11 @@ func (s *Store) Load(path string) error {
 	s.sevCount = snap.SevCount
 	s.minTime, s.maxTime = snap.MinTime, snap.MaxTime
 	if sf := snap.Surface; sf != nil {
+		for p := range sf.Ports { // 旧版本没有限制端口范围：清理越界的键
+			if p <= 0 || p > 65535 {
+				delete(sf.Ports, p)
+			}
+		}
 		def := newSurface()
 		if sf.Endpoints == nil {
 			sf.Endpoints = def.Endpoints

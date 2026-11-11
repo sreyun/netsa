@@ -474,11 +474,16 @@ func (s *Server) alerts(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) sources(w http.ResponseWriter, r *http.Request) {
+	// 发送端白名单可以在界面中开启：这里给出实际生效的状态，而不是配置文件里的值（否则数据源页面显示“未开启”）
+	syslog := s.Cfg.Syslog
+	if s.Ingest != nil && s.Ingest.Senders != nil {
+		syslog.Allowlist = s.Ingest.Senders.Allowlist()
+	}
 	var ms runtime.MemStats
 	runtime.ReadMemStats(&ms)
 	writeJSON(w, map[string]any{
 		"sources": s.Ingest.Stats(), "processed": s.Pipeline.Processed(), "geo_providers": s.Geo.ProviderNames(),
-		"geo_pending": s.Geo.QueueLen(), "rules": len(s.engine().Rules()), "syslog": s.Cfg.Syslog, "silence": silenceText(s.Ingest.DefaultSilence),
+		"geo_pending": s.Geo.QueueLen(), "rules": len(s.engine().Rules()), "syslog": syslog, "silence": silenceText(s.Ingest.DefaultSilence),
 		"runtime": map[string]any{
 			"uptime": time.Since(s.started).Round(time.Second).String(), "goroutines": runtime.NumGoroutine(),
 			"heap_mb": ms.HeapAlloc >> 20, "sys_mb": ms.Sys >> 20, "go": runtime.Version(),
@@ -488,18 +493,24 @@ func (s *Server) sources(w http.ResponseWriter, r *http.Request) {
 
 // blocklist 导出封禁列表：txt / nginx / iptables / ipset / firewalld / windows / csv。
 func (s *Server) blocklist(w http.ResponseWriter, r *http.Request) {
-	lvl := r.URL.Query().Get("level")
-	if lvl == "" {
-		lvl = "high"
+	// 等级严格解析：写错的等级（hihg、3）不能被当成“全部”导出，原始参数也不写进生成的脚本（可注入命令）
+	sev := model.SevHigh
+	if v := r.URL.Query().Get("level"); v != "" {
+		var ok bool
+		if sev, ok = model.TryParseSeverity(v); !ok {
+			writeError(w, http.StatusBadRequest, "level 应为 low / medium / high / critical")
+			return
+		}
 	}
-	list := s.Store.Blocklist(model.ParseSeverity(lvl))
+	lvl := sev.String()
+	list := s.Store.Blocklist(sev)
 	format := r.URL.Query().Get("format")
-	s.audit(r, "导出封禁列表", "格式 "+format+" 等级>="+lvl+" 共 "+strconv.Itoa(len(list))+" 个 IP", nil)
 	ext := map[string]string{"nginx": "conf", "csv": "csv", "windows": "bat", "iptables": "sh", "ipset": "sh", "firewalld": "sh",
 		"apisix": "json", "kong": "json"}[format]
 	if ext == "" {
 		format, ext = "txt", "txt"
 	}
+	s.audit(r, "导出封禁列表", "格式 "+format+" 等级>="+lvl+" 共 "+strconv.Itoa(len(list))+" 个 IP", nil)
 	w.Header().Set("Content-Disposition", "attachment; filename=netsa-blocklist-"+lvl+"."+ext)
 
 	if ext == "json" {

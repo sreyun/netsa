@@ -3,6 +3,7 @@ package detect
 import (
 	_ "embed"
 	"regexp"
+	"slices"
 	"strings"
 
 	"netsa/internal/model"
@@ -27,6 +28,8 @@ type vulnSig struct {
 	id, vendor, sev, method, path, ref, vtype string
 	re                                        *regexp.Regexp // 路径含通配符时使用
 	query                                     []string       // 必须出现的参数名，或 名=值
+	trim                                      string         // 去掉末尾 / 的路径（精确比较用，加载时算好，匹配时不再拼接字符串）
+	prefix                                    string         // 通配签名中第一个 * 之前的字面前缀（先用它快速排除，再执行正则）
 }
 
 // VulnVendor 是签名覆盖的一个产品。
@@ -59,8 +62,10 @@ func loadVulnSigs(data string) *vulnIndex {
 			if f[6] != "" {
 				s.query = strings.Split(f[6], "&")
 			}
-			if strings.Contains(s.path, "*") {
-				s.re = regexp.MustCompile("^" + strings.ReplaceAll(regexp.QuoteMeta(strings.TrimSuffix(s.path, "/")), `\*`, `[^?]*`) + "/?$")
+			s.trim = strings.TrimSuffix(s.path, "/")
+			if i := strings.IndexByte(s.trim, '*'); i >= 0 {
+				s.re = regexp.MustCompile("^" + strings.ReplaceAll(regexp.QuoteMeta(s.trim), `\*`, `[^?]*`) + "/?$")
+				s.prefix = s.trim[:i]
 			}
 			key := ""
 			for _, seg := range strings.Split(s.path, "/") {
@@ -131,6 +136,9 @@ func matchVuln(method, path, rawURI string) *vulnSig {
 	p := vulnPath(path)
 	var ps []Param
 	parsed := false
+	// 同一段在路径里重复出现时只查一次，每个签名对同一条路径只判断一次。否则 /attachment 重复几百次的
+	// 8 KB 请求要把同一批签名对整条路径判断几百次（平方级，单条约 0.4 秒，可拖垮检测流水线）
+	var seen []string
 	rest := p
 	for rest != "" {
 		seg := rest
@@ -142,7 +150,12 @@ func matchVuln(method, path, rawURI string) *vulnSig {
 		if len(seg) < 3 {
 			continue
 		}
-		for _, s := range vulnDB.byKey[seg] {
+		cands := vulnDB.byKey[seg]
+		if len(cands) == 0 || slices.Contains(seen, seg) {
+			continue
+		}
+		seen = append(seen, seg)
+		for _, s := range cands {
 			if !s.matchPath(p) {
 				continue
 			}
@@ -160,9 +173,9 @@ func matchVuln(method, path, rawURI string) *vulnSig {
 // matchPath 不比较请求方法：扫描器常用 GET 确认 POST 接口是否存在（如 htmlofficeservlet），同样是在探测漏洞接口。
 func (s *vulnSig) matchPath(p string) bool {
 	if s.re != nil {
-		return s.re.MatchString(p)
+		return strings.HasPrefix(p, s.prefix) && s.re.MatchString(p)
 	}
-	return p == s.path || p+"/" == s.path || p == s.path+"/"
+	return strings.TrimSuffix(p, "/") == s.trim
 }
 
 // matchQuery 判断签名要求的参数都出现了（need 为 名 或 名=值，值不区分大小写）。

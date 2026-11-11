@@ -11,7 +11,7 @@
 | ip2region（已内置） | 国内地址精确到城市 + 运营商；境外到省/州 | `data/ip2region_v4.xdb`、`data/ip2region_v6.xdb`，可从 ip2region 项目更新 |
 | 区划地名库（已内置） | 只有地名时换算为城市/省/国家中心坐标，离线也能在地图上落到具体城市 | 来自内置的 ECharts 世界/中国/省级地图数据 |
 | MaxMind GeoLite2 | 经纬度 + 精度半径 + ASN，境外地址更准 | maxmind.com 免费注册下载 `GeoLite2-City.mmdb`、`GeoLite2-ASN.mmdb` 放入 `data/`（容器挂载到 `/app/data/`） |
-| ip-api 在线库 | 经纬度、ASN、代理/IDC/移动网络标记、反向解析 | `geo.online.enabled`，只对达到 `enrich_level` 的攻击 IP 查询，失败自动重试 |
+| ip-api 在线库 | 经纬度、ASN、代理/IDC/移动网络标记、反向解析 | `geo.online.enabled`，只对达到 `enrich_level` 的攻击 IP 与内部对外的外部目标查询；查询失败或没有结果的每 10 分钟起按间隔加倍重试（最长 6 小时），不必等等级再次提升 |
 | 反向 DNS | 识别 Shodan/Censys 等测绘机构、搜索引擎爬虫 | `geo.reverse_dns` |
 | RDAP/WHOIS | 网段归属组织、CIDR、滥用投诉邮箱 | IP 详情页按需查询 |
 

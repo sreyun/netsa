@@ -595,9 +595,11 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("server.username 与 server.password 需同时设置")
 	}
 	if t := strings.TrimSpace(c.Alert.ReportTime); t != "" && t != "off" {
-		if _, err := time.Parse("15:04", t); err != nil {
+		tt, err := time.Parse("15:04", t)
+		if err != nil {
 			return fmt.Errorf("alert.report_time 格式应为 HH:MM（如 09:00），或 off 关闭日报: %q", t)
 		}
+		c.Alert.ReportTime = tt.Format("15:04") // 规范为两位小时：9:00 → 09:00，调度按 HH:MM 比较
 	}
 	for _, n := range c.Server.AllowNetworks {
 		if _, err := ParseNetwork(n); err != nil {

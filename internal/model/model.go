@@ -324,7 +324,8 @@ func (e *Event) target() string {
 	if dst == "" {
 		dst = "*"
 	}
-	if e.DstPort > 0 {
+	// ICMP 没有端口：部分设备把类型 / 代码（如回显请求 8×256=2048）写在端口字段里，按端口显示会成为“2048/icmp”
+	if e.DstPort > 0 && !strings.HasPrefix(e.Proto, "icmp") {
 		return dst + ":" + strconv.Itoa(e.DstPort) + "/" + e.Proto
 	}
 	return dst + "/" + e.Proto

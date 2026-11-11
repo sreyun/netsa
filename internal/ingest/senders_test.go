@@ -158,9 +158,15 @@ func TestAllowlistGuards(t *testing.T) {
 	st.lines.Add(5)
 	st.parsed.Add(5)
 	s.admit(addr("192.0.2.11"), ProtoTCP, "syslog-tcp") // 只连接、没有可解析的日志：不自动登记
+	if s.Allowlist() {
+		t.Fatal("还没有开启白名单")
+	}
 	n, err := s.SetAllowlist(true, true, "admin")
 	if err != nil || n != 1 {
 		t.Fatalf("自动登记活跃发送端: %d %v", n, err)
+	}
+	if !s.Allowlist() || (*Senders)(nil).Allowlist() {
+		t.Fatal("界面中开启后应报告为已生效；未启用 syslog 时为未开启")
 	}
 	if _, ok := s.admit(addr("192.0.2.10"), ProtoTCP, "syslog-tcp"); !ok {
 		t.Fatal("自动登记的发送端应接收")
@@ -172,6 +178,9 @@ func TestAllowlistGuards(t *testing.T) {
 	f, _ := NewSenders(config.SyslogConfig{Allowlist: true, Senders: []config.SyslogSender{{CIDR: "10.0.0.0/8"}}}, "", 0)
 	if _, err := f.SetAllowlist(false, false, "admin"); err != ErrAllowForced {
 		t.Fatalf("强制开启: %v", err)
+	}
+	if !f.Allowlist() {
+		t.Fatal("配置文件开启时应报告为已生效")
 	}
 	if !f.Report().Forced {
 		t.Fatal("应标记为配置文件强制开启")

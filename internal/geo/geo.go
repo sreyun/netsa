@@ -91,6 +91,26 @@ func (i *Info) Location() string {
 	return strings.Join(parts, " ")
 }
 
+// PlaceKey 返回用于把同一地点的地址聚合到一起的省、市名称。
+// 国内地点按地名库归一：各数据源的写法不同（“广东省 / 广州市”与“广东 / 广州市”，直辖市“北京市 / 北京市”与“北京市 / 北京”），
+// 按原始写法聚合会把同一个地点拆成几个；地名库里没有的城市保留去掉后缀的名称。境外地点沿用原始名称。
+func (i *Info) PlaceKey() (province, city string) {
+	if i == nil {
+		return "", ""
+	}
+	if i.ProvinceMap == "" {
+		return i.Province, i.City
+	}
+	if i.CityMap != "" {
+		return i.ProvinceMap, i.CityMap
+	}
+	c := normPlace(i.City)
+	if c == normPlace(i.ProvinceMap) || c == normPlace(i.Province) { // 直辖市：城市就是省级本身
+		c = ""
+	}
+	return i.ProvinceMap, c
+}
+
 // Provider 是离线定位数据源。
 type Provider interface {
 	Name() string
@@ -116,6 +136,11 @@ type entry struct {
 	rdns     string
 	enriched bool
 	info     *Info
+	// 在线定位的重试状态：已发起的次数与最近一次发起的时间（没有结果时按 onlineBackoff 的间隔重试）；
+	// rdnsDone 表示反向解析已经做过（只做一次）
+	onlineTries uint8
+	onlineAt    time.Time
+	rdnsDone    bool
 }
 
 // Resolver 负责缓存与多源融合。Lookup 只查询离线库（同步、微秒级），
@@ -176,27 +201,31 @@ func (r *Resolver) Gazetteer() *Gazetteer { return r.opt.Gazetteer }
 // Start 启动在线查询与反向 DNS 后台任务。
 func (r *Resolver) Start(ctx context.Context) {
 	if r.opt.Online != nil {
-		go r.opt.Online.run(ctx, r.onlineQ, func(res map[string]*SourceResult, batch []string, err error) {
-			for _, ip := range batch {
-				if err != nil {
-					r.fail(ip)
-					continue
-				}
-				if sr := res[ip]; sr != nil {
-					r.mu.Lock()
-					if e := r.cache[ip]; e != nil && !e.private { // 查询期间被划入内网：结果不再适用
-						e.online = sr
-					}
-					r.mu.Unlock()
-				}
-				r.finish(ip)
-			}
-		})
+		go r.opt.Online.run(ctx, r.onlineQ, r.onlineDone)
 	}
 	if r.opt.ReverseDNS {
 		for i := 0; i < 4; i++ {
 			go r.rdnsWorker(ctx)
 		}
+	}
+}
+
+// onlineDone 处理一批在线定位的结果：err 非空表示整批失败（之后按退避间隔重试）；
+// 接口没有返回的地址同样保持“没有在线结果”，之后可以重试。
+func (r *Resolver) onlineDone(res map[string]*SourceResult, batch []string, err error) {
+	for _, ip := range batch {
+		if err != nil {
+			r.fail(ip)
+			continue
+		}
+		if sr := res[ip]; sr != nil {
+			r.mu.Lock()
+			if e := r.cache[ip]; e != nil && !e.private { // 查询期间被划入内网：结果不再适用
+				e.online = sr
+			}
+			r.mu.Unlock()
+		}
+		r.finish(ip)
 	}
 }
 
@@ -250,7 +279,7 @@ func (r *Resolver) finish(ip string) {
 	}
 }
 
-// fail 处理异步任务失败（网络错误、队列已满），清除标记以便该 IP 下次升级时重试。
+// fail 处理异步任务失败（网络错误、接口限流、队列已满）：标记为尚未完成溯源，之后调用 Enrich 时按退避间隔重试。
 func (r *Resolver) fail(ip string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -312,43 +341,95 @@ func (r *Resolver) lookupLocal(addr netip.Addr, nonPublic bool) []SourceResult {
 	return out
 }
 
-// Enrich 将 IP 加入在线查询与 rDNS 队列；成功后不再重复，失败可在下次调用时重试。
-// 调用前需先 Lookup（由画像创建时完成）。
+// 在线定位没有结果时（网络错误、接口限流、队列已满，或接口没有返回该地址）的重试间隔：
+// 10 分钟起逐次加倍，最长 6 小时。此前失败的地址只有等级再次提升才会重试，等级不再变化的攻击源
+// 一直停在离线库的结果上：境外地址只有国家级坐标，在地图上堆在国家中心。
+func onlineBackoff(tries uint8) time.Duration {
+	if tries == 0 {
+		return 0
+	}
+	return min(10*time.Minute<<min(tries-1, 6), 6*time.Hour)
+}
+
+// Enrich 将 IP 加入在线查询与 rDNS 队列。反向解析只做一次；在线定位拿到结果后不再重复，
+// 没有结果的按 onlineBackoff 的间隔在之后的调用中重试（调用方可以放心地重复调用）。
+// 缓存中没有该地址时先用离线库定位。
 func (r *Resolver) Enrich(ip string) {
 	addr, err := netip.ParseAddr(ip)
 	if err != nil || isPrivate(addr.Unmap()) {
 		return
 	}
-	n := 0
-	if r.opt.Online != nil {
-		n++
+	if r.opt.Online == nil && !r.opt.ReverseDNS {
+		return
 	}
-	if r.opt.ReverseDNS {
-		n++
-	}
+	now := time.Now()
 	r.mu.Lock()
 	e := r.cache[ip]
-	if n == 0 || e == nil || e.enriched || r.tasks[ip] > 0 {
+	if e == nil {
+		r.mu.Unlock()
+		r.Lookup(ip)
+		r.mu.Lock()
+		e = r.cache[ip]
+	}
+	if e == nil || e.private || r.tasks[ip] > 0 {
+		r.mu.Unlock()
+		return
+	}
+	online := r.opt.Online != nil && e.online == nil && now.Sub(e.onlineAt) >= onlineBackoff(e.onlineTries)
+	rdns := r.opt.ReverseDNS && !e.rdnsDone
+	n := 0
+	if online {
+		n++
+		e.onlineAt = now
+		if e.onlineTries < 255 {
+			e.onlineTries++
+		}
+	}
+	if rdns {
+		n++
+		e.rdnsDone = true
+	}
+	if n == 0 {
 		r.mu.Unlock()
 		return
 	}
 	e.enriched = true
 	r.tasks[ip] = n
 	r.mu.Unlock()
-	if r.opt.Online != nil {
+	if online {
 		select {
 		case r.onlineQ <- ip:
 		default:
 			r.fail(ip)
 		}
 	}
-	if r.opt.ReverseDNS {
+	if rdns {
 		select {
 		case r.rdnsQ <- ip:
 		default:
+			r.mu.Lock()
+			if e := r.cache[ip]; e != nil {
+				e.rdnsDone = false
+			}
+			r.mu.Unlock()
 			r.fail(ip)
 		}
 	}
+}
+
+// NeedsOnline 判断一个定位结果是否还缺在线定位：已启用在线库、公网地址、结果里没有在线库的数据。
+// 供调用方定期为这样的攻击源重新调用 Enrich。
+func (r *Resolver) NeedsOnline(info *Info) bool {
+	if r == nil || r.opt.Online == nil || info == nil || info.Private {
+		return false
+	}
+	name := r.opt.Online.Name()
+	for i := range info.Sources {
+		if info.Sources[i].Source == name {
+			return false
+		}
+	}
+	return true
 }
 
 // evict 淘汰一半缓存（调用方持锁），正在异步溯源的条目保留。
@@ -451,11 +532,22 @@ func (r *Resolver) merge(ip string, e *entry) *Info {
 		}
 		pl := r.opt.Gazetteer.Resolve(info, en...)
 		info.WorldName, info.ProvinceMap, info.CityMap = pl.WorldName, pl.ProvinceMap, pl.CityMap
-		// 坐标所属城市与最终采信的城市不一致时（如国内地址城市取自 ip2region、坐标来自在线库），
-		// 改用所采信城市的中心点，保证地图标注与归属地一致。
-		if src := bySrc[info.CoordSource]; info.HasCoord && src != nil && info.CoordSource != "custom" && pl.Level == "city" &&
-			normPlace(src.City) != "" && normPlace(src.City) != normPlace(info.City) {
-			info.Lat, info.Lon, info.AccuracyKM, info.CoordSource = pl.Lat, pl.Lon, 0, pl.Level
+		// 坐标所属的地点与最终采信的地点不一致时（如国内地址的省市取自 ip2region、坐标来自在线库），
+		// 改用所采信地点的中心点，保证地图标注与归属地一致：
+		//   - 采信到城市：坐标来源的城市不同；
+		//   - 采信到省级（直辖市，或地名库里没有该城市）：坐标来源的省份不同。直辖市在地名库中是省级，
+		//     只比城市会漏掉“归属北京、坐标在上海”的地址，同一地点多个攻击源取均值后标注会落到两地之间。
+		if src := bySrc[info.CoordSource]; info.HasCoord && src != nil && info.CoordSource != "custom" {
+			mismatch := false
+			switch pl.Level {
+			case "city":
+				mismatch = normPlace(src.City) != "" && normPlace(src.City) != normPlace(info.City)
+			case "province":
+				mismatch = r.opt.Gazetteer.outsideProvince(pl.ProvinceMap, src.Province, src.City, info.Lat, info.Lon)
+			}
+			if mismatch {
+				info.Lat, info.Lon, info.AccuracyKM, info.CoordSource = pl.Lat, pl.Lon, 0, pl.Level
+			}
 		}
 		if !info.HasCoord && pl.Level != "" {
 			info.Lat, info.Lon, info.HasCoord, info.CoordSource = pl.Lat, pl.Lon, true, pl.Level

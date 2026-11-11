@@ -122,6 +122,9 @@ func (l *Learner) revokeRegularAI(now time.Time) {
 	var cs []Change
 	var revoked []string
 	for _, ip := range drop {
+		if o := l.outcomes[ip]; o != nil && o.Attack {
+			continue // 已有客观的攻击结论（成功利用、回连、诱饵）：不按站点常客撤销
+		}
 		if a := l.auto[ip]; a != nil && a.Kind == "ai" {
 			delete(l.auto, ip)
 			c := Change{Time: now, Kind: "revoke_auto", User: "自学习", IP: ip,

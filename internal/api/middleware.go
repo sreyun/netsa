@@ -20,13 +20,20 @@ import (
 // 容量用 LRU 控制：命中即前移，超限淘汰最久未使用的键。此前是「超过 1024 个键整体清空」，
 // 带查询参数的接口（不同筛选条件、分页）很容易把键数推高，周期性地把缓存全部丢光，
 // 大屏刷新会出现规律性的卡顿尖峰；LRU 只淘汰冷键，热键始终保留。
+//
+// 内存同样有上限：响应体总量不超过 maxBytes（超出时从最久未使用的一端淘汰），单个超过 maxEntry 的响应不缓存，
+// 新建条目时顺带清掉末尾已过期的条目。只按键数限制时，过期的响应体一直留在内存里，查询串里多一个无关参数
+// 就是一个新键，1024 个大响应可以占住 GB 级内存。
 type respCache struct {
-	mu    sync.Mutex
-	order *list.List               // 队首为最近使用
-	items map[string]*list.Element // 键 → 链表节点
-	max   int
-	hits  atomic.Int64
-	miss  atomic.Int64
+	mu       sync.Mutex
+	order    *list.List               // 队首为最近使用
+	items    map[string]*list.Element // 键 → 链表节点
+	max      int
+	maxBytes int64
+	maxEntry int
+	bytes    int64 // 缓存的响应体总字节数（rc.mu 保护）
+	hits     atomic.Int64
+	miss     atomic.Int64
 }
 
 type cacheEntry struct {
@@ -35,10 +42,39 @@ type cacheEntry struct {
 	body    []byte
 	ctype   string
 	expires time.Time
+	exp     atomic.Int64 // expires 的副本（UnixNano），清理过期条目时不必拿条目锁
+	size    int64        // 计入 rc.bytes 的字节数（rc.mu 保护）
 }
 
 func newRespCache() *respCache {
-	return &respCache{order: list.New(), items: map[string]*list.Element{}, max: 1024}
+	return &respCache{order: list.New(), items: map[string]*list.Element{}, max: 1024, maxBytes: 64 << 20, maxEntry: 4 << 20}
+}
+
+// removeLocked 移除一个条目并扣除它占用的字节（调用方持 rc.mu）。正在使用该条目的请求仍持有响应体的引用，不受影响。
+func (rc *respCache) removeLocked(el *list.Element) {
+	e := el.Value.(*cacheEntry)
+	rc.order.Remove(el)
+	delete(rc.items, e.key)
+	rc.bytes -= e.size
+	e.size = 0
+}
+
+// account 记录条目新的响应体大小，超出总量时从最久未使用的一端淘汰（不淘汰 keep）。
+func (rc *respCache) account(e *cacheEntry, size int64) {
+	rc.mu.Lock()
+	defer rc.mu.Unlock()
+	if _, ok := rc.items[e.key]; !ok {
+		return // 计算期间已被淘汰：响应照常返回，不再计入
+	}
+	rc.bytes += size - e.size
+	e.size = size
+	for el := rc.order.Back(); el != nil && rc.bytes > rc.maxBytes; {
+		prev := el.Prev()
+		if el.Value.(*cacheEntry) != e {
+			rc.removeLocked(el)
+		}
+		el = prev
+	}
 }
 
 // entry 返回键对应的缓存条目（不存在则新建并淘汰最久未使用的键）。
@@ -56,8 +92,18 @@ func (rc *respCache) entry(key string) *cacheEntry {
 		if back == nil {
 			break
 		}
-		rc.order.Remove(back)
-		delete(rc.items, back.Value.(*cacheEntry).key)
+		rc.removeLocked(back)
+	}
+	// 从最久未使用的一端检查若干个条目，已过期的清掉，不让过期的响应体一直占着内存（每次新建键最多检查 16 个）
+	now := time.Now().UnixNano()
+	for el, n := rc.order.Back(), 0; el != nil && n < 16; n++ {
+		prev := el.Prev()
+		if c := el.Value.(*cacheEntry); c != e {
+			if x := c.exp.Load(); x != 0 && x <= now {
+				rc.removeLocked(el)
+			}
+		}
+		el = prev
 	}
 	return e
 }
@@ -114,8 +160,24 @@ func (rc *respCache) load(e *cacheEntry, ttl time.Duration, h http.HandlerFunc, 
 	if cw.code != http.StatusOK {
 		return nil, "", cw
 	}
-	e.body, e.ctype, e.expires = cw.buf.Bytes(), cw.header.Get("Content-Type"), time.Now().Add(ttl)
+	body, ctype = cw.buf.Bytes(), cw.header.Get("Content-Type")
+	if len(body) > rc.maxEntry { // 太大的响应不缓存：直接返回，下一次重新计算
+		e.body, e.expires = nil, time.Time{}
+		e.exp.Store(0)
+		rc.account(e, 0)
+		return body, ctype, nil
+	}
+	e.body, e.ctype, e.expires = body, ctype, time.Now().Add(ttl)
+	e.exp.Store(e.expires.UnixNano())
+	rc.account(e, int64(len(body)))
 	return e.body, e.ctype, nil
+}
+
+// size 返回缓存的响应体总字节数（监控指标用）。
+func (rc *respCache) size() int64 {
+	rc.mu.Lock()
+	defer rc.mu.Unlock()
+	return rc.bytes
 }
 
 // ---------------- gzip 压缩 ----------------

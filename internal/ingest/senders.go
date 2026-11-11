@@ -301,6 +301,16 @@ func (s *Senders) allowlistLocked() bool {
 	return s.uiAllow != nil && *s.uiAllow
 }
 
+// Allowlist 返回发送端白名单是否实际生效（配置文件开启，或在界面中开启）。
+func (s *Senders) Allowlist() bool {
+	if s == nil {
+		return false
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.allowlistLocked()
+}
+
 // admit 返回发送端画像以及是否接收其日志（规则判定按版本缓存，每条消息只需一次原子比较）。
 func (s *Senders) admit(a netip.Addr, proto int, listener string) (*senderStat, bool) {
 	a = a.Unmap()

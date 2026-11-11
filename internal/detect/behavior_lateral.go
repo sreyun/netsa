@@ -2,6 +2,7 @@ package detect
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -50,6 +51,7 @@ type srvMark struct {
 
 type ewSource struct {
 	first  time.Time
+	last   time.Time // 最近一次管理连接（长期没有管理连接的来源被清理）
 	start  time.Time // 新增连接窗口
 	news   map[string]struct{}
 	fired  bool
@@ -158,18 +160,23 @@ func (b *Behavior) observeEastWest(ev *model.Event) []model.Hit {
 		return nil
 	}
 	k := ipKey(ev.SrcIP + ">" + ev.DstIP + ":" + fmt.Sprint(ev.DstPort))
-	_, seen := b.ewFirstSeen(k)
-	b.ewNote(k, ev.Time)
 	src := b.ewSrcs[ev.SrcIP]
 	if src == nil {
 		if len(b.ewSrcs) >= maxEWSources {
-			return nil
+			// 表满时淘汰最久没有管理连接的一批来源，而不是拒绝新来源：否则累计 5 万个来源之后，
+			// 新被攻陷的主机的横向移动再也不会被检测
+			b.evictEWSources(maxEWSources / 10)
 		}
 		src = &ewSource{first: ev.Time}
 		b.ewSrcs[ev.SrcIP] = src
 	}
+	_, seen := b.ewFirstSeen(k)
+	b.ewNote(k, ev.Time)
 	if ev.Time.Before(src.first) {
 		src.first = ev.Time
+	}
+	if ev.Time.After(src.last) {
+		src.last = ev.Time
 	}
 	var hits []model.Hit
 	// 被攻击的服务器：攻击之后第一次出现的管理连接。只是遭受过攻击的，观察满 24 小时后才判断
@@ -373,5 +380,29 @@ func (b *Behavior) pruneLateral(now time.Time) {
 		if len(list) == 0 || outside(now, list[len(list)-1].ev.Time, ewPendWindow) {
 			delete(b.ewPend, k)
 		}
+	}
+	// 7 天没有任何管理连接的来源不再跟踪（远大于 24 小时的观察期）：地址池轮换的终端不会一直占着表
+	for ip, src := range b.ewSrcs {
+		if stale(now, src.last, ewSourceIdle) {
+			delete(b.ewSrcs, ip)
+		}
+	}
+}
+
+const ewSourceIdle = 7 * 24 * time.Hour
+
+// evictEWSources 淘汰最久没有管理连接的 n 个东西向来源。
+func (b *Behavior) evictEWSources(n int) {
+	type item struct {
+		ip   string
+		last time.Time
+	}
+	list := make([]item, 0, len(b.ewSrcs))
+	for ip, s := range b.ewSrcs {
+		list = append(list, item{ip, s.last})
+	}
+	sort.Slice(list, func(i, j int) bool { return list[i].last.Before(list[j].last) })
+	for _, it := range list[:min(n, len(list))] {
+		delete(b.ewSrcs, it.ip)
 	}
 }

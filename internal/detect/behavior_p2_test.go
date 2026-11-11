@@ -112,8 +112,17 @@ func TestWebShellBehavior(t *testing.T) {
 	for i := range 6 {
 		fired = append(fired, ruleHits(req("203.0.113.66", "POST", "/uploads/2026/11/x7.php", int64(64+i*211), int64(200+i*13), at.Add(time.Duration(i+1)*time.Minute)), "bhv-webshell")...)
 	}
-	if len(fired) != 1 || !fired[0].Proven || fired[0].Result != model.ResultSuccess || !strings.Contains(fired[0].Evidence, "上传者就是访问者") {
+	if len(fired) != 1 || !fired[0].Proven || fired[0].Result != model.ResultSuccess || !strings.Contains(fired[0].Evidence, "上传者就是访问者") ||
+		!strings.Contains(fired[0].Evidence, "/admin/upload.php") {
 		t.Fatalf("上传后的 WebShell 交互: %+v", fired)
+	}
+	// 新上线的后台页面，路径里有 upload、没有其他上传：脚本自身的第一次 POST 不算它的上传证据
+	var page []model.Hit
+	for i := range 6 {
+		page = append(page, ruleHits(req("198.51.100.40", "POST", "/admin/upload-profile.php", int64(64+i*97), 300, at.Add(2*time.Hour+time.Duration(i)*time.Minute)), "bhv-webshell")...)
+	}
+	if len(page) != 1 || page[0].Proven || strings.Contains(page[0].Evidence, "向 /admin/upload-profile.php 上传") {
+		t.Fatalf("新页面自身的请求不能当作上传证据: %+v", page)
 	}
 	// 被 3 个来源访问的新页面：正常
 	for i := range 9 {

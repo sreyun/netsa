@@ -34,8 +34,14 @@ type OutboundDst struct {
 }
 
 // outboundEvent 判断事件是否为内部对外：来源是内网（或流量方向标为出站），目标是公网地址。
+// 只有防火墙会话 / 流量记录（以及解析器标为出站的事件）的目的地址才是内网主机主动连接的对端：
+// DNS 日志的目的地址是被查询的 DNS 服务器（恶意的是域名，不是解析器），访问日志的是记录日志的服务器自己，
+// 认证日志的是被登录的主机。把它们当成外部目标会在地图上画出飞向 8.8.8.8 或本单位网站的“内部对外”飞线。
 func outboundEvent(ev *model.Event) bool {
 	if ev.DstIP == "" || ev.DstIP == ev.SrcIP || ev.Response {
+		return false
+	}
+	if ev.Kind != model.KindFirewall && !ev.Outbound {
 		return false
 	}
 	if a, err := netip.ParseAddr(ev.DstIP); err != nil || !geo.IsPublic(a) {
@@ -135,6 +141,9 @@ type MapOutbound struct {
 	Level       model.Severity `json:"level"`
 	Items       []*OutboundDst `json:"items"` // 按等级、次数排列的前 10 个地址
 	hostSet     map[string]bool
+	sumLat      float64 // 精确坐标累加
+	sumLon      float64
+	exact       int
 }
 
 // outboundPoints 按地点汇总外部目标（调用方持读锁）。
@@ -157,12 +166,25 @@ func (s *Store) outboundPoints(minLevel model.Severity) (pts []*MapOutbound, tot
 		mp := byKey[key]
 		if mp == nil {
 			mp = &MapOutbound{Key: key, Country: g.Country, Province: g.Province, City: g.City, WorldName: g.WorldName,
-				ProvinceMap: g.ProvinceMap, CityMap: g.CityMap, Lat: g.Lat, Lon: g.Lon, CoordSource: g.CoordSource, hostSet: map[string]bool{}}
-			mp.Name = placeName(g.Country, g.Province, g.City)
+				ProvinceMap: g.ProvinceMap, CityMap: g.CityMap, CoordSource: g.CoordSource, hostSet: map[string]bool{}}
 			if g.Label != "" {
 				mp.Name = g.Label
 			}
 			byKey[key] = mp
+		}
+		if g.Label == "" { // 同一地点的多种写法：展示名取更完整的，不随遍历顺序变化
+			if name := placeName(g.Country, g.Province, g.City); betterPlaceName(mp.Name, name) != mp.Name {
+				mp.Name, mp.Province, mp.City = name, g.Province, g.City
+			}
+		}
+		// 坐标与攻击来源的标注一致：有精确坐标的成员取均值，否则用区划中心点
+		if g.CoordSource == "maxmind" || g.CoordSource == "ip-api" {
+			mp.exact++
+			mp.sumLat += g.Lat
+			mp.sumLon += g.Lon
+			mp.CoordSource = g.CoordSource
+		} else if mp.exact == 0 {
+			mp.Lat, mp.Lon = g.Lat, g.Lon
 		}
 		mp.Targets++
 		mp.Hits += d.Hits
@@ -174,11 +196,17 @@ func (s *Store) outboundPoints(minLevel model.Severity) (pts []*MapOutbound, tot
 	}
 	for _, mp := range byKey {
 		mp.Hosts = len(mp.hostSet)
+		if mp.exact > 0 {
+			mp.Lat, mp.Lon = mp.sumLat/float64(mp.exact), mp.sumLon/float64(mp.exact)
+		}
 		sort.Slice(mp.Items, func(i, j int) bool {
 			if mp.Items[i].Level != mp.Items[j].Level {
 				return mp.Items[i].Level > mp.Items[j].Level
 			}
-			return mp.Items[i].Hits > mp.Items[j].Hits
+			if mp.Items[i].Hits != mp.Items[j].Hits {
+				return mp.Items[i].Hits > mp.Items[j].Hits
+			}
+			return mp.Items[i].IP < mp.Items[j].IP
 		})
 		if len(mp.Items) > 10 {
 			mp.Items = mp.Items[:10]
@@ -198,7 +226,10 @@ func (s *Store) outboundPoints(minLevel model.Severity) (pts []*MapOutbound, tot
 		if pts[i].Level != pts[j].Level {
 			return pts[i].Level > pts[j].Level
 		}
-		return pts[i].Hits > pts[j].Hits
+		if pts[i].Hits != pts[j].Hits {
+			return pts[i].Hits > pts[j].Hits
+		}
+		return pts[i].Key < pts[j].Key
 	})
 	if len(pts) > 300 {
 		pts = pts[:300]
@@ -213,5 +244,54 @@ func (s *Store) outboundList() []*OutboundDst {
 		out = append(out, d)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].IP < out[j].IP })
+	return out
+}
+
+// GeoPending 返回还缺在线定位的攻击源与内部对外目标（最多 limit 个，等级高、攻击多的在前）。
+// 在线定位失败或当时没有结果的地址只有等级再次提升才会重新查询，等级不再变化的一直停在离线库的结果上
+// （境外地址只有国家级坐标，在地图上堆在国家中心）；由调用方定期取出这些地址重新发起（geo.Resolver.Enrich 按间隔退避）。
+// needs 判断一个定位结果是否还缺在线定位（geo.Resolver.NeedsOnline）。
+func (s *Store) GeoPending(minLevel model.Severity, needs func(*geo.Info) bool, limit int) []string {
+	if needs == nil || limit <= 0 {
+		return nil
+	}
+	type cand struct {
+		ip      string
+		level   model.Severity
+		attacks int64
+	}
+	var list []cand
+	s.mu.RLock()
+	for ip, p := range s.ips {
+		// 内网地址不提交在线定位（定位结果里通常已标为内网，这里再按地址判断一次）
+		if isAttacker(p) && p.Level >= minLevel && p.Level > model.SevInfo && p.Geo != nil && !geo.IsPrivate(ip) && needs(p.Geo) {
+			list = append(list, cand{ip, p.Level, p.Attacks})
+		}
+	}
+	for ip, d := range s.outbound {
+		if _, dup := s.ips[ip]; dup && isAttacker(s.ips[ip]) {
+			continue
+		}
+		if d.Geo == nil || needs(d.Geo) {
+			list = append(list, cand{ip, d.Level, d.Hits})
+		}
+	}
+	s.mu.RUnlock()
+	sort.Slice(list, func(i, j int) bool {
+		if list[i].level != list[j].level {
+			return list[i].level > list[j].level
+		}
+		if list[i].attacks != list[j].attacks {
+			return list[i].attacks > list[j].attacks
+		}
+		return list[i].ip < list[j].ip
+	})
+	if len(list) > limit {
+		list = list[:limit]
+	}
+	out := make([]string, len(list))
+	for i, c := range list {
+		out[i] = c.ip
+	}
 	return out
 }

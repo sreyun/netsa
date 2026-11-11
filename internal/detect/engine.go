@@ -274,10 +274,75 @@ func (e *Engine) inspectWeb(ev *model.Event) []model.Hit {
 		return []model.Hit{deviceThreatHit(ev)}
 	}
 	if nonHTTPRequest(ev) {
+		// 请求行可读、只是方法名不标准（超长、小写、带数字）：解析器没有拆出方法，但 nginx、Apache、Go 网关照常转发，
+		// PHP 不看方法照常执行。按其中的目标完整检测，另记一条协议异常；只换个方法名不能绕过全部规则
+		if method, target, ok := oddRequestLine(ev.URI); ok {
+			cp := *ev
+			cp.Method, cp.URI = method, target
+			hits := e.inspectWeb(&cp)
+			r := WebResult(ev, e.minBytes)
+			if r == model.ResultSuccess && !risk.ResponseProvable(CatProtocol) {
+				r = model.ResultPassed
+			}
+			return append(hits, model.Hit{RuleID: "proto-badmethod", Name: "非标准请求方法", Category: CatProtocol, Severity: model.SevLow,
+				Phase: model.PhaseRecon, Evidence: Printable(method, 64) + " " + Printable(target, 100), Result: r})
+		}
 		// 二进制协议探测：只判断协议异常，不按 URI 规则匹配（其中的 \x00 曾被判为高危的“空字节截断”）
 		return specialWebChecks(ev, Normalize(ev.URI), WebResult(ev, e.minBytes))
 	}
-	uri := Normalize(ev.URI)
+	// 去掉 /* */ 注释是为了识别 union/**/select 这类注释混淆；注释里的内容同样要检测：
+	// 否则把载荷放在两个参数 x=/* 与 y=*/ 之间，就能让它对全部 URI 规则不可见，应用照常收到
+	kept := normalizeKeepComments(ev.URI)
+	uri := stripComments(kept)
+	hits := e.webHits(ev, uri)
+	if uri != kept {
+		have := map[string]bool{}
+		for _, h := range hits {
+			have[h.RuleID] = true
+		}
+		for _, h := range e.webHits(ev, kept) {
+			if !have[h.RuleID] {
+				have[h.RuleID] = true
+				h.Evidence = "（注释中）" + h.Evidence
+				hits = append(hits, h)
+			}
+		}
+	}
+	return upstreamReview(ev, hits)
+}
+
+// oddRequestLine 识别方法名不标准的 HTTP 请求行（解析器只认 2~16 个大写字母的方法，其余整行写进 URI）：
+// "<方法记号> <以 / 或 http(s):// 开头的目标> HTTP/x"，方法记号为 RFC 9110 的 token。二进制数据、已识别的
+// 非 HTTP 协议探测返回 false。
+func oddRequestLine(raw string) (method, target string, ok bool) {
+	if len(raw) > 1<<16 || !model.ReadableText(raw) || model.ProbeProtocol(raw) != "" {
+		return "", "", false
+	}
+	i := strings.IndexByte(raw, ' ')
+	if i <= 0 || i > 64 {
+		return "", "", false
+	}
+	method = raw[:i]
+	for j := 0; j < len(method); j++ {
+		c := method[j]
+		if !(c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || strings.IndexByte("!#$%&'*+-.^_`|~", c) >= 0) {
+			return "", "", false
+		}
+	}
+	rest := raw[i+1:]
+	j := strings.LastIndex(rest, " HTTP/")
+	if j <= 0 {
+		return "", "", false
+	}
+	target = rest[:j]
+	if !strings.HasPrefix(target, "/") && !strings.HasPrefix(strings.ToLower(target), "http://") && !strings.HasPrefix(strings.ToLower(target), "https://") {
+		return "", "", false
+	}
+	return method, target, true
+}
+
+// webHits 对归一化后的 URI 执行规则、语法复核、编码载荷还原、漏洞接口签名与协议层检查。
+func (e *Engine) webHits(ev *model.Event, uri string) []model.Hit {
 	path := uri
 	if i := strings.IndexByte(path, '?'); i >= 0 {
 		path = path[:i]
@@ -363,7 +428,7 @@ func (e *Engine) inspectWeb(ev *model.Event) []model.Hit {
 	if s := matchVuln(ev.Method, path, ev.URI); s != nil { // 国产 OA、中间件的已知漏洞接口
 		hits = append(hits, vulnHit(s, ev, path, result, hits))
 	}
-	return upstreamReview(ev, append(hits, specialWebChecks(ev, uri, result)...))
+	return append(hits, specialWebChecks(ev, uri, result)...)
 }
 
 // harmlessDotDot 判断路径中的 ../ 是否只是普通的相对路径：字面写在路径里（没有编码）、解析后没有越出
@@ -576,13 +641,31 @@ func inertProse(uri string, start, end int) bool {
 	if eq < 0 || from+eq >= start {
 		return false
 	}
-	value := uri[from+eq+1 : to]
+	vs := from + eq + 1
+	value := uri[vs:to]
 	// 只被提到的写法里没有这些符号，含有时去掉之后仍然含有，不必跑正则（攻击载荷大多如此）
 	if strings.ContainsAny(value, "'\"`;{}[]$|&=\\%*#@") || !strings.Contains(value, ">") && !emptyParens(value) {
 		return false
 	}
+	// <script> 之后还有函数调用（如 <script>alert()</script>）：脚本会执行，不是在提到标签名
+	if k := strings.Index(value, "<script"); k >= 0 && strings.Contains(value[k:], "(") {
+		return false
+	}
+	spans := inertToken.FindAllStringIndex(value, -1)
+	// 命中的特征本身必须就是这些只被提到的写法之一：同一个参数里的 union select、information_schema 等
+	// 注入特征不因末尾追加一个 <svg> 或 alert() 就被当成普通文字（否则 SQL 注入从高危 / 疑似成功降为低危）
+	inside := false
+	for _, sp := range spans {
+		if vs+sp[0] <= start && end <= vs+sp[1] {
+			inside = true
+			break
+		}
+	}
+	if !inside {
+		return false
+	}
 	rest := inertToken.ReplaceAllString(value, " ")
-	if rest == value || strings.ContainsAny(rest, "<>'\"`;(){}[]$|&=\\/%*#@") {
+	if strings.ContainsAny(rest, "<>'\"`;(){}[]$|&=\\/%*#@") {
 		return false
 	}
 	return len(strings.FieldsFunc(rest, func(r rune) bool { return !unicode.IsLetter(r) && !unicode.IsDigit(r) })) >= 2

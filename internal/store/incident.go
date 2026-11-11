@@ -868,8 +868,21 @@ func (s *Store) excludeRuleLocked(rule string, on bool) int {
 			continue
 		}
 		old := p.Level
+		was, now := p.retractedOnly, retractedOnlyOf(p, s.excluded)
+		if now && !was {
+			// 全部命中都来自停用的规则：不再算作攻击源。按原等级移出统计，再重算评分
+			s.agg.remove(p)
+			p.retractedOnly = true
+			s.retracted[p.IP] = true
+		}
 		p.recompute(s.excluded, s.ruleMeta)
-		s.agg.setLevel(p, old)
+		if was && !now { // 规则重新启用：恢复为攻击源，按新等级计入统计
+			p.retractedOnly = false
+			delete(s.retracted, p.IP)
+			s.agg.add(p)
+		} else {
+			s.agg.setLevel(p, old)
+		}
 		if p.Level != old {
 			changed++
 		}
@@ -913,21 +926,21 @@ func (s *Store) retractWhere(why string, match func(*model.Alert) int) int {
 	now := time.Now()
 	n := 0
 	for id, list := range byInc {
-		inc := s.incidents[id]
-		if inc == nil || !inc.active() || inc.AIFrom != 0 {
-			continue
-		}
-		sev, kept := model.SevInfo, 0
+		// 告警的撤销标记与事件状态无关：已关闭、被模型调整过的事件里的告警同样标记，
+		// 告警列表、攻击源详情里才不会一部分显示“已撤销”、一部分不显示
+		marked, sev, kept := 0, model.SevInfo, 0
 		for _, idx := range list {
 			a := s.alerts[idx]
 			switch match(a) {
 			case retractFull: // 此前只撤销了升级的告警同样改为整条撤销
 				if a.Retracted == "" || strings.HasPrefix(a.Retracted, escPrefix) {
 					s.markAlertLocked(idx, why)
+					marked++
 				}
 			case retractEsc:
 				if a.Retracted == "" {
 					s.markAlertLocked(idx, escPrefix+why)
+					marked++
 				}
 			}
 			if as, ok := countedSev(s.alerts[idx]); ok {
@@ -935,7 +948,20 @@ func (s *Store) retractWhere(why string, match func(*model.Alert) int) int {
 				sev = max(sev, as)
 			}
 		}
-		if kept > 0 && sev >= inc.Severity {
+		inc := s.incidents[id]
+		if inc == nil || !inc.active() || inc.AIFrom != 0 {
+			continue
+		}
+		// 只按这一次新撤销的告警调整：启动时重放的纠错不再把分析员重新打开的事件又关掉
+		if marked == 0 {
+			continue
+		}
+		// 事件更早的告警已被淘汰、无从核对：只标记保留的告警，不下调、不关闭。按残缺的告警重算，
+		// 会把高危告警已被淘汰的事件下调或标为误报（如有证据的成功利用之后，只剩下观察规则的告警）
+		if len(list) < inc.Alerts {
+			continue
+		}
+		if kept > 0 && sev >= inc.Severity || kept == 0 && inc.Proven > 0 {
 			continue
 		}
 		old := inc.Severity
@@ -1093,7 +1119,8 @@ func (s *Store) AutoArchive(now time.Time, idle time.Duration) []IncidentView {
 	defer s.mu.Unlock()
 	var out []IncidentView
 	for _, inc := range s.incidents {
-		if !inc.active() || inc.Assignee != "" || inc.Success > 0 || inc.Proven > 0 || inc.Severity > model.SevMedium ||
+		if !inc.active() || inc.Assignee != "" || inc.Success > 0 || inc.Proven > 0 || max(inc.Severity, inc.AIFrom) > model.SevMedium || // 模型下调过的按下调前的等级：模型的结论不触发自动处置
+
 			assetRank(inc.AssetLevel) >= assetRank("core") || now.Sub(inc.LastSeen) < idle || len(inc.Phases) == 0 {
 			continue
 		}

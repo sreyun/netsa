@@ -98,6 +98,11 @@ func TestAutoArchive(t *testing.T) {
 	s.Record(ev("198.51.100.22", "/c", now.Add(-time.Hour)), []model.Hit{recon})                                                               // 仍在活动
 	s.Record(ev("198.51.100.23", "/d", old), []model.Hit{recon})                                                                               // 有人处理过
 	s.Record(ev("198.51.100.24", "/e", old), []model.Hit{hit("bhv-portscan", "端口扫描", model.PhaseRecon, model.SevHigh, model.ResultUnknown)})   // 高危
+	// 高危事件被模型判为误报、下调为中危：模型的结论不触发自动处置，仍按下调前的等级不归档
+	s.Record(ev("198.51.100.25", "/f", old), []model.Hit{hit("bhv-portscan", "端口扫描", model.PhaseRecon, model.SevHigh, model.ResultUnknown)})
+	if _, ok := s.AIDowngrade(incOf(t, s, "198.51.100.25").ID, "模型判为误报"); !ok {
+		t.Fatal("模型下调失败")
+	}
 	if _, err := s.UpdateIncidents([]uint64{incOf(t, s, "198.51.100.23").ID}, "alice", IncidentUpdate{Note: "在看"}); err != nil {
 		t.Fatal(err)
 	}

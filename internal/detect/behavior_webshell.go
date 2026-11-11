@@ -129,7 +129,7 @@ func (b *Behavior) observeWebShell(ev *model.Event) (model.Hit, bool) {
 	if len(st.reqSizes) >= 3 {
 		h.Evidence += fmt.Sprintf("、请求大小有 %d 种", len(st.reqSizes))
 	}
-	if up, same := site.uploadBefore(st.first, ev.SrcIP); up != nil {
+	if up, same := site.uploadBefore(st.first, ev.SrcIP, Printable(p, 120)); up != nil {
 		h.Evidence += fmt.Sprintf("；此前 %s %s 向 %s 上传过文件", fmtDur(st.first.Sub(up.at).Round(time.Second)), up.src, up.path)
 		if up.size > 0 {
 			h.Evidence += "（请求 " + fmtBytes(up.size) + "）"
@@ -174,12 +174,15 @@ func (s *shellSite) noteUpload(u uploadMark) {
 	s.uploads = append(s.uploads, u)
 }
 
-// uploadBefore 返回脚本首次出现之前 24 小时内的上传，优先同一来源。
-func (s *shellSite) uploadBefore(first time.Time, src string) (*uploadMark, bool) {
+// uploadBefore 返回脚本首次出现之前 24 小时内的上传，优先同一来源。脚本自身的请求不算它的上传证据：
+// 新脚本的第一次 POST 若路径含 upload / file、或请求体较大，也会被记为一次上传，时间正好等于首次出现，
+// 不排除的话管理员使用新上线的后台页面就会被判为“同一来源上传后访问”，定为严重并自动确认为攻击源。
+// 同一秒内的真实上传 + 访问仍然关联（访问日志只有秒级精度），所以按路径排除而不是按时间。
+func (s *shellSite) uploadBefore(first time.Time, src, script string) (*uploadMark, bool) {
 	var any *uploadMark
 	for i := len(s.uploads) - 1; i >= 0; i-- {
 		u := &s.uploads[i]
-		if u.at.After(first) || first.Sub(u.at) > uploadWindow {
+		if u.at.After(first) || first.Sub(u.at) > uploadWindow || u.path == script {
 			continue
 		}
 		if u.src == src {

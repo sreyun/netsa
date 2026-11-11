@@ -60,11 +60,18 @@ type IPProfile struct {
 	inAgg    bool   `json:"-"`
 	aggMask  uint64 `json:"-"` // 已计入 ATT&CK 矩阵的技术位
 	aggFlags uint8  `json:"-"` // 已计入的攻击手法标记
+	// retractedOnly 表示全部命中都来自已停用的误报规则（如被业务轮询停用的自学习观察规则）：不再算作攻击源，
+	// 不进入总览、地图与攻击源列表。出现其他规则的命中后恢复。不持久化：启动时由纠错重放重新计算
+	retractedOnly bool `json:"-"`
 }
 
 type window struct {
 	start time.Time
 	n     int
+	// 窗口内已生成告警的最高等级，以及是否已有疑似成功、有证据的告警：
+	// 等级更高、第一次成功、第一次有证据的命中不是“重复命中”，不受节流
+	top            model.Severity
+	success, proof bool
 }
 
 func newProfile(ip string, t time.Time) *IPProfile {
@@ -299,6 +306,8 @@ type Store struct {
 	ruleNames    map[string]string
 	ruleMeta     map[string]ruleMeta     // 规则 → 攻击类型与阶段（剔除误报规则的命中时按此调整评分与排行）
 	excluded     map[string]bool         // 命中不计入攻击源评分与排行的规则：被判定为误报而停用的自学习观察规则
+	retracted    map[string]bool         // 全部命中都来自停用规则的画像（retractedOnly），数量很少，总览据此修正排行
+	tally        map[string]*ruleTally   // 自学习观察规则的命中构成：停用后从总览的攻击次数、等级、研判结果与目标排行中剔除
 	outbound     map[string]*OutboundDst // 内部对外的攻击与异常连接的外部目标（地图上从受保护资产飞出的线）
 	sevCount     [5]int64
 	phases       map[string]int64
@@ -347,7 +356,7 @@ func New(maxIPs, maxAlerts, alertsPerRule int, retention time.Duration) *Store {
 	return &Store{
 		maxIPs: maxIPs, maxAlerts: maxAlerts, perRule: alertsPerRule, retention: retention,
 		ips: map[string]*IPProfile{}, buckets: map[int64]*Bucket{},
-		categories: map[string]int64{}, rules: map[string]int64{}, ruleNames: map[string]string{}, ruleMeta: map[string]ruleMeta{}, excluded: map[string]bool{}, outbound: map[string]*OutboundDst{},
+		categories: map[string]int64{}, rules: map[string]int64{}, ruleNames: map[string]string{}, ruleMeta: map[string]ruleMeta{}, excluded: map[string]bool{}, retracted: map[string]bool{}, tally: map[string]*ruleTally{}, outbound: map[string]*OutboundDst{},
 		phases: map[string]int64{}, results: map[string]int64{}, surf: newSurface(), ruleBits: map[string]int{},
 		incidents: map[uint64]*Incident{}, incByKey: map[string]uint64{},
 		agg: newAggregate(), days: map[string]*DayStat{}, chains: map[chainKey]*chainTrack{},
@@ -428,6 +437,13 @@ func (s *Store) countEvent(ev *model.Event, b *Bucket, day *DayStat) {
 
 func (s *Store) recordLocked(ev *model.Event, hits []model.Hit) RecordResult {
 	var res RecordResult
+	// 端口只取 1~65535：解析器按整数读取，字段错位或伪造的日志会带来任意整数，以端口为键的统计因此无上限增长
+	if ev.DstPort < 0 || ev.DstPort > 65535 {
+		ev.DstPort = 0
+	}
+	if ev.SrcPort < 0 || ev.SrcPort > 65535 {
+		ev.SrcPort = 0
+	}
 
 	count := !ev.Replay && !ev.Aux // 补发命中的事件副本已经计入过事件量；辅助记录描述的是已经计入的连接
 	if count {
@@ -597,6 +613,10 @@ func (s *Store) recordLocked(ev *model.Event, hits []model.Hit) RecordResult {
 			continue
 		}
 		p.ensureAttackMaps()
+		if p.retractedOnly && !s.excluded[h.RuleID] { // 出现了其他规则的命中：重新算作攻击源（随后的 add 一次性计入统计）
+			p.retractedOnly = false
+			delete(s.retracted, p.IP)
+		}
 		if !attacked && p.Attacks == 0 {
 			// 首次攻击时重新匹配情报（Tor 列表等可能在画像创建后才加载）
 			if len(p.Intel) == 0 && s.IntelMatch != nil {
@@ -617,6 +637,9 @@ func (s *Store) recordLocked(ev *model.Event, hits []model.Hit) RecordResult {
 		}
 		s.phases[h.Phase]++
 		s.results[h.Result]++
+		if strings.HasPrefix(h.RuleID, "learn-") {
+			s.tallyLocked(&h, truncate(ev.Target(), 200))
+		}
 		if h.Result == model.ResultBlocked {
 			s.totals.Blocked++
 			b.Blocked++
@@ -660,7 +683,7 @@ func (s *Store) recordLocked(ev *model.Event, hits []model.Hit) RecordResult {
 			s.agg.addTarget(p, target)
 		}
 
-		if s.allowAlert(p, h.RuleID, ev.Time) {
+		if s.allowAlert(p, &h, ev.Time) {
 			incBounded(&p.RuleAlerts, h.RuleID, alertRuleCap)
 			a := s.newAlert(ev, &h, p)
 			res.Alerts = append(res.Alerts, a)
@@ -762,17 +785,27 @@ func truncate(s string, n int) string {
 }
 
 // allowAlert 对同一 IP 同一规则的告警做节流，命中仍然计数。
-func (s *Store) allowAlert(p *IPProfile, rule string, t time.Time) bool {
+// allowAlert 判断一次命中是否生成告警：同一来源、同一规则在节流窗口内最多 alerts_per_rule 条。
+// 结果更严重的命中不算重复：等级高于窗口内已告警的、窗口内第一次疑似成功、第一次有证据的，照常生成告警
+// （典型如连续几次失败的注入之后有一次成功：不能因为前面已经告警过 5 次就只记一次命中，事件等级也不升）。
+func (s *Store) allowAlert(p *IPProfile, h *model.Hit, t time.Time) bool {
 	if p.throttle == nil {
 		p.throttle = map[string]*window{}
 	}
-	w := p.throttle[rule]
+	w := p.throttle[h.RuleID]
 	if w == nil || t.Sub(w.start) > throttleWindow || w.start.Sub(t) > throttleWindow {
 		w = &window{start: t}
-		p.throttle[rule] = w
+		p.throttle[h.RuleID] = w
 	}
 	w.n++
-	return w.n <= s.perRule
+	success := h.Result == model.ResultSuccess
+	allow := w.n <= s.perRule || h.Severity > w.top || success && !w.success || h.Proven && !w.proof
+	if allow {
+		w.top = max(w.top, h.Severity)
+		w.success = w.success || success
+		w.proof = w.proof || h.Proven
+	}
+	return allow
 }
 
 func (s *Store) newAlert(ev *model.Event, h *model.Hit, p *IPProfile) *model.Alert {
@@ -849,6 +882,25 @@ func (s *Store) RefreshGeo(relocate func(ip string, old *geo.Info) *geo.Info) in
 			}
 			p.Geo = info
 			s.agg.setGeo(p, it.old)
+		}
+		s.mu.Unlock()
+	}
+	// 内部对外的外部目标同样按当前定位库重新定位：它们不在画像里（主体是发起连接的内网主机），
+	// 不重新定位的话，地图上外连目标的位置在定位库或定位规则更新后一直是旧的
+	s.mu.RLock()
+	list = list[:0]
+	for ip, d := range s.outbound {
+		list = append(list, item{ip, d.Geo})
+	}
+	s.mu.RUnlock()
+	for _, it := range list {
+		info := relocate(it.ip, it.old)
+		if info == nil || info == it.old {
+			continue
+		}
+		s.mu.Lock()
+		if d := s.outbound[it.ip]; d != nil && d.Geo == it.old {
+			d.Geo = info
 		}
 		s.mu.Unlock()
 	}
@@ -936,7 +988,62 @@ func (s *Store) evictLocked() {
 	for _, p := range h {
 		s.agg.remove(p)
 		delete(s.ips, p.IP)
+		delete(s.retracted, p.IP)
 	}
+}
+
+// ruleTally 是一条自学习观察规则的命中构成（等级、研判结果、主要目标）。观察规则的数量有上限（learn.maxLearnedRules）。
+type ruleTally struct {
+	Sev     [5]int64         `json:"sev"`
+	Results map[string]int64 `json:"results,omitempty"`
+	Targets map[string]int64 `json:"targets,omitempty"` // 最多 maxTallyTargets 个
+}
+
+const (
+	maxTallies      = 1000
+	maxTallyTargets = 20
+)
+
+func (s *Store) tallyLocked(h *model.Hit, target string) {
+	t := s.tally[h.RuleID]
+	if t == nil {
+		if len(s.tally) >= maxTallies {
+			return
+		}
+		t = &ruleTally{Results: map[string]int64{}, Targets: map[string]int64{}}
+		s.tally[h.RuleID] = t
+	}
+	if h.Severity >= model.SevInfo && h.Severity <= model.SevCritical {
+		t.Sev[h.Severity]++
+	}
+	if t.Results == nil {
+		t.Results = map[string]int64{}
+	}
+	t.Results[h.Result]++
+	if t.Targets == nil {
+		t.Targets = map[string]int64{}
+	}
+	if _, ok := t.Targets[target]; ok || len(t.Targets) < maxTallyTargets {
+		t.Targets[target]++
+	}
+}
+
+// retractedOnlyOf 判断画像的全部命中是否都来自 ex 中的规则（且没有情报命中）。
+func retractedOnlyOf(p *IPProfile, ex map[string]bool) bool {
+	if len(ex) == 0 || p.Attacks == 0 || len(p.Intel) > 0 {
+		return false
+	}
+	any := false
+	for r, n := range p.Rules {
+		if n <= 0 {
+			continue
+		}
+		if !ex[r] {
+			return false
+		}
+		any = true
+	}
+	return any
 }
 
 // evictsAfter 判断 a 是否应比 b 更晚被淘汰：评分高者优先保留，评分相同时更近活动者优先保留。
