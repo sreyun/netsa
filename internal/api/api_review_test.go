@@ -67,3 +67,29 @@ func TestClientIPMergesForwardedLines(t *testing.T) {
 		t.Fatalf("客户端伪造的第一行不应被采信（来源白名单之外应返回 403）: %d", rec.Code)
 	}
 }
+
+// 放在改写 Host 的反向代理之后：浏览器的 Sec-Fetch-Site 为 same-origin 时，Origin 与 Host 不同也不算跨站。
+func TestSameOriginBehindProxy(t *testing.T) {
+	ok := sameOrigin(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(204) }))
+	req := func(hdr ...string) int {
+		r := httptest.NewRequest(http.MethodPost, "http://127.0.0.1:8080/api/auth/login", strings.NewReader("{}"))
+		for i := 0; i+1 < len(hdr); i += 2 {
+			r.Header.Set(hdr[i], hdr[i+1])
+		}
+		rec := httptest.NewRecorder()
+		ok.ServeHTTP(rec, r)
+		return rec.Code
+	}
+	if c := req("Origin", "https://netsa.example.com", "Sec-Fetch-Site", "same-origin"); c != 204 {
+		t.Fatalf("同源请求（代理改写了 Host）应放行: %d", c)
+	}
+	if c := req("Origin", "https://evil.example", "Sec-Fetch-Site", "cross-site"); c != 403 {
+		t.Fatalf("跨站请求应拒绝: %d", c)
+	}
+	if c := req("Origin", "https://evil.example"); c != 403 {
+		t.Fatalf("没有 Sec-Fetch-Site 时按 Origin 与 Host 判断: %d", c)
+	}
+	if c := req(); c != 204 {
+		t.Fatalf("非浏览器客户端（没有 Origin）放行: %d", c)
+	}
+}

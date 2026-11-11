@@ -2008,7 +2008,7 @@ $('#ntTable').addEventListener('click', async (e) => {
         break;
       case 'del':
         if (!confirm(`确定删除机器人「${r.name}」？删除后将不再向该群推送告警。`)) return;
-        await api(path, 'DELETE');
+        { const res = await api(path, 'DELETE'); if (res && res.warning) alert('已删除，但' + res.warning + '，重启后会恢复，请检查数据目录是否可写'); }
         break;
       default:
         return;

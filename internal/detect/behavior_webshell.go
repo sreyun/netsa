@@ -93,6 +93,11 @@ func (b *Behavior) observeWebShell(ev *model.Event) (model.Hit, bool) {
 	st := b.scripts[key]
 	if st == nil {
 		if len(b.scripts) >= maxScripts {
+			// 表满时腾出被扫描器塞进来的垃圾条目（只被一个来源访问过几次、没有告警、一天没有再出现）：
+			// 对不存在的路径返回 200 的站点被字典扫一遍就能占满全部名额，之后任何站点的新 WebShell 都不再跟踪
+			b.evictIdleScripts(ev.Time)
+		}
+		if len(b.scripts) >= maxScripts {
 			return model.Hit{}, false
 		}
 		st = &scriptStat{first: ev.Time, fresh: ev.Time.Sub(site.first) >= shellSiteAge}
@@ -193,4 +198,15 @@ func (s *shellSite) uploadBefore(first time.Time, src, script string) (*uploadMa
 		}
 	}
 	return any, false
+}
+
+// evictIdleScripts 淘汰不再有判定意义的脚本条目：只有一个来源、请求不足 shellMinReqs 次、没有告警、
+// 超过 24 小时没有再出现。这类条目再次出现时同样要重新凑够请求才会告警，淘汰不改变判定；
+// 被多个来源访问的正常页面、已告警的脚本一直保留（清理后再出现会被当成新脚本）。
+func (b *Behavior) evictIdleScripts(now time.Time) {
+	for k, st := range b.scripts {
+		if !st.popular && !st.fired && st.reqs < shellMinReqs && st.srcs[1] == "" && now.Sub(st.last) > 24*time.Hour {
+			delete(b.scripts, k)
+		}
+	}
 }

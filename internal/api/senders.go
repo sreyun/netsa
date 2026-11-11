@@ -218,7 +218,8 @@ func (s *Server) pushSourceNotices() {
 				"处置建议：检查 PostgreSQL 是否可用、写入是否变慢，必要时增大 archive.queue_size"}})
 	case failed > h.failed:
 		h.failing++
-		if h.failing == 3 && now.Sub(h.alerted) >= time.Hour { // 连续 3 分钟写入失败
+		// 连续 3 分钟以上写入失败、还没有通知过这次故障：限流窗口内开始的故障在窗口过去后补发，而不是要求恰好第 3 分钟
+		if h.failing >= 3 && !h.down && now.Sub(h.alerted) >= time.Hour {
 			h.alerted, h.down = now, true
 			s.Notifier.Notify("", alert.Event{Kind: "notice", Severity: model.SevHigh, Title: "告警归档写入失败", Link: "#tab=archive", Time: now,
 				Lines: []string{"说明：已连续 3 分钟写入 PostgreSQL 失败，告警暂存于内存队列", "最近错误：" + orDash(lastErr)}})

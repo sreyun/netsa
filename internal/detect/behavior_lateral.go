@@ -2,6 +2,7 @@ package detect
 
 import (
 	"fmt"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -75,8 +76,16 @@ type logonMark struct {
 	from, user string
 	at         time.Time
 	hops       int
-	path       string // 登录链：A → H1 → H2
+	path       string   // 登录链：A → H1 → H2（只保留末尾若干跳）
+	nodes      []string // 链上的主机（最多 maxChainNodes 个），延长前据此识别互相登录形成的环
 }
+
+// maxChainNodes 是登录链记录的主机数上限，maxChainHops 是跳数上限：两台主机互相登录（服务账号同步、镜像）
+// 时链条不应无限增长，每次登录都在锁内拷贝整条路径。
+const (
+	maxChainNodes = 8
+	maxChainHops  = 16
+)
 
 // MarkAttacked 记录内网服务器遭受了利用尝试或已经回连攻击者（compromised），之后它发起的新内网连接按横向移动判断。
 // 已失陷时同时返回它在失陷前后 1 小时内已经发起、当时还没有判定的首次管理连接，由调用方补记告警。
@@ -307,10 +316,20 @@ func (b *Behavior) observeLogonChain(ev *model.Event) (model.Hit, bool) {
 			break
 		}
 	}
-	cur := logonMark{from: from, user: user, at: ev.Time, hops: 1, path: from + " →(" + ev.User + ") " + tgt}
+	cur := logonMark{from: from, user: user, at: ev.Time, hops: 1, path: from + " →(" + Printable(ev.User, 40) + ") " + tgt, nodes: []string{from, tgt}}
+	if prev != nil && slices.Contains(prev.nodes, tgt) {
+		prev = nil // 登录回链上已有的主机：是互相登录形成的环，不是向新主机扩散，从这一跳重新开始
+	}
 	if prev != nil {
-		cur.hops = prev.hops + 1
-		cur.path = prev.path + " →(" + ev.User + ") " + tgt
+		cur.hops = min(prev.hops+1, maxChainHops)
+		cur.path = prev.path + " →(" + Printable(ev.User, 40) + ") " + tgt
+		if len(cur.path) > 600 { // 只保留末尾若干跳
+			cur.path = "… " + cur.path[len(cur.path)-500:]
+		}
+		cur.nodes = append(append(make([]string, 0, maxChainNodes), prev.nodes...), tgt)
+		if len(cur.nodes) > maxChainNodes {
+			cur.nodes = cur.nodes[len(cur.nodes)-maxChainNodes:]
+		}
 	}
 	if _, ok := b.logons[tgt]; ok || len(b.logons) < maxLogonTargets {
 		b.logons[tgt] = cur

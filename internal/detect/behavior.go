@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"math"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -42,6 +43,7 @@ const (
 	bitFlood
 	bitBruteOK
 	bitVulnScan
+	bitPortScanWide
 )
 
 // 每个 IP 的窗口状态都有容量上限：只需判断是否达到阈值，不必记录全部明细，
@@ -122,24 +124,24 @@ type Behavior struct {
 	th         config.Thresholds
 	web        map[string]*webWin
 	fw         map[string]*fwWin
-	logins     map[string]*loginWin   // 登录接口 → 全局窗口
-	enum       map[string]*enumWin    // 来源 → 接口遍历窗口
-	beacons    map[string]*beacon     // 内网主机>外部地址:端口 → 连接时间
-	beaconDst  map[string]int         // 外部地址:端口 → 已告警周期性外连的内网主机数（多台主机同规律外连多为统一部署的软件）
-	auth       map[string]*authWin    // 认证来源 → 登录失败窗口
-	dns        map[string]*dnsWin     // 内网主机 → DNS 查询窗口
-	errs       map[string]*hostErr    // 站点 → 返回 5xx 的不同来源（区分服务故障与攻击）
-	slow       map[string]*slowWin    // 来源 → 超时窗口（只为收到过超时的来源建立）
-	attacked   map[string]time.Time   // 来源 → 最近一次命中攻击规则的时间
-	impact     map[string]*hostImpact // 站点 → 超时统计、业务路径可用性与可疑来源
-	sites      map[string]*siteWin    // 站点 → 请求量窗口与基线（分布式 CC）
-	homes      map[string]*homeSize   // 站点 → 首页的响应大小（识别对不存在的路径返回首页的兜底页面）
-	dsts       map[dstKey]*dstWin     // 目的地址:端口 → 事件量窗口与基线（多源 DDoS）
-	devFloods  map[string]devFlood    // 目的地址 → 设备最近报告的洪泛（behavior_devflood.go）
-	exfil      map[string]*exfilWin   // 内网主机 → 外发字节窗口与基线（behavior_exfil.go）
-	downloads  map[string]*dlWin      // 外部来源 → 下载量窗口
-	scripts    map[string]*scriptStat // 站点+脚本路径 → 访问画像（behavior_webshell.go）
-	shellSites map[string]*shellSite  // 站点 → 首次出现时间与最近的上传
+	logins     map[string]*loginWin    // 登录接口 → 全局窗口
+	enum       map[string]*enumWin     // 来源 → 接口遍历窗口
+	beacons    map[string]*beacon      // 内网主机>外部地址:端口 → 连接时间
+	beaconDst  map[string]*beaconPeers // 外部地址:端口 → 已告警周期性外连的内网主机（多台主机同规律外连多为统一部署的软件）
+	auth       map[string]*authWin     // 认证来源 → 登录失败窗口
+	dns        map[string]*dnsWin      // 内网主机 → DNS 查询窗口
+	errs       map[string]*hostErr     // 站点 → 返回 5xx 的不同来源（区分服务故障与攻击）
+	slow       map[string]*slowWin     // 来源 → 超时窗口（只为收到过超时的来源建立）
+	attacked   map[string]time.Time    // 来源 → 最近一次命中攻击规则的时间
+	impact     map[string]*hostImpact  // 站点 → 超时统计、业务路径可用性与可疑来源
+	sites      map[string]*siteWin     // 站点 → 请求量窗口与基线（分布式 CC）
+	homes      map[string]*homeSize    // 站点 → 首页的响应大小（识别对不存在的路径返回首页的兜底页面）
+	dsts       map[dstKey]*dstWin      // 目的地址:端口 → 事件量窗口与基线（多源 DDoS）
+	devFloods  map[string]devFlood     // 目的地址 → 设备最近报告的洪泛（behavior_devflood.go）
+	exfil      map[string]*exfilWin    // 内网主机 → 外发字节窗口与基线（behavior_exfil.go）
+	downloads  map[string]*dlWin       // 外部来源 → 下载量窗口
+	scripts    map[string]*scriptStat  // 站点+脚本路径 → 访问画像（behavior_webshell.go）
+	shellSites map[string]*shellSite   // 站点 → 首次出现时间与最近的上传
 	// 横向移动（behavior_lateral.go）：被攻击的内网服务器、东西向连接对的首次出现时间、来源的观察期、最近的网络登录
 	attackedSrv        map[string]srvMark
 	ewSeen, ewSeenPrev map[uint64]int64
@@ -164,7 +166,7 @@ const maxAuthHosts = 256
 
 func NewBehavior(th config.Thresholds) *Behavior {
 	return &Behavior{th: th, web: map[string]*webWin{}, fw: map[string]*fwWin{}, logins: map[string]*loginWin{},
-		enum: map[string]*enumWin{}, beacons: map[string]*beacon{}, beaconDst: map[string]int{}, auth: map[string]*authWin{}, dns: map[string]*dnsWin{}, errs: map[string]*hostErr{},
+		enum: map[string]*enumWin{}, beacons: map[string]*beacon{}, beaconDst: map[string]*beaconPeers{}, auth: map[string]*authWin{}, dns: map[string]*dnsWin{}, errs: map[string]*hostErr{},
 		slow: map[string]*slowWin{}, attacked: map[string]time.Time{}, impact: map[string]*hostImpact{},
 		sites: map[string]*siteWin{}, dsts: map[dstKey]*dstWin{}, homes: map[string]*homeSize{},
 		exfil: map[string]*exfilWin{}, downloads: map[string]*dlWin{}, scripts: map[string]*scriptStat{}, shellSites: map[string]*shellSite{},
@@ -643,10 +645,24 @@ func (b *Behavior) observeBeacon(ev *model.Event) []model.Hit {
 	h := model.Hit{RuleID: "bhv-beacon", Name: "周期性外连（疑似C2心跳）", Category: CatBeacon, Severity: model.SevMedium,
 		Phase: model.PhasePersistence, Result: fwResult(ev),
 		Evidence: fmt.Sprintf("%s 每隔约 %s 连接 %s:%d（截至本次共 %d 次连接，间隔波动 %.0f%%；同一对地址只告警一次）", ev.SrcIP, approxDur(mean), ev.DstIP, ev.DstPort, bc.n, 100*std/mean)}
+	// 按不同的内网主机计数：同一台主机隔天再次触发（条目 3 小时没有连接被清理后重新建立）不能被说成“又一台主机”
 	dst := ev.DstIP + ":" + strconv.Itoa(ev.DstPort)
-	peers := b.beaconDst[dst]
-	if _, ok := b.beaconDst[dst]; ok || len(b.beaconDst) < 100000 {
-		b.beaconDst[dst] = peers + 1
+	bp := b.beaconDst[dst]
+	if bp == nil && len(b.beaconDst) < 100000 {
+		bp = &beaconPeers{}
+		b.beaconDst[dst] = bp
+	}
+	peers := 0
+	if bp != nil {
+		for _, h := range bp.hosts {
+			if h != ev.SrcIP {
+				peers++
+			}
+		}
+		if !slices.Contains(bp.hosts, ev.SrcIP) && len(bp.hosts) < 8 {
+			bp.hosts = append(bp.hosts, ev.SrcIP)
+		}
+		bp.last = ev.Time
 	}
 	switch {
 	case strings.EqualFold(ev.Proto, "icmp"):
@@ -751,6 +767,11 @@ func (b *Behavior) observeFw(ev *model.Event) []model.Hit {
 		return model.Hit{RuleID: "bhv-portscan", Name: "端口扫描", Category: CatPortScan,
 			Severity: sev, Phase: model.PhaseRecon, Evidence: fmt.Sprintf("%s内探测 %d 个以上不同端口，最近目标 %s", win, nPorts, ev.Target())}
 	})
+	// 达到阈值时（第 20 个端口）只会是中危；扫描范围扩大到阈值的 5 倍时再报一条升级后的命中（内网来源高危）
+	fire(bitPortScanWide, nPorts >= highScan, func() model.Hit {
+		return model.Hit{RuleID: "bhv-portscan", Name: "端口扫描", Category: CatPortScan,
+			Severity: sev, Phase: model.PhaseRecon, Evidence: fmt.Sprintf("%s内探测 %d 个以上不同端口（大范围扫描），最近目标 %s", win, nPorts, ev.Target())}
+	})
 	if s := w.sweep[ev.DstPort]; len(s) >= b.th.HostSweep {
 		fire(bitSweep, true, func() model.Hit {
 			return model.Hit{RuleID: "bhv-hostsweep", Name: "主机存活/横向扫描", Category: CatHostSweep,
@@ -847,6 +868,11 @@ func (b *Behavior) prune(now time.Time) {
 			delete(b.enum, k)
 		}
 	}
+	for k, bp := range b.beaconDst { // 7 天没有主机再触发的外部地址不再记录
+		if stale(now, bp.last, 7*24*time.Hour) {
+			delete(b.beaconDst, k)
+		}
+	}
 	for k, bc := range b.beacons {
 		if stale(now, bc.seen, 3*time.Hour) {
 			delete(b.beacons, k)
@@ -895,6 +921,12 @@ func fmtDur(d time.Duration) string {
 }
 
 var durText sync.Map // time.Duration → 文字
+
+// beaconPeers 是以同样规律连接同一外部地址的内网主机（最多记 8 台）。
+type beaconPeers struct {
+	hosts []string
+	last  time.Time
+}
 
 // noteLatest 记录用于清理的“当前日志时间”：取各日志源中最新的事件时间，但不超过系统时间。
 // 一个时钟偏快的日志源（或一条时间在未来的日志）不能把它拉到未来：清理按它判断窗口是否过期，

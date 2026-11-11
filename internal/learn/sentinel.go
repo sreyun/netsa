@@ -168,9 +168,17 @@ func (l *Learner) ObserveAudit(r auth.Record) []Anomaly {
 		}
 		b.Logins++
 		b.Hours[h]++
-		if _, ok := b.Nets[nk]; ok || len(b.Nets) < maxNets {
-			b.Nets[nk]++
+		if _, ok := b.Nets[nk]; !ok && len(b.Nets) >= maxNets {
+			// 满了淘汰登录次数最少的网段，再记下新网段：不再学习的话，之后常用的新网段每次登录都报“从新地址登录”
+			least, ln := "", 0
+			for k, n := range b.Nets {
+				if least == "" || n < ln || n == ln && k < least {
+					least, ln = k, n
+				}
+			}
+			delete(b.Nets, least)
 		}
+		b.Nets[nk]++
 		l.dirty = true
 	case r.Action == "": // 登录失败
 		if n := l.sent.recent(l.sent.fails, r.User, r.Time, hourAgo); n >= failBurst {
@@ -198,12 +206,20 @@ func sensitive(action, detail string) (string, model.Severity) {
 	switch action {
 	case "关闭双因素认证", "重置双因素认证":
 		return "平台账号的双因素认证被关闭 / 重置", model.SevHigh
-	case "创建账号", "修改账号":
-		if strings.Contains(detail, "admin") || strings.Contains(detail, "管理员") {
+	// 只看说明里的角色部分（账号名、令牌名本身可能就含 admin，如内置账号 admin、只读账号 badminton）：
+	// 创建账号“名称（角色）”、修改账号“名称 角色改为 X …”、创建令牌“名称（所属账号 · 角色）”
+	case "创建账号":
+		if strings.HasSuffix(detail, "（admin）") {
 			return "新增或提升了平台管理员账号", model.SevHigh
 		}
+	case "修改账号":
+		if i := strings.Index(detail, " 角色改为 admin"); i >= 0 {
+			if rest := detail[i+len(" 角色改为 admin"):]; rest == "" || strings.HasPrefix(rest, " ") {
+				return "新增或提升了平台管理员账号", model.SevHigh
+			}
+		}
 	case "创建 API 令牌":
-		if strings.Contains(detail, "admin") {
+		if strings.HasSuffix(detail, " · admin）") {
 			return "创建了管理员权限的 API 令牌", model.SevHigh
 		}
 	case "添加误报抑制":

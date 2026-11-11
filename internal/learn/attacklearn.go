@@ -59,6 +59,15 @@ func bumpUse(m *map[string]*useWin, ip string, at time.Time) int {
 	u := (*m)[ip]
 	if u == nil {
 		if len(*m) >= 64 {
+			// 表满时先清掉窗口早已过期的来源：上限约束的是一小时内同时活跃的来源数。
+			// 否则一条规则被 64 个来源命中过之后，新来源的轮询再也识别不出来，规则不会自动停用
+			for k, w := range *m {
+				if at.Sub(w.start) > pollWindow || w.start.After(at.Add(pollWindow)) {
+					delete(*m, k)
+				}
+			}
+		}
+		if len(*m) >= 64 {
 			return 0
 		}
 		u = &useWin{start: at}

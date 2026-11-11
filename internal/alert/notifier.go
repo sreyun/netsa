@@ -639,6 +639,9 @@ func (n *Notifier) view(id string) RobotView {
 }
 
 // saveLocked 把界面添加的机器人写入文件（调用方持锁）。文件包含 Webhook 令牌与密钥，权限为 0600。
+// ErrSaveFailed 表示操作已在内存中生效，但写入配置文件失败（重启后会恢复为文件中的内容）。
+var ErrSaveFailed = errors.New("保存机器人配置失败")
+
 func (n *Notifier) saveLocked() error {
 	if n.path == "" {
 		return nil
@@ -657,15 +660,15 @@ func (n *Notifier) saveLocked() error {
 		return err
 	}
 	if err := os.MkdirAll(filepath.Dir(n.path), 0o755); err != nil {
-		return fmt.Errorf("保存机器人配置失败: %w", err)
+		return fmt.Errorf("%w: %w", ErrSaveFailed, err)
 	}
 	tmp := n.path + ".tmp"
 	if err := os.WriteFile(tmp, data, 0o600); err != nil {
-		return fmt.Errorf("保存机器人配置失败: %w", err)
+		return fmt.Errorf("%w: %w", ErrSaveFailed, err)
 	}
 	if err := os.Rename(tmp, n.path); err != nil {
 		os.Remove(tmp)
-		return fmt.Errorf("保存机器人配置失败: %w", err)
+		return fmt.Errorf("%w: %w", ErrSaveFailed, err)
 	}
 	return nil
 }

@@ -41,23 +41,44 @@ type surgeBase struct {
 	surge   bool    // 当前窗口已判定为突增
 	checked int     // 上次判断时的量
 	flagged int     // 当前突增已告警的来源数
+	back    int     // 连续出现的、比当前窗口早一个窗口以上的事件数
+	rewound bool    // 正在回放更早的日志：之后跳回较新的时间时不把这段跨度当作空闲窗口
 }
 
 // roll 在事件时间超出当前窗口时结算：非突增窗口计入基线，中间没有任何请求的窗口按 0 计入。返回是否开始了新窗口。
+//
+// 日志时间不完全可信：时间明显在未来（超过系统时间 1 小时）的事件不推动窗口；个别时间倒退较多的事件
+// （设备时钟错误、补读的旧日志）计入当前窗口，连续出现才判定为回放更早的日志，这时重开窗口但保留基线；
+// 回放结束、跳回较新的时间时只重设窗口起点。否则一条时间错误的日志就会把基线衰减到接近 0、
+// 同时把基线标为已成熟，繁忙服务之后每个窗口都被判为突增（DDoS 误报），而且不会自愈。
 func (s *surgeBase) roll(t time.Time, win time.Duration) bool {
+	if t.After(time.Now().Add(time.Hour)) {
+		return false
+	}
 	if s.start.IsZero() {
 		s.start = t
 		return true
 	}
 	d := t.Sub(s.start)
 	if d >= 0 && d < win {
+		s.back = 0
 		return false
 	}
 	if d < 0 {
 		if -d < win {
 			return false // 窗口内的乱序日志
 		}
-		s.start = t // 时间倒退较多（回放历史日志）：重新开始，不计入基线
+		if s.back++; s.back < 3 {
+			return false
+		}
+		s.start, s.back, s.rewound = t, 0, true
+		s.n, s.surge, s.checked, s.flagged = 0, false, 0, 0
+		return true
+	}
+	s.back = 0
+	if s.rewound && d > 2*win {
+		s.rewound = false
+		s.start = t
 		s.n, s.surge, s.checked, s.flagged = 0, false, 0, 0
 		return true
 	}

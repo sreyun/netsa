@@ -2,9 +2,11 @@ package store
 
 import (
 	"fmt"
+	"net"
 	"net/netip"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -365,13 +367,34 @@ func campaignKeys(o *IPProfile, uaUsers, tlsUsers map[string]int, total int) []s
 func targetHosts(o *IPProfile) map[string]struct{} {
 	out := make(map[string]struct{}, len(o.Targets))
 	for t := range o.Targets {
-		h := t
-		if i := strings.IndexAny(h, " :/"); i > 0 {
-			h = h[:i]
-		}
-		out[h] = struct{}{}
+		out[targetHost(t)] = struct{}{}
 	}
 	return out
+}
+
+// targetHost 从目标中取出主机：Web 目标“站点 路径”取空格之前；网络目标“地址:端口/协议”去掉协议与端口。
+// IPv6 地址本身含冒号，只去掉末尾的 :端口，不能在第一个冒号处截断（否则同一 /16 的地址都成了同一台主机）。
+func targetHost(t string) string {
+	if i := strings.IndexByte(t, ' '); i > 0 {
+		return t[:i]
+	}
+	if i := strings.LastIndexByte(t, '/'); i > 0 {
+		t = t[:i]
+	}
+	if strings.HasPrefix(t, "[") {
+		if i := strings.IndexByte(t, ']'); i > 0 {
+			return t[1:i]
+		}
+	}
+	if i := strings.LastIndexByte(t, ':'); i > 0 {
+		if strings.Count(t, ":") == 1 { // IPv4 或主机名带端口
+			return t[:i]
+		}
+		if _, err := strconv.Atoi(t[i+1:]); err == nil && net.ParseIP(t[:i]) != nil { // IPv6 地址:端口
+			return t[:i]
+		}
+	}
+	return t
 }
 
 // sharedScan 判断两个攻击源是否在相近时间（活动期间相互重叠，或间隔不超过 1 小时）扫描了同一台主机、
@@ -384,11 +407,7 @@ func sharedScan(a, b *IPProfile, hostsA map[string]struct{}) bool {
 		return false
 	}
 	for t := range b.Targets {
-		h := t
-		if i := strings.IndexAny(h, " :/"); i > 0 {
-			h = h[:i]
-		}
-		if _, ok := hostsA[h]; ok {
+		if _, ok := hostsA[targetHost(t)]; ok {
 			return true
 		}
 	}

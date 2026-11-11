@@ -10,6 +10,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"netsa/internal/detect"
 	"netsa/internal/geo"
 	"netsa/internal/model"
 	"netsa/internal/risk"
@@ -380,6 +381,9 @@ const throttleWindow = 10 * time.Minute
 // alertRuleCap 是单个画像记录的规则数上限（规则总量有限，预留余量防止自定义规则过多时内存膨胀）。
 const alertRuleCap = 500
 
+// maxRuleIDs 是全局规则统计表记录的不同规则编号数上限。
+const maxRuleIDs = 4096
+
 // Record 记录一个事件及其检测命中。
 func (s *Store) Record(ev *model.Event, hits []model.Hit) RecordResult {
 	s.mu.Lock()
@@ -444,6 +448,7 @@ func (s *Store) recordLocked(ev *model.Event, hits []model.Hit) RecordResult {
 	if ev.SrcPort < 0 || ev.SrcPort > 65535 {
 		ev.SrcPort = 0
 	}
+	hits = s.dropSelfRefLocked(ev, hits)
 
 	count := !ev.Replay && !ev.Aux // 补发命中的事件副本已经计入过事件量；辅助记录描述的是已经计入的连接
 	if count {
@@ -613,6 +618,11 @@ func (s *Store) recordLocked(ev *model.Event, hits []model.Hit) RecordResult {
 			continue
 		}
 		p.ensureAttackMaps()
+		// 规则编号以规则库为主、数量有限，但第三方告警（EDR、设备威胁）的编号来自日志：全局的规则表设上限，
+		// 超出后并入一个溢出编号（仍计入攻击总量），这些表与画像上以规则为键的统计都不会无上限增长
+		if _, ok := s.rules[h.RuleID]; !ok && len(s.rules) >= maxRuleIDs {
+			h.RuleID, h.Name = "rule-overflow", "其他规则（规则编号过多）"
+		}
 		if p.retractedOnly && !s.excluded[h.RuleID] { // 出现了其他规则的命中：重新算作攻击源（随后的 add 一次性计入统计）
 			p.retractedOnly = false
 			delete(s.retracted, p.IP)
@@ -990,6 +1000,34 @@ func (s *Store) evictLocked() {
 		delete(s.ips, p.IP)
 		delete(s.retracted, p.IP)
 	}
+}
+
+// dropSelfRefLocked 丢弃参数地址指向本站的“远程文件包含”命中（调用方持锁）：只在请求的 Host 是已登记的资产、
+// 或首页有稳定的正常访问（真实存在的站点）时丢弃。Host 头由客户端提供，攻击者把它改成自己的域名时，
+// 那个域名在这里没有任何正常访问，命中照常保留。
+func (s *Store) dropSelfRefLocked(ev *model.Event, hits []model.Hit) []model.Hit {
+	idx := -1
+	for i := range hits {
+		if hits[i].SelfRef {
+			idx = i
+			break
+		}
+	}
+	if idx < 0 {
+		return hits
+	}
+	known := ev.Asset != nil || ev.Host != "" && !detect.FakeSiteHost(ev.Host) && s.surf.hasHomeBaseline(ev.Host)
+	out := make([]model.Hit, 0, len(hits))
+	for _, h := range hits {
+		if h.SelfRef {
+			if known {
+				continue
+			}
+			h.SelfRef = false
+		}
+		out = append(out, h)
+	}
+	return out
 }
 
 // ruleTally 是一条自学习观察规则的命中构成（等级、研判结果、主要目标）。观察规则的数量有上限（learn.maxLearnedRules）。

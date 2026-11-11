@@ -601,3 +601,37 @@ func TestObjectiveEvidenceUpgradesAIConfirmation(t *testing.T) {
 		t.Fatal("有客观证据的来源不应按站点常客撤销")
 	}
 }
+
+// 平台高危变更只看说明里的角色部分：账号名、令牌名里含 admin 不算。
+func TestSensitiveAdminRole(t *testing.T) {
+	for _, c := range []struct {
+		action, detail string
+		high           bool
+	}{
+		{"创建 API 令牌", "prom（admin · metrics）", false}, {"创建 API 令牌", "x（bob · admin）", true},
+		{"修改账号", "admin 重置密码", false}, {"修改账号", "sysadmin2 角色改为 viewer", false}, {"修改账号", "bob 角色改为 admin 重置密码", true},
+		{"修改账号", "bob 角色改为 admin", true}, {"创建账号", "badminton（viewer）", false}, {"创建账号", "carol（admin）", true},
+	} {
+		_, sev := sensitive(c.action, c.detail)
+		if got := sev == model.SevHigh; got != c.high {
+			t.Errorf("%s %q: 高危=%v，期望 %v", c.action, c.detail, got, c.high)
+		}
+	}
+}
+
+// 轮询计数表满了之后，先清掉窗口已过期的来源：之后的新来源轮询仍能识别。
+func TestBumpUseEvictsExpired(t *testing.T) {
+	var m map[string]*useWin
+	t0 := time.Now()
+	for i := range 64 {
+		bumpUse(&m, "198.51.100."+strconv.Itoa(i), t0)
+	}
+	later := t0.Add(2 * time.Hour)
+	n := 0
+	for range pollRepeat {
+		n = bumpUse(&m, "203.0.113.9", later)
+	}
+	if n != pollRepeat {
+		t.Fatalf("过期的来源应被清掉，新来源的轮询计数应正常累加: %d", n)
+	}
+}

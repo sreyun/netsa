@@ -88,11 +88,12 @@ func (s *Server) robotUpdate(w http.ResponseWriter, r *http.Request) {
 func (s *Server) robotDelete(w http.ResponseWriter, r *http.Request) {
 	err := s.Notifier.Delete(r.PathValue("id"))
 	s.audit(r, "删除告警机器人", r.PathValue("id"), err)
-	if err != nil && !strings.HasPrefix(err.Error(), "保存") {
+	if err != nil && !errors.Is(err, alert.ErrSaveFailed) {
 		s.alertError(w, err)
 		return
 	}
-	writeJSON(w, map[string]any{"ok": true})
+	// 已删除但没能写入配置文件：明确提示，重启后会恢复（与创建、修改一致），不当作完全成功
+	writeJSON(w, map[string]any{"ok": true, "warning": errText(err)})
 }
 
 // robotTest 发送测试消息。路径中带 id 时测试已保存的机器人（表单中未填写的地址与密钥沿用已保存的值）。
@@ -125,21 +126,25 @@ func errText(err error) string {
 	return err.Error()
 }
 
-// sameOrigin 拒绝跨站提交的写请求（CSRF）：浏览器跨站请求会带上 Origin，且与本站 Host 不一致。
+// sameOrigin 拒绝跨站提交的写请求（CSRF）。浏览器带 Sec-Fetch-Site 时以它为准（网页无法伪造）：same-origin / none 放行，
+// 其余拒绝；没有该头的旧浏览器与非浏览器客户端，带 Origin 时要求与本站 Host 一致。
+// 先比较 Origin 与 Host 的话，放在改写 Host 的反向代理之后（nginx proxy_pass 默认把 Host 改为上游地址）时，
+// 包括登录在内的所有写请求都会被判为跨站。
 func sameOrigin(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.Method {
 		case http.MethodGet, http.MethodHead, http.MethodOptions:
 		default:
-			if o := r.Header.Get("Origin"); o != "" {
+			if site := r.Header.Get("Sec-Fetch-Site"); site != "" {
+				if site != "same-origin" && site != "none" {
+					writeError(w, http.StatusForbidden, "拒绝跨站请求")
+					return
+				}
+			} else if o := r.Header.Get("Origin"); o != "" {
 				if u, err := url.Parse(o); err != nil || !strings.EqualFold(u.Host, r.Host) {
 					writeError(w, http.StatusForbidden, "拒绝跨站请求")
 					return
 				}
-			}
-			if site := r.Header.Get("Sec-Fetch-Site"); site != "" && site != "same-origin" && site != "none" {
-				writeError(w, http.StatusForbidden, "拒绝跨站请求")
-				return
 			}
 		}
 		next.ServeHTTP(w, r)

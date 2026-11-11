@@ -34,6 +34,7 @@ type loginPoint struct {
 	lat, lon float64
 	country  string
 	city     string
+	precise  bool // 坐标到城市级（不是国家、省份的中心点，精度在 200 公里以内）
 }
 
 func (p loginPoint) place() string {
@@ -71,7 +72,8 @@ func (b *Behavior) observeTakeover(ev *model.Event) []model.Hit {
 		a = &acctProfile{first: ev.Time, countries: map[string]bool{}, fired: map[string]time.Time{}}
 		b.accts[key] = a
 	}
-	cur := loginPoint{ip: ev.SrcIP, at: ev.Time, lat: g.Lat, lon: g.Lon, country: g.Country, city: g.City}
+	cur := loginPoint{ip: ev.SrcIP, at: ev.Time, lat: g.Lat, lon: g.Lon, country: g.Country, city: g.City,
+		precise: g.City != "" && g.CoordSource != "province" && g.CoordSource != "country" && (g.AccuracyKM == 0 || g.AccuracyKM <= 200)}
 	if ev.Time.Before(a.first) {
 		a.first = ev.Time
 	}
@@ -90,7 +92,9 @@ func (b *Behavior) observeTakeover(ev *model.Event) []model.Hit {
 	}
 	var hits []model.Hit
 	// 不可能的旅行：与上一次成功登录比较（两次都有经纬度时）
-	if p := a.last; p.ip != "" && p.ip != cur.ip && (p.lat != 0 || p.lon != 0) && (cur.lat != 0 || cur.lon != 0) {
+	// 只比较两个都定位到城市的点：国家、省份的中心点与真实位置可能相差上千公里，同一国家内换个网络就会被算成“飞了两千公里”。
+	// 跨国但精度不足的情况由“新国家登录”覆盖
+	if p := a.last; p.ip != "" && p.ip != cur.ip && p.precise && cur.precise && (p.lat != 0 || p.lon != 0) && (cur.lat != 0 || cur.lon != 0) {
 		km := haversine(p.lat, p.lon, cur.lat, cur.lon)
 		h := math.Abs(cur.at.Sub(p.at).Hours())
 		if km >= travelMinKm && (h == 0 || km/h > travelMaxKmh) {

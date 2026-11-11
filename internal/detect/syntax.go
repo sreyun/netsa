@@ -1,7 +1,6 @@
 package detect
 
 import (
-	"html"
 	"strings"
 
 	"github.com/corazawaf/libinjection-go"
@@ -36,25 +35,43 @@ func QueryParams(rawURI string) []Param { return splitParams(rawURI, false) }
 // splitParams 拆分查询参数（withPath 时连同路径段）。先按原始的 & 与 = 拆分再解码，
 // 取值中编码的 %26、%3D 不会把参数拆错。
 func splitParams(rawURI string, withPath bool) []Param {
+	ps, _ := splitParamsT(rawURI, withPath)
+	return ps
+}
+
+// splitParamsT 与 splitParams 相同，另外返回是否有内容没有纳入分析（参数个数超过上限，或取值超长被截断）。
+func splitParamsT(rawURI string, withPath bool) (out []Param, truncated bool) {
 	path, query, _ := strings.Cut(rawURI, "?")
-	var out []Param
 	if withPath {
 		for _, seg := range strings.Split(path, "/") {
-			if seg != "" && len(out) < maxSyntaxParams {
+			if seg == "" {
+				continue
+			}
+			if len(out) >= maxSyntaxParams || len(seg) > maxSyntaxLen {
+				truncated = true
+			}
+			if len(out) < maxSyntaxParams {
 				out = append(out, Param{Value: decodeValue(seg)})
 			}
 		}
 	}
-	for query != "" && len(out) < maxSyntaxParams {
+	for query != "" {
 		var kv string
 		kv, query, _ = strings.Cut(query, "&")
 		k, v, _ := strings.Cut(kv, "=")
 		if k == "" && v == "" {
 			continue
 		}
+		if len(out) >= maxSyntaxParams {
+			truncated = true
+			break
+		}
+		if len(v) > maxSyntaxLen {
+			truncated = true
+		}
 		out = append(out, Param{Name: strings.ToLower(decodeValue(k)), Value: decodeValue(v)})
 	}
-	return out
+	return out, truncated
 }
 
 // decodeValue 按 Normalize 的方式解码单个取值，但不转小写、不去注释：libinjection 自己处理大小写与注释。
@@ -118,7 +135,7 @@ func hasParam(ps []Param, name string) bool {
 // normValue 把取值归一成与规则匹配文本相同的形式（小写、去 SQL 注释、合并空白）。
 func normValue(s string) string {
 	if strings.ContainsRune(s, '&') {
-		s = html.UnescapeString(s)
+		s = unescapeRefs(s)
 	}
 	s = strings.ToLower(s)
 	if strings.Contains(s, "/*") {
@@ -169,7 +186,14 @@ func reviewSyntax(ev *model.Event, uri, result string, hits []model.Hit, review 
 	if len(review) == 0 && !scan {
 		return hits
 	}
-	ps := splitParams(ev.URI, len(review) > 0)
+	ps, truncated := splitParamsT(ev.URI, len(review) > 0)
+	// 没有发现注入时的结论：全部参数都分析过才是“不构成注入”（-1）；有参数因个数上限、长度上限没有分析时只能是“未分析”（0）。
+	// 否则在载荷前面塞 32 个无关参数，真实的注入就会被记为“语法分析判定不构成注入”，自学习据此把它降为低危
+	neg := int8(-1)
+	if truncated {
+		neg = 0
+	}
+	var sqlDone, xssDone bool
 	var sqlV, xssV int8 // 每个请求只分析一次
 	var sqlP Param
 	var sqlFP string
@@ -182,24 +206,30 @@ func reviewSyntax(ev *model.Event, uri, result string, hits []model.Hit, review 
 		}
 		switch h.Category {
 		case CatSQLi:
-			if sqlV == 0 {
-				sqlV = -1
+			if !sqlDone {
+				sqlDone, sqlV = true, neg
 				if p, fp, ok := sqliIn(ps, false); ok {
 					sqlV, sqlP, sqlFP = 1, p, fp
 				}
 			}
 			h.Syntax = sqlV
+			if sqlV < 0 && h.Param != "" && !hasParam(ps, h.Param) {
+				h.Syntax = 0 // 命中所在的参数没有分析到
+			}
 			if sqlV > 0 {
 				h.Evidence += "；语法分析确认构成 SQL 注入（libinjection 指纹 " + sqlFP + "）"
 			}
 		case CatXSS:
-			if xssV == 0 {
-				xssV = -1
+			if !xssDone {
+				xssDone, xssV = true, neg
 				if xssIn(ps) {
 					xssV = 1
 				}
 			}
 			h.Syntax = xssV
+			if xssV < 0 && h.Param != "" && !hasParam(ps, h.Param) {
+				h.Syntax = 0
+			}
 			if xssV > 0 {
 				h.Evidence += "；语法分析确认可构成 HTML / 脚本注入"
 			}
@@ -214,7 +244,7 @@ func reviewSyntax(ev *model.Event, uri, result string, hits []model.Hit, review 
 		}
 	}
 	// 规则没有命中的 SQL 注入：只看含有注入符号的查询参数，路径段里的算式、文件名不分析
-	if sqlV == 0 {
+	if !sqlDone {
 		if p, fp, ok := sqliIn(ps, true); ok {
 			sqlV, sqlP, sqlFP = 1, p, fp
 		}

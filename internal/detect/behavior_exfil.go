@@ -50,8 +50,11 @@ type slideSum struct {
 func (s *slideSum) add(t time.Time, win time.Duration, n int64) (int64, int) {
 	w := max(int64(win)/slideSlots, 1)
 	id := t.UnixNano() / w
+	// 时间明显在未来的日志不计入：否则窗口被锚到未来，之后正常时间的日志都落在窗口之外，外发统计失效
+	future := t.After(time.Now().Add(time.Hour))
 	i := int((id%slideSlots + slideSlots) % slideSlots)
 	switch {
+	case future:
 	case s.at[i] == id:
 		s.sum[i] = satAdd(s.sum[i], n)
 		s.cnt[i]++
@@ -59,6 +62,9 @@ func (s *slideSum) add(t time.Time, win time.Duration, n int64) (int64, int) {
 		s.at[i], s.sum[i], s.cnt[i] = id, n, 1
 	} // 比槽中记录还早一个窗口以上的日志：已在窗口之外
 	hi := id
+	if future {
+		hi = 0
+	}
 	for _, a := range s.at {
 		hi = max(hi, a)
 	}

@@ -468,7 +468,7 @@ func (sf *surface) successKept(cat, target string) bool {
 	if !ok || host == "" || uri == "" || len(target) >= 200 { // 记录时截断到 200 字节：路径可能不完整
 		return true
 	}
-	key := host + " " + normPath(uri)
+	key := siteHost(host) + " " + normPath(uri)
 	if cat == "敏感文件探测" {
 		return sf.Findings["sens:"+key] != nil
 	}
@@ -488,7 +488,7 @@ func (sf *surface) purgeSelfRFI() int {
 		if h == "" || h == "-" {
 			h, _, _ = strings.Cut(f.Asset, "/")
 		}
-		if detect.SelfReferenceRFI(f.Evidence, h) {
+		if sf.hasHomeBaseline(h) && detect.SelfReferenceRFI(f.Evidence, h) { // 只对有正常访问的真实站点清理
 			delete(sf.Findings, id)
 			n++
 		}
@@ -779,11 +779,17 @@ func serviceInfo(port int) (string, model.Severity) {
 }
 
 // observeWeb 更新 Web 资产与风险发现（调用方持锁）。
-func (sf *surface) observeWeb(ev *model.Event, hits []model.Hit, attacked bool) {
-	host := ev.Host
-	if host == "" || detect.FakeSiteHost(host) {
-		host = "-" // 虚构的 Host 头（OAST、随机串域名、云元数据地址）不是站点
+// siteHost 返回请求所属站点的键：空 Host 与虚构的 Host 头（OAST、随机串域名、云元数据地址）都记在 "-" 下。
+// 攻击面登记、基线复核、兜底页面判断必须用同一个键，否则把 Host 换成 OAST 子域名的请求绕过兜底页面复核。
+func siteHost(h string) string {
+	if h == "" || detect.FakeSiteHost(h) {
+		return "-"
 	}
+	return h
+}
+
+func (sf *surface) observeWeb(ev *model.Event, hits []model.Hit, attacked bool) {
+	host := siteHost(ev.Host)
 	path := normPath(ev.URI)
 	exists := ev.Status >= 200 && ev.Status < 400
 	key := host + " " + path

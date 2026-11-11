@@ -242,10 +242,7 @@ func hitOf(hits []model.Hit, cat string) model.Hit {
 // 才是响应码之外的第二份证据，等级裁决据此升为严重。
 // 返回的切片为副本，不修改调用方的数据。
 func (s *Store) verifySuccess(ev *model.Event, hits []model.Hit) []model.Hit {
-	host := ev.Host
-	if host == "" {
-		host = "-"
-	}
+	host := siteHost(ev.Host) // 与攻击面登记入口、基线时的站点键一致
 	ep := s.surf.Endpoints[host+" "+normPath(ev.URI)]
 	var out []model.Hit
 	edit := func(i int) *model.Hit {

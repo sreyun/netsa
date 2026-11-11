@@ -205,7 +205,7 @@ func (e *Engine) inspectBody(ev *model.Event, hits []model.Hit) []model.Hit {
 	for _, h := range hits {
 		seen[h.RuleID] = true
 	}
-	for _, h := range e.inspectWeb(&b) {
+	for _, h := range e.inspectWebMode(&b, true) {
 		if seen[h.RuleID] {
 			continue
 		}
@@ -268,7 +268,12 @@ func clausesPass(clauses [][]int32, bits bitset) bool {
 	return true
 }
 
-func (e *Engine) inspectWeb(ev *model.Event) []model.Hit {
+func (e *Engine) inspectWeb(ev *model.Event) []model.Hit { return e.inspectWebMode(ev, false) }
+
+// inspectWebMode 检测一条 Web 请求；body 为 true 时是对请求体的检测（URI 由路径与请求体拼成）：
+// 只做规则与载荷检测，不做描述请求行的检查（超长 URL、超多参数、空 UA、随机脚本名等），
+// 否则普通的大表单、4 KB 的正文都会被报成“超长URL”“超多参数绕过WAF”。
+func (e *Engine) inspectWebMode(ev *model.Event, body bool) []model.Hit {
 	if ev.Threat != "" {
 		// WAF（ModSecurity、naxsi、Lua WAF）与 nginx 限流的判定：同一请求在访问日志中另有记录并按规则检测，这里只采信设备的判定
 		return []model.Hit{deviceThreatHit(ev)}
@@ -294,13 +299,13 @@ func (e *Engine) inspectWeb(ev *model.Event) []model.Hit {
 	// 否则把载荷放在两个参数 x=/* 与 y=*/ 之间，就能让它对全部 URI 规则不可见，应用照常收到
 	kept := normalizeKeepComments(ev.URI)
 	uri := stripComments(kept)
-	hits := e.webHits(ev, uri)
+	hits := e.webHits(ev, uri, body)
 	if uri != kept {
 		have := map[string]bool{}
 		for _, h := range hits {
 			have[h.RuleID] = true
 		}
-		for _, h := range e.webHits(ev, kept) {
+		for _, h := range e.webHits(ev, kept, body) {
 			if !have[h.RuleID] {
 				have[h.RuleID] = true
 				h.Evidence = "（注释中）" + h.Evidence
@@ -342,7 +347,7 @@ func oddRequestLine(raw string) (method, target string, ok bool) {
 }
 
 // webHits 对归一化后的 URI 执行规则、语法复核、编码载荷还原、漏洞接口签名与协议层检查。
-func (e *Engine) webHits(ev *model.Event, uri string) []model.Hit {
+func (e *Engine) webHits(ev *model.Event, uri string, body bool) []model.Hit {
 	path := uri
 	if i := strings.IndexByte(path, '?'); i >= 0 {
 		path = path[:i]
@@ -399,12 +404,22 @@ func (e *Engine) webHits(ev *model.Event, uri string) []model.Hit {
 		if r.ID == "trav-dotdot" && !strings.Contains(uri[len(path):], "..") && harmlessDotDot(ev.URI) {
 			continue
 		}
-		if r.ID == "rfi" && sameSiteURL(text[end:], ev.Host) {
-			continue
+		selfRef := false
+		if r.ID == "rfi" {
+			// 每一处参数地址都要看：前面一个参数指向本站，不代表后面的也是。证据取第一处指向别处的地址；
+			// 全部指向请求的 Host 时照常生成命中、标为 SelfRef，由状态库确认该 Host 是有正常访问的真实站点后才丢弃
+			// （Host 头由客户端提供，把它改成攻击者的域名就能让豁免生效）
+			selfRef = true
+			for _, loc := range r.re.FindAllStringIndex(text, -1) {
+				if !sameSiteURL(text[loc[1]:], ev.Host) {
+					start, end, selfRef = loc[0], loc[1], false
+					break
+				}
+			}
 		}
 		h := model.Hit{
 			RuleID: r.ID, Name: r.Name, Category: r.Category, Severity: r.sev, Phase: r.Phase,
-			Evidence: excerpt(text, start, end), Result: result, TagOnly: r.TagOnly,
+			Evidence: excerpt(text, start, end), Result: result, TagOnly: r.TagOnly, SelfRef: selfRef,
 		}
 		if result == model.ResultSuccess && !risk.ResponseProvable(r.Category) {
 			h.Result = model.ResultPassed
@@ -427,6 +442,9 @@ func (e *Engine) webHits(ev *model.Event, uri string) []model.Hit {
 	}
 	if s := matchVuln(ev.Method, path, ev.URI); s != nil { // 国产 OA、中间件的已知漏洞接口
 		hits = append(hits, vulnHit(s, ev, path, result, hits))
+	}
+	if body {
+		return hits
 	}
 	return append(hits, specialWebChecks(ev, uri, result)...)
 }
@@ -479,29 +497,48 @@ func SelfReferenceRFI(text, host string) bool {
 
 // sameSiteURL 判断参数中 "scheme://" 之后的地址是否指向本站（与请求的站点名相同或同一主域名）：
 // pdf.js 的 viewer.html?file=https://本站/group1/M00/…pdf、登录后的回跳地址引用的是自己的资源，不是包含远程文件。
-// 只比较主机名；http://本站@evil.com/、本站.evil.com 这类写法的主机名不同，照常告警。
+// 只比较主机名；http://本站@evil.com/、http://本站:x@evil.com/、本站.evil.com 这类写法指向别处，照常告警。
 func sameSiteURL(rest, host string) bool {
 	if host == "" {
 		return false
 	}
-	h := rest
-	if i := strings.IndexAny(h, "/?#&\\:; "); i >= 0 {
-		h = h[:i]
+	auth := rest
+	if i := strings.IndexAny(auth, "/?#& "); i >= 0 {
+		auth = auth[:i]
 	}
-	if h == "" || !strings.Contains(h, ".") {
+	// 带账号信息（user:pass@host）或 \ ; 这类各家解析不一致的字符：不当作本站（PHP 按 @ 之后的主机取文件）
+	if auth == "" || strings.ContainsAny(auth, "@\\;") {
 		return false
 	}
-	host = strings.ToLower(host)
-	if i := strings.LastIndexByte(host, ':'); i > 0 && strings.IndexByte(host, ']') < 0 && strings.Count(host, ":") == 1 {
-		host = host[:i] // Host 头带端口（mg.example.com:443）
+	h := strings.ToLower(stripPort(auth))
+	host = strings.ToLower(stripPort(host))
+	if h == "" || !strings.Contains(h, ".") && !strings.Contains(h, ":") {
+		return false
 	}
-	h = strings.ToLower(h)
 	if h == host {
 		return true
+	}
+	// IP 地址只认完全相同：按主域名比较会把末两段相同的地址（203.0.113.5 与 45.67.113.5）当成同一站点
+	if isIPHost(h) || isIPHost(host) {
+		return false
 	}
 	a, _ := splitDomain(h)
 	b, _ := splitDomain(host)
 	return a == b && strings.Contains(a, ".")
+}
+
+// stripPort 去掉主机名后面的端口（mg.example.com:443、[2001:db8::1]:8443），IPv6 地址去掉方括号。
+func stripPort(h string) string {
+	if strings.HasPrefix(h, "[") {
+		if i := strings.IndexByte(h, ']'); i > 0 {
+			return h[1:i]
+		}
+		return h
+	}
+	if strings.Count(h, ":") == 1 {
+		h, _, _ = strings.Cut(h, ":")
+	}
+	return h
 }
 
 // archiveExts 是源码包、备份常用的文件后缀。

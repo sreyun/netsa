@@ -35,7 +35,7 @@ func normalizeKeepComments(s string) string {
 		s = overlongUTF8.Replace(s)
 	}
 	if strings.ContainsRune(s, '&') {
-		s = html.UnescapeString(s)
+		s = unescapeRefs(s)
 	}
 	return collapseSpace(strings.ToLower(s))
 }
@@ -170,4 +170,43 @@ func Printable(s string, max int) string {
 		}
 	}
 	return b.String()
+}
+
+// unescapeRefs 只还原真正的字符引用：以分号结尾的命名实体（&lt; &amp;）与数字引用（&#60、&#x3c，分号可省略）。
+// html.UnescapeString 还会按最长前缀还原不带分号的旧式实体，查询串里的 &notify_url=、&param=、&region=、&timestamp=
+// 会变成 ¬ify_url=、¶m=、®ion=、×tamp=，参数边界被破坏，按参数匹配的规则（如内网地址的 SSRF）因此漏报。
+func unescapeRefs(s string) string {
+	if !strings.Contains(s, "&") {
+		return s
+	}
+	var b strings.Builder
+	b.Grow(len(s))
+	for {
+		i := strings.IndexByte(s, '&')
+		if i < 0 {
+			b.WriteString(s)
+			return b.String()
+		}
+		b.WriteString(s[:i])
+		s = s[i:]
+		j := 1
+		for j < len(s) && j < 40 && (s[j] == '#' || s[j] >= 'a' && s[j] <= 'z' || s[j] >= 'A' && s[j] <= 'Z' || s[j] >= '0' && s[j] <= '9') {
+			j++
+		}
+		ref := s[:j]
+		numeric := len(ref) > 2 && ref[1] == '#'
+		if j < len(s) && s[j] == ';' {
+			ref = s[:j+1]
+		} else if !numeric {
+			b.WriteByte('&') // 不带分号的名称：是参数分隔符，不是实体
+			s = s[1:]
+			continue
+		}
+		if u := html.UnescapeString(ref); u != ref {
+			b.WriteString(u)
+		} else {
+			b.WriteString(ref)
+		}
+		s = s[len(ref):]
+	}
 }

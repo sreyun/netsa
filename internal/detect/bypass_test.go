@@ -1,6 +1,7 @@
 package detect
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -122,6 +123,130 @@ func TestProcNameKeepsBuiltinDigits(t *testing.T) {
 	} {
 		if got := procName(in); got != want {
 			t.Errorf("procName(%q) = %q，应为 %q", in, got, want)
+		}
+	}
+}
+
+// 查询串里的参数分隔符不被当成不带分号的旧式实体：&notify_url= 不能变成 ¬ify_url=。
+func TestEntityDoesNotEatParamBoundary(t *testing.T) {
+	for in, want := range map[string]string{
+		"/pay?order=1&notify_url=x&param=1&copy=2&region=3&timestamp=4": "/pay?order=1&notify_url=x&param=1&copy=2&region=3&timestamp=4",
+		"/a?x=&lt;svg&gt;": "/a?x=<svg>", "/a?x=&#x3c;svg onload=1&#x3e;": "/a?x=<svg onload=1>", "/a?x=&#60script": "/a?x=<script",
+		"/a?x=&amp;y": "/a?x=&y", "/a?x=a&b": "/a?x=a&b",
+	} {
+		if got := Normalize(in); got != want {
+			t.Errorf("Normalize(%q) = %q，应为 %q", in, got, want)
+		}
+	}
+	e, err := NewEngine("", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, uri := range []string{"/pay?order=1&notify_url=http://127.0.0.1:6379/", "/fetch?a=1&param=http://192.168.1.1/admin"} {
+		if _, ok := hitIDs(e.Inspect(web("GET", uri, 200, "Mozilla/5.0")))["ssrf-internal"]; !ok {
+			t.Errorf("%s 应命中内网地址 SSRF", uri)
+		}
+	}
+}
+
+// 一条时间错误的日志不能把突增基线衰减到 0：个别时间倒退的日志计入当前窗口，时间在未来的日志不推动窗口。
+func TestSurgeBaselineSurvivesBadTimestamps(t *testing.T) {
+	var s surgeBase
+	win := time.Minute
+	t0 := time.Now().Add(-6 * time.Hour)
+	feed := func(at time.Time, n int) {
+		for i := 0; i < n; i++ {
+			s.roll(at, win)
+			s.n++
+		}
+	}
+	for w := 0; w < 15; w++ { // 基线成熟：每个窗口约 3 万条
+		feed(t0.Add(time.Duration(w)*win), 30000)
+	}
+	base, windows := s.base, s.windows
+	feed(t0.Add(15*win-24*time.Hour), 1)  // 一条早 24 小时的日志
+	feed(time.Now().Add(24*time.Hour), 1) // 一条晚 24 小时的日志
+	feed(t0.Add(15*win), 30000)
+	feed(t0.Add(16*win), 30000)
+	if s.base < base*0.8 || s.windows > windows+3 {
+		t.Fatalf("时间错误的日志不应清空基线: base %.0f → %.0f, windows %d → %d", base, s.base, windows, s.windows)
+	}
+	if need := s.need(1000, 3); need < 100000 {
+		t.Fatalf("繁忙服务的突增阈值应保持在平时的倍数: %d", need)
+	}
+	// 连续回放更早的日志：重开窗口但保留基线，跳回现在时不当作空闲窗口衰减
+	for i := 0; i < 5; i++ {
+		feed(t0.Add(-3*time.Hour+time.Duration(i)*time.Second), 10)
+	}
+	feed(t0.Add(17*win), 30000)
+	if s.base < base*0.5 {
+		t.Fatalf("回放结束后基线不应被当作空闲窗口衰减: %.0f", s.base)
+	}
+}
+
+// 第三方告警的规则编号只接受短的字母数字，名称转义并截断。
+func TestValidRuleRef(t *testing.T) {
+	for in, want := range map[string]bool{"100002": true, "sysmon.1:a-b_c": true, "": false, strings.Repeat("9", 50): false, "1\n<b>": false} {
+		if got := validRuleRef(in); got != want {
+			t.Errorf("validRuleRef(%q) = %v，应为 %v", in, got, want)
+		}
+	}
+}
+
+// 请求体检测只做规则与载荷检测：普通的大表单、4 KB 的正文不报“超长URL”“超多参数绕过WAF”。
+func TestBodyPassSkipsRequestLineChecks(t *testing.T) {
+	e, err := NewEngine("", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var form strings.Builder
+	for i := range 121 {
+		fmt.Fprintf(&form, "f%d=v&", i)
+	}
+	for _, body := range []string{"title=" + strings.Repeat("a", 4096), form.String()} {
+		ids := hitIDs(e.Inspect(&model.Event{Kind: model.KindWeb, SrcIP: "198.51.100.1", Method: "POST", URI: "/article/save", Body: body, Status: 200, Bytes: 100, UA: "Mozilla/5.0", Time: time.Now()}))
+		if _, ok := ids["proto-longurl"]; ok {
+			t.Errorf("正文不应报超长URL: %v", keys(ids))
+		}
+		if _, ok := ids["proto-manyargs"]; ok {
+			t.Errorf("表单字段多不应报超多参数: %v", keys(ids))
+		}
+	}
+	// 正文里的注入照常检出
+	if _, ok := hitIDs(e.Inspect(&model.Event{Kind: model.KindWeb, SrcIP: "198.51.100.1", Method: "POST", URI: "/login", Body: "u=1' union select 1,2,3-- -", Status: 200, Bytes: 100, UA: "Mozilla/5.0", Time: time.Now()}))["sqli-union"]; !ok {
+		t.Error("正文中的 SQL 注入应命中")
+	}
+}
+
+// 系统工具连接内网的 IPv6 地址（链路本地、ULA、组播）不是连接公网。
+func TestLolbinIPv6NotPublic(t *testing.T) {
+	e, err := NewEngine("", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for target, want := range map[string]bool{"fe80::1c2d:445": false, "fd12:3456::10:445": false, "ff02::1:3:5355": false, "10.0.0.5:445": false,
+		"[2001:4860:4860::8888]:443": true, "203.0.113.7:4444": true} {
+		ids := hitIDs(e.Inspect(&model.Event{Kind: model.KindProcess, Host: "pc1", Proc: &model.ProcInfo{Op: "network", Image: `C:\Windows\System32\cscript.exe`, Target: target}, Time: time.Now()}))
+		if _, got := ids["proc-net-lolbin"]; got != want {
+			t.Errorf("%s: 命中 %v，期望 %v", target, got, want)
+		}
+	}
+}
+
+// 参数个数超过分析上限时，没有分析到的参数不能被记为“语法分析判定不构成注入”。
+func TestSyntaxTruncationNotNegative(t *testing.T) {
+	e, err := NewEngine("", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var pad strings.Builder
+	for i := range 33 {
+		fmt.Fprintf(&pad, "&p%d=1", i)
+	}
+	uri := "/search?q=union+select+tutorial" + pad.String() + "&id=1+union+select+password+from+users+where+id=1"
+	for _, h := range e.Inspect(web("GET", uri, 200, "Mozilla/5.0")) {
+		if h.Category == CatSQLi && h.Syntax < 0 {
+			t.Errorf("没有分析到的参数不应给出否定结论: %s syntax=%d param=%q", h.RuleID, h.Syntax, h.Param)
 		}
 	}
 }

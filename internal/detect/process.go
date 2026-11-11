@@ -3,6 +3,8 @@ package detect
 import (
 	"encoding/base64"
 	"fmt"
+	"net/netip"
+	"netsa/internal/geo"
 	"regexp"
 	"strconv"
 	"strings"
@@ -212,7 +214,7 @@ func inspectProcess(ev *model.Event) []model.Hit {
 		return hits
 	case "network":
 		if suspNetProc[img] {
-			if ip, _, _ := strings.Cut(p.Target, ":"); ip != "" && !isPrivateIP(ip) {
+			if ip := hostOfTarget(p.Target); ip.IsValid() && geo.IsPublic(ip) { // 只对确实是公网的地址告警（IPv6 的链路本地、ULA、组播不是）
 				hits = append(hits, hit("proc-net-lolbin", "脚本 / 系统工具进程连接公网", CatSuspCmd, model.SevMedium, model.PhasePersistence, "T1071",
 					fmt.Sprintf("%s 连接 %s", Printable(p.Image, 120), p.Target)))
 			}
@@ -364,6 +366,49 @@ mitre:
 	if ev.SubjectHost {
 		res = model.ResultSuccess // 主机上已经发生的事件（文件被修改、进程被执行）
 	}
-	return model.Hit{RuleID: "edr-" + ev.Format + "-" + p.Rule, Name: ev.Threat, Category: cat, Severity: sev, Phase: phase, Result: res,
+	// 规则编号与名称来自第三方告警的原文：编号只接受短的字母数字，名称转义并截断。
+	// 状态库以规则编号为键做统计、节流（不淘汰），任意长度、任意内容的编号会让这些表无上限增长
+	id := "edr-" + ev.Format
+	if validRuleRef(p.Rule) {
+		id += "-" + p.Rule
+	}
+	name := Printable(ev.Threat, 80)
+	if name == "" {
+		name = "第三方告警（" + ev.Format + "）"
+	}
+	return model.Hit{RuleID: id, Name: name, Category: cat, Severity: sev, Phase: phase, Result: res,
 		Evidence: Printable(hostLabel(ev)+evd, 400)}, true
+}
+
+// hostOfTarget 从“地址:端口”中取出地址：按最后一个冒号拆分（IPv6 地址本身含冒号），去掉方括号。解析不了时返回无效地址。
+func hostOfTarget(t string) netip.Addr {
+	t = strings.TrimSpace(t)
+	if ap, err := netip.ParseAddrPort(t); err == nil {
+		return ap.Addr().Unmap()
+	}
+	h := t
+	if i := strings.LastIndexByte(t, ':'); i > 0 {
+		if _, err := strconv.Atoi(t[i+1:]); err == nil {
+			h = t[:i]
+		}
+	}
+	a, err := netip.ParseAddr(strings.Trim(h, "[]"))
+	if err != nil {
+		return netip.Addr{}
+	}
+	return a.Unmap()
+}
+
+// validRuleRef 判断第三方告警的规则编号是否为短的字母数字（1~32 个 A-Z a-z 0-9 _ . : -）。
+func validRuleRef(s string) bool {
+	if s == "" || len(s) > 32 {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if !(c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '_' || c == '.' || c == ':' || c == '-') {
+			return false
+		}
+	}
+	return true
 }

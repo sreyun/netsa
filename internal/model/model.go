@@ -360,6 +360,9 @@ type Hit struct {
 	Param string
 	// Inapplicable 表示站点没有运行攻击针对的产品、请求也没有成功（被动识别站点产品，见 learn/site.go）：最高低危
 	Inapplicable bool
+	// SelfRef 表示远程文件包含的参数地址全部指向请求的 Host（如 pdf.js 预览本站的文件）。Host 头由客户端提供，
+	// 由状态库确认它是已登记的资产、或有正常访问的真实站点后才丢弃这条命中，否则照常告警
+	SelfRef bool
 	// Feeds 是产生这条命中的威胁情报源（情报命中才有），事件按情报源累计，自学习据此统计每个情报源的准确率
 	Feeds []string
 }

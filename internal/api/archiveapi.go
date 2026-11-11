@@ -181,4 +181,9 @@ func (s *Server) archiveExport(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	cw.Flush()
+	if err != nil || cw.Error() != nil {
+		// 已经开始输出后出错（查询超时、数据库连接中断）：中断连接，让下载明确失败，
+		// 否则浏览器得到一个格式完好、内容不全的 CSV，使用者会把它当作完整数据
+		panic(http.ErrAbortHandler)
+	}
 }

@@ -2,6 +2,7 @@ package detect
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -226,6 +227,20 @@ func TestLogonChain(t *testing.T) {
 	h := ruleHits(logon("10.0.5.30", "FILE1", "DC1", "administrator", "RDP", at.Add(time.Hour+20*time.Minute)), "auth-lateral-chain")
 	if len(h) != 1 || h[0].Severity != model.SevHigh || !strings.Contains(h[0].Evidence, "pc-07 →(bob) file1 →(administrator) dc1") {
 		t.Fatalf("换了账号的横向登录链: %+v", h)
+	}
+	// 两台主机互相登录（服务账号同步）：形成环，不累计跳数，链条与路径长度有界
+	for i := range 200 {
+		src, dst := "APP9", "FILE9"
+		if i%2 == 1 {
+			src, dst = "FILE9", "APP9"
+		}
+		logon("10.0.6."+strconv.Itoa(i%2+1), src, dst, "svc_sync", "网络登录", at.Add(2*time.Hour+time.Duration(i)*20*time.Second))
+	}
+	b.mu.Lock()
+	m := b.logons["app9"]
+	b.mu.Unlock()
+	if m.hops < 1 || m.hops > 2 || len(m.path) > 700 {
+		t.Fatalf("互相登录不应无限延长链条: hops=%d path=%d", m.hops, len(m.path))
 	}
 	// 超过 1 小时的两次登录不串成链
 	logon("10.0.5.8", "PC-08", "FILE2", "carol", "网络登录", at.Add(3*time.Hour))

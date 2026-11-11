@@ -76,6 +76,8 @@ func TestAccountTakeover(t *testing.T) {
 		"6.6.6.6":  {Country: "新加坡", City: "新加坡", Lat: 1.35, Lon: 103.8, Hosting: true},
 		"7.7.7.7":  {Country: "日本", City: "东京", Lat: 35.68, Lon: 139.69},
 		"8.8.8.10": {Country: "中国", City: "成都市", Lat: 30.57, Lon: 104.07},
+		"9.9.9.9":  {Country: "美国", Lat: 39.5, Lon: -99.1, CoordSource: "country"},
+		"9.9.9.10": {Country: "美国", City: "纽约", Lat: 40.71, Lon: -74.0},
 	}
 	b.Geo = func(ip string) *geo.Info { return places[ip] }
 	t0 := time.Date(2026, 11, 1, 9, 0, 0, 0, time.UTC)
@@ -113,6 +115,11 @@ func TestAccountTakeover(t *testing.T) {
 		t.Fatalf("多地并发登录: %+v", h)
 	}
 	// 失败的登录、内网来源不参与
+	// 国家中心点与城市坐标不比较：同一国家内换个网络（只能定位到国家）不是“不可能的旅行”
+	login("wangwu", "9.9.9.10", at)
+	if h := ruleHits(login("wangwu", "9.9.9.9", at.Add(20*time.Minute)), "auth-impossible-travel"); len(h) != 0 {
+		t.Fatalf("国家级坐标不应参与不可能的旅行判断: %+v", h)
+	}
 	if h := b.ObserveHits(&model.Event{Kind: model.KindAuth, Service: "SSH", SrcIP: "7.7.7.7", User: "zhangsan", Action: model.ActionDeny, Time: at.Add(2 * time.Hour)}, nil); len(ruleHits(h, "auth-impossible-travel")) != 0 {
 		t.Fatalf("失败的登录不参与: %+v", h)
 	}

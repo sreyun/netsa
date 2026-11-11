@@ -594,8 +594,10 @@ func (s *Store) UpdateIncidents(ids []uint64, user string, u IncidentUpdate) ([]
 	}
 	var out []IncidentView
 	for _, i := range list {
+		restored := false
 		if u.RestoreAI && i.AIFrom != 0 {
 			i.restoreAI(now, user, "人工撤销")
+			restored = true
 		}
 		var actions []string
 		if u.Status != "" && u.Status != i.Status {
@@ -625,6 +627,9 @@ func (s *Store) UpdateIncidents(ids []uint64, user string, u IncidentUpdate) ([]
 		}
 		if len(actions) == 0 && u.Note == "" {
 			out = append(out, i.view(now))
+			if restored { // 只撤销了模型的下调：同样写入处置记录日志，崩溃后不丢失
+				touched = append(touched, i)
+			}
 			continue
 		}
 		if u.Mark != "" {
@@ -737,6 +742,7 @@ func (i *Incident) restoreAI(now time.Time, user, why string) {
 	from := i.AIFrom
 	i.AIFrom = 0
 	if from <= i.Severity {
+		i.touch(now) // 记录已经变化（AIFrom 清零）：更新时间要比快照里的新，重放日志时才会采用
 		return
 	}
 	i.Severity = from
@@ -1132,7 +1138,8 @@ func (s *Store) AutoArchive(now time.Time, idle time.Duration) []IncidentView {
 			}
 		}
 		for _, nt := range inc.Notes {
-			if nt.User != "系统" && nt.User != "自学习" && !strings.HasPrefix(nt.User, "AI") {
+			// 模型备注的作者固定写作“AI（模型名）”：账号名不含全角括号，AIden 这类账号的备注照样算人工处理
+			if nt.User != "系统" && nt.User != "自学习" && !strings.HasPrefix(nt.User, "AI（") {
 				ok = false // 有人处理过（写了备注、改过状态或指派）；系统说明与 AI 研判记录不算
 				break
 			}
