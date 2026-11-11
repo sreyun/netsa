@@ -64,13 +64,27 @@ type snapshot struct {
 }
 
 // saveChunk 为分批编码画像时每批的数量：批与批之间释放读锁，保存快照时不会长时间阻塞日志入库与大屏查询。
-const saveChunk = 2048
+// 满规模实测一个画像编码约 50µs，256 个一批时单次持锁约 10ms（2048 个一批时约 100ms，入库要等这么久）。
+const saveChunk = 256
+
+// savedMaxAge 是没有写入时两次保存的最长间隔。
+const savedMaxAge = 15 * time.Minute
 
 // Save 将状态写入快照文件（.gz 后缀时压缩），先写临时文件再原子替换。
 // 头部与画像分段、分批在读锁内编码，压缩与写盘在锁外进行；状态规模很大时也只会短暂占用锁。
 func (s *Store) Save(path string) error {
 	if path == "" {
 		return nil
+	}
+	s.saveMu.Lock()
+	defer s.saveMu.Unlock()
+	// 上次保存之后没有任何写入：不必重写整个快照（满规模时一次保存要编码几十万个画像）。
+	// 兜底每 15 分钟仍保存一次，防止有遗漏的写入路径
+	gen := s.mu.gen.Load()
+	if gen == s.savedGen && path == s.savedPath && time.Since(s.savedAt) < savedMaxAge {
+		if _, err := os.Stat(path); err == nil {
+			return nil
+		}
 	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err
@@ -98,6 +112,7 @@ func (s *Store) Save(path string) error {
 	if err := os.Rename(tmp, path); err != nil {
 		return err
 	}
+	s.savedGen, s.savedPath, s.savedAt = gen, path, time.Now() // 编码期间的写入使代数前进，下一次照常保存
 	// 快照已经包含 mark 之前的处置记录，可以丢弃；失败也不影响数据，重放时按更新时间跳过
 	if err := s.compactJournal(mark); err != nil {
 		log.Printf("[store] 整理处置记录日志失败: %v", err)
@@ -195,7 +210,7 @@ func (s *Store) writeSnapshot(f io.Writer, compress bool) error {
 	if len(dayKeys) > 0 {
 		w.WriteString(`,"days":`)
 		// 每天最多记 2000 个攻击源等明细：每批只编码几天
-		if err := writeObject(s, w, dayKeys, 8, func(k string) any {
+		if err := writeObject(s, w, dayKeys, 2, func(k string) any {
 			if v := s.days[k]; v != nil {
 				return v
 			}
@@ -242,10 +257,10 @@ func (s *Store) writeSnapshot(f io.Writer, compress bool) error {
 		w.WriteString(`,"asset_chains":[`)
 		first := true
 		var buf []byte
-		for i := 0; i < len(chains); i += 256 {
+		for i := 0; i < len(chains); i += 32 {
 			buf = buf[:0]
 			s.mu.RLock()
-			for _, tr := range chains[i:min(i+256, len(chains))] {
+			for _, tr := range chains[i:min(i+32, len(chains))] {
 				if s.chains[chainKey{tr.Kind, tr.Key}] != tr { // 编码期间已被清理或淘汰
 					continue
 				}

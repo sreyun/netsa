@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"strconv"
 	"strings"
@@ -275,7 +276,35 @@ func (s *Server) adminBackup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	extendDeadline(w, 30*time.Minute)
-	s.audit(r, "下载状态备份", "", nil)
+	if r.URL.Query().Get("standby") == "1" {
+		// 备机每分钟同步一次：每个账号每小时只记一条审计，否则审计链被同步记录淹没
+		s.standbyPull.Store(time.Now().Unix())
+		key := s.user(r) + "|" + s.clientIP(r)
+		s.standbyMu.Lock()
+		if s.standbyAudit == nil {
+			s.standbyAudit = map[string]time.Time{}
+		}
+		due := time.Since(s.standbyAudit[key]) >= time.Hour
+		if due {
+			s.standbyAudit[key] = time.Now()
+		}
+		s.standbyMu.Unlock()
+		if due {
+			s.audit(r, "备机同步状态", "每小时记录一次", nil)
+		}
+	} else {
+		s.audit(r, "下载状态备份", "", nil)
+	}
+	// 先把内存中的最新状态写盘：快照每分钟才保存一次，备机同步与手动备份拿到的应是当前状态，而不是上一次定时保存的
+	// （没有变化时保存几乎不花时间；与定时保存互斥）
+	if snap := s.Cfg.Storage.Snapshot; snap != "" {
+		if err := s.Store.Save(snap); err != nil {
+			log.Printf("[backup] 备份前保存快照失败: %v", err)
+		}
+	}
+	if err := s.Learn.Save(); err != nil {
+		log.Printf("[backup] 备份前保存学习状态失败: %v", err)
+	}
 	w.Header().Set("Content-Type", "application/gzip")
 	w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s"`, backup.ScheduledName(time.Now())))
 	w.Header().Set("Cache-Control", "no-store")

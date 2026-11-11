@@ -56,6 +56,31 @@ func newAggregate() *aggregate {
 func minuteOf(t time.Time) int64 { return t.Unix() / 60 }
 
 // aggBump 增减计数并在归零时删除键，避免排行榜里出现计数为 0 的历史条目。
+// maxAggTargets 是被攻击目标汇总的条数上限。每个画像最多记 100 个目标，目标带查询参数时几乎各不相同，
+// 不加上限时汇总可达千万条：内存随之膨胀，总览每次取前 10 名都要遍历全部（满规模实测超过 1 秒，期间持有读锁）。
+// 满了以后保留计数最多的一半：前几名（真正被集中攻击的目标）保持准确，零散的目标计数被丢弃。
+const maxAggTargets = 50000
+
+// bumpTarget 累计被攻击目标（有上限，见 maxAggTargets）。
+func (a *aggregate) bumpTarget(k string, delta int64) {
+	aggBump(a.targets, k, delta)
+	if delta > 0 && len(a.targets) > maxAggTargets {
+		top := newTopK(maxAggTargets/2, func(x, y KV) bool {
+			if x.Value != y.Value {
+				return x.Value > y.Value
+			}
+			return x.Name < y.Name
+		})
+		for t, v := range a.targets {
+			top.add(KV{Name: t, Value: v})
+		}
+		a.targets = make(map[string]int64, maxAggTargets)
+		for _, kv := range top.h {
+			a.targets[kv.Name] = kv.Value
+		}
+	}
+}
+
 func aggBump(m map[string]int64, k string, delta int64) {
 	if k == "" {
 		return
@@ -93,7 +118,7 @@ func (a *aggregate) add(p *IPProfile) {
 	aggBump(a.isps, isp, 1)
 	aggBump(a.nettypes, nt, 1)
 	for t, n := range p.Targets {
-		aggBump(a.targets, t, int64(n))
+		a.bumpTarget(t, int64(n))
 	}
 	if b := a.bucket(p.LastSeen, true); b != nil {
 		b.total++
@@ -123,7 +148,7 @@ func (a *aggregate) remove(p *IPProfile) {
 	aggBump(a.isps, isp, -1)
 	aggBump(a.nettypes, nt, -1)
 	for t, n := range p.Targets {
-		aggBump(a.targets, t, -int64(n))
+		a.bumpTarget(t, -int64(n))
 	}
 	if b := a.bucket(p.LastSeen, false); b != nil {
 		b.total--
@@ -228,7 +253,7 @@ func (a *aggregate) addTarget(p *IPProfile, target string) {
 		}
 		return
 	}
-	aggBump(a.targets, target, 1)
+	a.bumpTarget(target, 1)
 }
 
 // recent 返回不早于 cutMinute（分钟）的攻击源数、其中高危及以上的数量、以及首次出现数。

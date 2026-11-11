@@ -163,9 +163,23 @@ type chainTrack struct {
 
 	idx   map[stepKey]*chainStep // 步骤键 → 步骤（不持久化，加载后重建）
 	recon int                    // 侦察步骤数
+	// ver 在步骤增删时递增；deny 记下各阶段最近一次腾不出位置的命中等级与时间（不持久化）。步骤满了以后每个新来源都要
+	// 尝试腾位，逐步比较 150 个步骤两遍，在大量来源扫描同一资产时占了入库约四分之一的 CPU；
+	// 步骤没有变化时，同阶段、不更强的命中一小时内直接判定没有位置
+	ver  uint64
+	deny [stageN]roomDeny
+}
+
+// roomDeny 是一次腾位失败的记录。
+type roomDeny struct {
+	ver  uint64
+	rank int
+	at   time.Time
+	ok   bool
 }
 
 func (tr *chainTrack) reindex() {
+	tr.ver++
 	tr.idx = make(map[stepKey]*chainStep, len(tr.Steps))
 	tr.recon = 0
 	steps := tr.Steps[:0]
@@ -238,6 +252,9 @@ func (tr *chainTrack) makeRoom(stage, rank int, t time.Time) bool {
 	if len(tr.Steps) < chainMaxSteps {
 		return true
 	}
+	if d := &tr.deny[stage]; d.ok && d.ver == tr.ver && rank <= d.rank && !t.Before(d.at) && t.Sub(d.at) < time.Hour {
+		return false // 步骤没有变化：同阶段、不更强的命中仍然没有位置（陈旧步骤的让位最多推迟一小时）
+	}
 	victim := -1
 	for i, x := range tr.Steps {
 		if x.Stage == stRecon && (victim < 0 || x.Count < tr.Steps[victim].Count) {
@@ -269,8 +286,10 @@ func (tr *chainTrack) makeRoom(stage, rank int, t time.Time) bool {
 		}
 	}
 	if victim < 0 {
+		tr.deny[stage] = roomDeny{ver: tr.ver, rank: rank, at: t, ok: true}
 		return false
 	}
+	tr.ver++
 	v := tr.Steps[victim]
 	delete(tr.idx, v.key())
 	tr.Dropped += v.Count
@@ -620,6 +639,7 @@ func (tr *chainTrack) step(stage int, h *model.Hit, ev *model.Event, src, peer s
 		st = &chainStep{Stage: stage, Category: h.Category, Src: src, Peer: printable(k.peer), First: t, Last: t, Rule: h.RuleID, Name: h.Name,
 			Severity: h.Severity, Result: h.Result, Proven: h.Proven, Evidence: printable(truncate(h.Evidence, 300)), Target: truncate(ev.Target(), 200)}
 		tr.Steps = append(tr.Steps, st)
+		tr.ver++
 		tr.idx[k] = st
 		if stage == stRecon {
 			tr.recon++

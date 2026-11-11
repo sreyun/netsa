@@ -108,7 +108,7 @@ func (s *Store) journalLocked(list ...*Incident) {
 // journalMark 返回保存快照前的日志长度：之后写入的内容可能不在快照里，不能丢弃。
 func (s *Store) journalMark() int64 {
 	s.mu.Lock()
-	defer s.mu.Unlock()
+	defer s.mu.unlockClean() // 只读日志文件的长度，不修改快照中的数据
 	if s.journal == nil {
 		return -1
 	}
@@ -125,7 +125,7 @@ func (s *Store) compactJournal(mark int64) error {
 		return nil
 	}
 	s.mu.Lock()
-	defer s.mu.Unlock()
+	defer s.mu.unlockClean() // 只整理日志文件，不修改快照中的数据
 	if s.journal == nil {
 		return nil
 	}

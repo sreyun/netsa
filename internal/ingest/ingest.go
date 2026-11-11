@@ -105,11 +105,13 @@ type Manager struct {
 	Senders *Senders
 	// DefaultSilence 为数据源断流告警的默认阈值（alert.source_silence），0 表示关闭
 	DefaultSilence time.Duration
-	mu             sync.Mutex
-	sources        []*source
-	smu            sync.Mutex
-	silence        map[string]*silenceState
-	wg             sync.WaitGroup
+	// Checkpoints 保存文件数据源的读取断点（checkpoint.go）：重启后从上次读到的位置继续，为空时按原来的规则从末尾开始
+	Checkpoints *Checkpoints
+	mu          sync.Mutex
+	sources     []*source
+	smu         sync.Mutex
+	silence     map[string]*silenceState
+	wg          sync.WaitGroup
 	// 测试中缩短文件被删除后的处理时限（零值使用 rotateGrace / fileGoneAfter）
 	goneGrace, goneAfter time.Duration
 }
@@ -469,6 +471,22 @@ func (m *Manager) tail(ctx context.Context, s *source, path string, fromStart bo
 			old = nil
 		}
 	}
+	// 断点：日志送入处理队列之后才前移（ctx 已结束时这一批可能没有送出，不前移）
+	var prefix string
+	var prefixGot int
+	mark := func() {
+		if m.Checkpoints == nil || f == nil || ctx.Err() != nil {
+			return
+		}
+		if prefixGot < prefixLen && fi != nil {
+			if st, err := f.Stat(); err == nil && st.Size() > int64(prefixGot) {
+				prefix, prefixGot = filePrefix(f, prefixLen)
+			}
+		}
+		if prefixGot > 0 {
+			m.Checkpoints.set(path, checkpoint{Offset: offset, PrefixLen: prefixGot, Prefix: prefix})
+		}
+	}
 	idle := 250 * time.Millisecond
 	for {
 		if f == nil {
@@ -497,11 +515,27 @@ func (m *Manager) tail(ctx context.Context, s *source, path string, fromStart bo
 			fi, _ = f.Stat()
 			seen.add(fi)
 			offset = 0
-			if first && !fromStart {
-				offset, _ = f.Seek(0, io.SeekEnd)
+			prefix, prefixGot = "", 0
+			skipPartial := false
+			if first {
+				resumed := false
+				if cp, ok := m.Checkpoints.get(path); ok && fi != nil {
+					if pos, why := resumeAt(f, fi.Size(), cp); why != "" {
+						offset, _ = f.Seek(pos, io.SeekStart)
+						resumed, skipPartial = true, pos > 0 && pos != cp.Offset
+						log.Printf("[ingest] %s: %s（%d 字节待读）", path, why, fi.Size()-pos)
+					}
+				}
+				if !resumed && !fromStart {
+					offset, _ = f.Seek(0, io.SeekEnd)
+				}
 			}
 			first = false
 			lr = newLineReader(f)
+			if skipPartial { // 从文件中间开始读：第一行可能不完整，丢弃
+				_, n, _, _ := lr.next()
+				offset += int64(n)
+			}
 			s.setStatus("tailing", "")
 		}
 		line, n, ok, err := lr.next()
@@ -521,6 +555,7 @@ func (m *Manager) tail(ctx context.Context, s *source, path string, fromStart bo
 		s.live.Store(true) // 已读到末尾：此后读到的行都是新写入的
 		drainOld(false)
 		m.flush(ctx, s)
+		mark()
 		// 空闲时逐步拉长轮询间隔（最长 1 秒），有新数据时立即恢复
 		if !sleep(idle) {
 			return
@@ -564,6 +599,7 @@ func (m *Manager) tail(ctx context.Context, s *source, path string, fromStart bo
 			f.Seek(0, io.SeekStart)
 			lr.reset(f)
 			offset = 0
+			prefix, prefixGot = "", 0
 		}
 	}
 }

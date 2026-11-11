@@ -107,6 +107,15 @@ func (s *Server) metrics(w http.ResponseWriter, r *http.Request) {
 		p.metric("netsa_playbook_dropped_total", "counter", "因队列已满未能处理的事件数", float64(dropped))
 	}
 	p.metric("netsa_events_processed_total", "counter", "已处理的日志事件数", float64(s.Pipeline.Processed()))
+	// 状态库写锁：日志入库每批都要拿写锁，等待时间反映查询与入库的争用（演进路线 N1 的度量依据）
+	if t := s.standbyPull.Load(); t > 0 {
+		p.metric("netsa_standby_pull_timestamp_seconds", "gauge", "备机最近一次同步状态的时间（Unix 秒）", float64(t))
+	}
+	ls := s.Store.LockStats()
+	p.metric("netsa_store_lock_acquisitions_total", "counter", "状态库写锁次数", float64(ls.Count))
+	p.metric("netsa_store_lock_wait_seconds_total", "counter", "状态库写锁的累计等待时间（秒）", ls.WaitTotal.Seconds())
+	p.metric("netsa_store_lock_wait_max_seconds", "gauge", "最近两个维护周期内单次等待写锁的最长时间（秒）", ls.WaitMax.Seconds())
+	p.metric("netsa_store_lock_hold_max_seconds", "gauge", "最近两个维护周期内单次持有写锁的最长时间（秒）", ls.HoldMax.Seconds())
 
 	// 同名同类型的数据源合并为一条序列：默认配置里 ssh 有两个候选路径（/var/log/auth.log 与 /var/log/secure），
 	// 各输出一条的话标签完全相同，采集端会报重复序列。行数相加，任一路径在跟踪即视为正常运行。

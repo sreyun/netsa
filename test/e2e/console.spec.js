@@ -197,16 +197,21 @@ test('封禁：申请、审批、下发名单、解除', async ({ page }) => {
   expect(await (await page.request.get('/api/block/edl')).text()).toBe('\n');
 });
 
-test('规则运营：添加规则后立即命中', async ({ page }) => {
+test('规则运营：添加规则后立即命中；改为影子运行后只统计命中、不产生告警', async ({ page }) => {
   await login(page);
   await openTab(page, 'system');
   await expect(page.locator('#ruleTable')).toContainText('还没有自定义规则');
   const answers = ['e2e-rule', 'E2E 规则', 'e2e-unique-marker', 'uri', 'medium', '', ''];
-  const onDialog = (d) => d.accept(answers.shift() ?? '');
+  const onDialog = (d) => {
+    // 新规则会询问是否先影子运行：这里选“取消”（立即生效），其余对话框依次填写
+    if (d.type() === 'confirm' && d.message().includes('影子运行')) return d.dismiss();
+    return d.accept(answers.shift() ?? '');
+  };
   page.on('dialog', onDialog);
   await page.click('#ruleAdd');
   await expect(page.locator('#ruleTable')).toContainText('e2e-rule');
   page.off('dialog', onDialog);
+  await expect(page.locator('#ruleTable')).toContainText('生效');
   await sendLogs([logLine('203.0.113.60', 'GET', '/e2e-unique-marker', 404, 100, 'Mozilla/5.0', 'app.test')]);
   await expect.poll(async () => {
     const r = await page.request.get('/api/incidents?status=active&q=203.0.113.60');
@@ -215,6 +220,19 @@ test('规则运营：添加规则后立即命中', async ({ page }) => {
     const d = await page.request.get(`/api/incidents/${list[0].id}`);
     return JSON.stringify((await d.json()).rules);
   }, { timeout: 15_000 }).toContain('e2e-rule');
+  // 改为影子运行：确认后之后的命中只记在“状态”一列
+  const accept = (d) => d.accept();
+  page.on('dialog', accept);
+  await page.locator('[data-rule-shadow="e2e-rule"]').click();
+  await expect(page.locator('#ruleTable')).toContainText('影子运行');
+  page.off('dialog', accept);
+  await sendLogs([logLine('203.0.113.61', 'GET', '/e2e-unique-marker', 404, 100, 'Mozilla/5.0', 'app.test')]);
+  await expect.poll(async () => {
+    const r = await page.request.get('/api/rules/managed');
+    return ((await r.json()).shadow?.['e2e-rule']?.hits) || 0;
+  }, { timeout: 15_000 }).toBeGreaterThan(0);
+  const inc = await page.request.get('/api/incidents?status=active&q=203.0.113.61');
+  expect(((await inc.json()).incidents || []).length).toBe(0);
   const del = await page.request.delete('/api/rules/managed/e2e-rule');
   expect(del.ok()).toBeTruthy();
   await expect(page.locator('#intTable')).toContainText('定时备份');

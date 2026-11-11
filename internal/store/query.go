@@ -572,18 +572,17 @@ func (s *Store) Attackers(q AttackerQuery) ([]AttackerSummary, int) {
 	}
 	sel := newTopK(k, before)
 	total := 0
-	s.mu.RLock()
-	for _, p := range s.ips {
+	// 分批在读锁内筛选（批间放锁）：20 万个画像逐个比较关键字要几百毫秒，一次持锁做完会挡住日志入库
+	s.chunked(s.profileList(), func(p *IPProfile) {
 		if !isAttacker(p) || p.Level < q.MinLevel || !q.match(p) {
-			continue
+			return
 		}
 		if search != "" && !profileMatch(p, search) {
-			continue
+			return
 		}
 		total++
 		sel.add(cand{p: p, ip: p.IP, score: p.Score, attacks: p.Attacks, last: p.LastSeen})
-	}
-	s.mu.RUnlock()
+	})
 
 	list := sel.sorted()
 	if q.Offset > 0 {
@@ -885,21 +884,20 @@ func mapIPBefore(a, b MapIP) bool {
 
 // MapData 返回攻击来源地图数据：地点（带 IP 列表）、国家与中国省份的着色统计。
 func (s *Store) MapData(minLevel model.Severity) *MapResult {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
 	res := &MapResult{}
 	pts := map[string]*MapPoint{}
 	countries, provinces := map[string]*MapRegion{}, map[string]*MapRegion{}
-	for _, p := range s.ips {
+	// 攻击源分批在读锁内汇总（批间放锁）：20 万个攻击源一次持锁汇总要上百毫秒，期间日志入库只能等待
+	s.chunked(s.profileList(), func(p *IPProfile) {
 		if !isAttacker(p) || p.Level < minLevel {
-			continue
+			return
 		}
 		res.Total++
 		g := p.Geo
 		// 内网地址只有命中自定义网段（有具体办公地点）时才上图，且不参与国家 / 省份着色
 		if g == nil || g.Private && g.Label == "" {
 			res.NoCoord++
-			continue
+			return
 		}
 		if !g.Private {
 			addRegion(countries, g.WorldName, g.Country, p)
@@ -908,7 +906,7 @@ func (s *Store) MapData(minLevel model.Severity) *MapResult {
 		key := mapKey(g)
 		if key == "" {
 			res.NoCoord++
-			continue
+			return
 		}
 		mp := pts[key]
 		if mp == nil {
@@ -944,7 +942,7 @@ func (s *Store) MapData(minLevel model.Severity) *MapResult {
 			mp.top = newTopK(mapPointIPs, mapIPBefore)
 		}
 		mp.top.add(MapIP{IP: p.IP, Score: p.Score, Level: p.Level, Attacks: p.Attacks, ISP: g.ISP})
-	}
+	})
 	for _, mp := range pts {
 		if mp.exact > 0 {
 			mp.Lat, mp.Lon = mp.sumLat/float64(mp.exact), mp.sumLon/float64(mp.exact)
@@ -963,9 +961,23 @@ func (s *Store) MapData(minLevel model.Severity) *MapResult {
 	if len(res.Points) > 800 {
 		res.Points = res.Points[:800]
 	}
+	s.mu.RLock()
 	res.Outbound, res.OutTotal, res.OutNoCoord = s.outboundPoints(minLevel)
+	s.mu.RUnlock()
 	res.Countries, res.Provinces = sortedRegions(countries), sortedRegions(provinces)
 	return res
+}
+
+// profileList 返回全部画像（一次读锁内复制指针，约每 10 万个 5ms），供分批扫描使用。
+// 批间放锁时画像可能被更新或淘汰：被淘汰的画像不再有写者，读取它是安全的；统计按扫描时的状态。
+func (s *Store) profileList() []*IPProfile {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	list := make([]*IPProfile, 0, len(s.ips))
+	for _, p := range s.ips {
+		list = append(list, p)
+	}
+	return list
 }
 
 // placeName 生成地点展示名，例如 "中国 广东省 深圳市"，省市相同（直辖市）时去重：

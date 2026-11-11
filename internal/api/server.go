@@ -108,6 +108,10 @@ type Server struct {
 	aiQueue    []uint64 // 批量研判队列
 	archHealth archiveHealth
 	sched      reportSchedule
+	// 备机同步（netsa standby 定时下载状态备份）：最近一次拉取的时间，以及各账号最近一次写入审计的时间
+	standbyPull  atomic.Int64
+	standbyMu    sync.Mutex
+	standbyAudit map[string]time.Time
 }
 
 func (s *Server) Handler() http.Handler {

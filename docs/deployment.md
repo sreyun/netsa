@@ -6,7 +6,7 @@
 
 | 镜像 | 用途 |
 |---|---|
-| `swr.cn-east-3.myhuaweicloud.com/sreyun/netsa:latest` | netsa 主程序（默认）；也可使用版本号标签，如 `:1.12.0` |
+| `swr.cn-east-3.myhuaweicloud.com/sreyun/netsa:latest` | netsa 主程序（默认）；也可使用版本号标签，如 `:1.13.0` |
 | `swr.cn-east-3.myhuaweicloud.com/sreyun/pgvector:pg18` | 可选的告警归档数据库（PostgreSQL 18），只在启用归档时拉取 |
 
 ## 生产部署（Docker Compose）
@@ -82,14 +82,14 @@ docker compose up -d
 
 ```bash
 # 联网机器：按服务器架构拉取（arm64 服务器用 --platform linux/arm64），不启用归档可不拉取 pgvector
-docker pull --platform linux/amd64 swr.cn-east-3.myhuaweicloud.com/sreyun/netsa:1.12.0
+docker pull --platform linux/amd64 swr.cn-east-3.myhuaweicloud.com/sreyun/netsa:1.13.0
 docker pull --platform linux/amd64 swr.cn-east-3.myhuaweicloud.com/sreyun/pgvector:pg18
-docker save -o netsa-images.tar swr.cn-east-3.myhuaweicloud.com/sreyun/netsa:1.12.0 \
+docker save -o netsa-images.tar swr.cn-east-3.myhuaweicloud.com/sreyun/netsa:1.13.0 \
   swr.cn-east-3.myhuaweicloud.com/sreyun/pgvector:pg18
 
 # 服务器：导入后直接启动（不要执行 docker compose pull），.env 中写入相同的镜像标签
 docker load -i netsa-images.tar
-echo 'NETSA_IMAGE=swr.cn-east-3.myhuaweicloud.com/sreyun/netsa:1.12.0' >> .env
+echo 'NETSA_IMAGE=swr.cn-east-3.myhuaweicloud.com/sreyun/netsa:1.13.0' >> .env
 docker compose up -d
 ```
 
@@ -127,8 +127,28 @@ docker compose start netsa
 ## 数据可靠性
 
 - **处置记录**：分析员和模型对事件的每次修改都先写入预写日志并落盘，进程异常退出（断电、`kill -9`、内存不足）后重放，不会丢失。
-- **其他状态**：快照默认每分钟保存一次（`storage.interval`），异常退出时最多丢失这段时间内新产生的告警和统计。需要长期留存和更高可靠性时启用 PostgreSQL 告警归档和原始日志留存。
-- **高可用**：目前是单实例部署，没有主备切换。
+- **其他状态**：快照默认每分钟保存一次（`storage.interval`），上次保存之后没有任何变化时不重写；异常退出时最多丢失这段时间内新产生的告警和统计。需要长期留存和更高可靠性时启用 PostgreSQL 告警归档和原始日志留存。
+- **升级、重启期间的文件日志**：文件数据源记下读到的位置（状态目录中的 `ingest-offsets.json`），重新启动后从这里继续读，停机期间写入的日志不再漏掉。文件在停机期间被轮转时从头读取新文件；需要补读的内容超过 1GB 时只读最新的 1GB 并在日志中说明。进程被强制结束时，最后几秒读到的日志可能重复处理（告警归档按内容去重），不会漏掉。Syslog 发送端建议开启本地队列与重传（rsyslog 的 `action.resumeRetryCount`、`queue.type`），覆盖重启的几秒钟。
+
+## 主备（温备机）
+
+`netsa standby` 在另一台机器上以备机方式运行：定时从主机下载状态备份（事件、处置记录、画像、账号、配置、学习结果，不含原始日志）恢复到本机状态目录，本机不接收日志、不提供页面。主机故障时，把日志发送地址与页面访问地址（VRRP 虚拟地址或负载均衡）切到备机，启动 `serve` 即可接着工作，丢失的最多是一个同步间隔内的变化。
+
+1. 在主机上用管理员账号创建一个 API 令牌（系统管理 → API 令牌，角色选管理员），专门给备机使用。
+2. 备机使用与主机相同的配置文件（`storage.snapshot` 指向备机自己的目录），令牌通过环境变量传入，不写在命令行里：
+
+   ```bash
+   export NETSA_STANDBY_TOKEN=nsa_xxxxxxxx
+   netsa standby -c config.yaml -primary https://10.0.0.5:8080 -interval 1m              # 只同步，人工切换
+   netsa standby -c config.yaml -primary https://10.0.0.5:8080 -promote-after 3m          # 主机持续 3 分钟不可用时自动接管
+   ```
+
+   主机使用自签名证书时用 `-ca` 指定 CA 文件。
+
+- 自动接管只看主机的健康检查（`/healthz` 不通、超时或返回 5xx）；令牌错误、权限不足是配置问题，只记录日志，不会接管，避免两台同时工作。
+- 自动接管后备机在本进程内启动 `serve`。原主机恢复后**不要直接以主机启动**：把它改为 `netsa standby` 指向新的主机，同步一次后再按需切回。
+- 备机同步在主机的审计中每个令牌每小时记一条“备机同步状态”；主机的指标 `netsa_standby_pull_timestamp_seconds` 给出最近一次同步的时间，超过几个同步间隔没有更新时应告警。
+- 原始日志不随状态同步：需要的话用存储层复制或在两台机器上都留存。
 
 ## 容器加固
 

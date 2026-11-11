@@ -8,6 +8,8 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
@@ -148,6 +150,35 @@ func TestFactsFenced(t *testing.T) {
 	for _, line := range strings.Split(facts, "\n") {
 		if strings.Contains(line, "平台说明") && !strings.Contains(line, "⟦") {
 			t.Fatalf("攻击者内容不应出现在界定符之外: %s", line)
+		}
+	}
+}
+
+// 备机同步：带 standby=1 下载状态备份时，每个账号每小时只记一条审计，并在指标中给出最近一次同步的时间；
+// 状态库写锁的统计出现在指标中。
+func TestStandbyBackupAudit(t *testing.T) {
+	s, _ := testServer(t, "admin", "Adm1n-secret")
+	s.StateDir = t.TempDir()
+	os.WriteFile(filepath.Join(s.StateDir, "s.json.gz"), []byte("x"), 0o600)
+	h := s.Handler()
+	admin := login(t, h, "admin", "Adm1n-secret")
+	for range 3 {
+		if rec := do(h, http.MethodGet, "/api/admin/backup?standby=1", "", admin); rec.Code != 200 {
+			t.Fatalf("下载: %d", rec.Code)
+		}
+	}
+	audit := do(h, http.MethodGet, "/api/auth/audit", "", admin).Body.String()
+	if strings.Count(audit, "备机同步状态") != 1 {
+		t.Fatalf("每小时只记一条备机同步审计: %d", strings.Count(audit, "备机同步状态"))
+	}
+	do(h, http.MethodGet, "/api/admin/backup", "", admin)
+	if audit := do(h, http.MethodGet, "/api/auth/audit", "", admin).Body.String(); !strings.Contains(audit, "下载状态备份") {
+		t.Fatal("普通下载照常审计")
+	}
+	m := do(h, http.MethodGet, "/metrics", "", admin).Body.String()
+	for _, want := range []string{"netsa_standby_pull_timestamp_seconds", "netsa_store_lock_wait_max_seconds", "netsa_store_lock_acquisitions_total"} {
+		if !strings.Contains(m, want) {
+			t.Errorf("指标缺少 %s", want)
 		}
 	}
 }

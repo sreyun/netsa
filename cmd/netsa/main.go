@@ -7,14 +7,17 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/tls"
+	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"io/fs"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -63,7 +66,7 @@ import (
 
 // version 是构建版本号。默认值用于本地构建；镜像构建通过
 // -ldflags "-X main.version=<tag>" 注入，`netsa version` 与 /api/meta 都会显示注入后的值。
-var version = "1.12.0"
+var version = "1.13.0"
 
 func usage() {
 	fmt.Fprintf(os.Stderr, `netsa %s —— 网络安全态势感知与攻击面分析系统
@@ -78,6 +81,7 @@ func usage() {
   netsa corpus   -o real.tsv [选项] <日志文件...> 从现场 Web 日志生成脱敏的评测语料（之后用 eval -corpus 跑回归）
   netsa backup   -c config.yaml -o backup.tar.gz 备份状态目录（可在运行时执行）
   netsa restore  -c config.yaml -i backup.tar.gz 恢复状态目录（需先停止服务）
+  netsa standby  -c config.yaml -primary URL     备机：定时从主机同步状态，主机长时间不可用时可自动接管
   netsa passwd   -c config.yaml -u admin         重置登录密码（忘记密码时使用）
   netsa hash-password                           生成密码哈希（用于配置文件 server.password）
   netsa version
@@ -106,6 +110,8 @@ func main() {
 		err = cmdBackup(os.Args[2:])
 	case "restore":
 		err = cmdRestore(os.Args[2:])
+	case "standby":
+		err = cmdStandby(os.Args[2:])
 	case "rulepack":
 		err = cmdRulePack(os.Args[2:])
 	case "eval":
@@ -322,6 +328,10 @@ func build(cfg *config.Config) (*app, error) {
 		return nil, err
 	}
 	a.ingest.AutoTime = cfg.TimeCorrection != "off"
+	// 文件数据源的读取断点：重启、升级期间写入的日志在重新启动后补读
+	if a.ingest.Checkpoints, err = ingest.LoadCheckpoints(dataFile(cfg, "", "ingest-offsets.json")); err != nil {
+		return nil, err
+	}
 	if dsn := archiveDSN(cfg); dsn != "" {
 		host, _ := os.Hostname()
 		ar, err := archive.Open(context.Background(), archive.Options{
@@ -601,6 +611,9 @@ func cmdServe(args []string) error {
 			if err := a.exposure.Flush(); err != nil {
 				log.Printf("[exposure] %v", err)
 			}
+			if err := a.ingest.Checkpoints.Save(); err != nil {
+				log.Printf("[ingest] 保存读取断点失败: %v", err)
+			}
 		case <-ctx.Done():
 			log.Printf("正在退出...")
 			shutdown, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -624,6 +637,10 @@ func cmdServe(args []string) error {
 			}
 			if err := a.store.Save(cfg.Storage.Snapshot); err != nil {
 				log.Printf("[store] 保存快照失败: %v", err)
+			}
+			// 断点在处理完的日志之后：处理队列已排空，下次启动从这里继续
+			if err := a.ingest.Checkpoints.Save(); err != nil {
+				log.Printf("[ingest] 保存读取断点失败: %v", err)
 			}
 			return nil
 		}
@@ -1200,6 +1217,148 @@ func cmdRestore(args []string) error {
 		fmt.Printf("提示：当前程序版本是 %s，与备份版本不同。低版本程序读取高版本快照可能失败，请使用相同或更高的版本。\n", version)
 	}
 	return nil
+}
+
+// cmdStandby 以备机方式运行：定时从主机下载状态备份（事件、画像、处置记录、账号、配置、学习结果）并恢复到本机状态目录，
+// 本机不接收日志、不提供页面。主机故障时把日志与访问地址（VRRP 虚拟地址或负载均衡）切到备机，启动 serve 即可接着工作，
+// 丢失的最多是一个同步间隔内的变化。设置 -promote-after 后，主机的健康检查持续失败达到该时长时自动接管（在本进程内启动 serve）。
+//
+// 认证使用主机上管理员账号创建的 API 令牌，通过环境变量 NETSA_STANDBY_TOKEN 传入（不出现在进程列表里）。
+// 只有主机的健康检查失败（网络不通、超时、5xx）才计入不可用；令牌错误、权限不足是配置问题，不会触发接管，否则会出现两台主机同时工作。
+func cmdStandby(args []string) error {
+	fs := flag.NewFlagSet("standby", flag.ExitOnError)
+	cfgPath := fs.String("c", "configs/config.yaml", "配置文件（状态目录 storage.snapshot 指向本机目录）")
+	primary := fs.String("primary", "", "主机地址，如 https://10.0.0.5:8080")
+	interval := fs.Duration("interval", time.Minute, "同步间隔")
+	promote := fs.Duration("promote-after", 0, "主机持续不可用多久后自动接管，如 3m；0 表示不自动接管（人工启动 serve）")
+	caFile := fs.String("ca", "", "主机证书的 CA 文件（主机使用自签名证书时）")
+	fs.Parse(args)
+	token := strings.TrimSpace(os.Getenv("NETSA_STANDBY_TOKEN"))
+	if *primary == "" || token == "" {
+		return errors.New("请用 -primary 指定主机地址，并通过环境变量 NETSA_STANDBY_TOKEN 提供主机上管理员创建的 API 令牌")
+	}
+	base := strings.TrimRight(*primary, "/")
+	if u, err := url.Parse(base); err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+		return fmt.Errorf("主机地址无效: %q", *primary)
+	}
+	if *interval < 10*time.Second {
+		return errors.New("同步间隔不能小于 10 秒")
+	}
+	cfg, err := config.Load(*cfgPath)
+	if err != nil {
+		return err
+	}
+	dir, err := stateDir(cfg)
+	if err != nil {
+		return err
+	}
+	tr := http.DefaultTransport.(*http.Transport).Clone()
+	if *caFile != "" {
+		pem, err := os.ReadFile(*caFile)
+		if err != nil {
+			return err
+		}
+		pool := x509.NewCertPool()
+		if !pool.AppendCertsFromPEM(pem) {
+			return fmt.Errorf("%s 中没有可用的证书", *caFile)
+		}
+		tr.TLSClientConfig = &tls.Config{RootCAs: pool, MinVersion: tls.VersionTLS12}
+	}
+	client := &http.Client{Transport: tr, Timeout: 30 * time.Minute}
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	log.Printf("[standby] 备机启动：每 %s 从 %s 同步状态到 %s%s", *interval, base, dir,
+		map[bool]string{true: fmt.Sprintf("，主机持续不可用 %s 后自动接管", *promote), false: "，不自动接管"}[*promote > 0])
+	var downSince time.Time
+	synced := false
+	for {
+		healthy := standbyHealthy(ctx, client, base)
+		switch {
+		case healthy:
+			downSince = time.Time{}
+			if n, err := standbySync(ctx, client, base, token, dir); err != nil {
+				log.Printf("[standby] 同步失败: %v", err)
+			} else {
+				synced = true
+				log.Printf("[standby] 已同步 %d 个文件", n)
+			}
+		case downSince.IsZero():
+			downSince = time.Now()
+			log.Printf("[standby] 主机健康检查失败，开始计时")
+		default:
+			down := time.Since(downSince)
+			log.Printf("[standby] 主机已 %s 不可用", down.Round(time.Second))
+			if *promote > 0 && down >= *promote {
+				if !synced {
+					log.Printf("[standby] 警告：本次运行还没有成功同步过，接管后使用本机状态目录中已有的状态")
+				}
+				log.Printf("[standby] 主机持续不可用超过 %s，接管服务：请确认日志与访问地址已切到本机，原主机恢复后应以备机方式启动", *promote)
+				stop()
+				return cmdServe([]string{"-c", *cfgPath})
+			}
+		}
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-time.After(*interval):
+		}
+	}
+}
+
+// standbyHealthy 检查主机的健康检查接口（不需要认证）。
+func standbyHealthy(ctx context.Context, client *http.Client, base string) bool {
+	c, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(c, http.MethodGet, base+"/healthz", nil)
+	if err != nil {
+		return false
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return false
+	}
+	io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
+	resp.Body.Close()
+	return resp.StatusCode == http.StatusOK
+}
+
+// standbySync 下载主机的状态备份并恢复到本机状态目录（先完整下载并校验，再原子替换），返回恢复的文件数。
+func standbySync(ctx context.Context, client *http.Client, base, token, dir string) (int, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, base+"/api/admin/backup?standby=1", nil)
+	if err != nil {
+		return 0, err
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp, err := client.Do(req)
+	if err != nil {
+		return 0, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+		return 0, fmt.Errorf("主机返回 %d：%s", resp.StatusCode, strings.TrimSpace(string(b)))
+	}
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return 0, err
+	}
+	tmp := filepath.Join(dir, ".standby-download.tmp") // .tmp 结尾：本机之后做备份时不包含它
+	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_RDWR|os.O_TRUNC, 0o600)
+	if err != nil {
+		return 0, err
+	}
+	defer os.Remove(tmp)
+	defer f.Close()
+	if _, err := io.Copy(f, resp.Body); err != nil {
+		return 0, fmt.Errorf("下载中断: %w", err)
+	}
+	if _, err := f.Seek(0, io.SeekStart); err != nil {
+		return 0, err
+	}
+	m, err := backup.Restore(f, dir, true)
+	if err != nil {
+		return 0, err
+	}
+	return len(m.Files), nil
 }
 
 // runBackups 按 storage.backup_dir 定时备份。失败只记录日志并写入指标，不影响服务。

@@ -288,7 +288,11 @@ type Totals struct {
 
 // Store 是线程安全的态势状态库。
 type Store struct {
-	mu           sync.RWMutex
+	mu           timedRWMutex // 读写锁，记录写锁的等待与持有时间（lock.go）
+	saveMu       sync.Mutex   // 串行化快照保存（临时文件同名）
+	savedGen     uint64       // 上次保存完成时的写代数（saveMu 保护）
+	savedPath    string
+	savedAt      time.Time
 	campMu       sync.Mutex      // 攻击活动归并结果的缓存（campaign.go），计算期间不持有 mu
 	camp         *CampaignReport // 最近一次归并结果
 	campBuilding bool            // 后台正在重新归并（campMu 保护）
@@ -934,8 +938,17 @@ func (s *Store) Tag(ip, tag, detail string) {
 
 // Maintain 清理过期时间桶并在 IP 数量超限时淘汰低价值画像。
 func (s *Store) Maintain() {
+	s.mu.rotate()
 	s.mu.Lock()
-	defer s.mu.Unlock()
+	// 没有清理掉任何东西时不算写入：否则每分钟的维护都会让“没有变化就不保存快照”失效
+	nb, nc, no, ni := len(s.buckets), len(s.chains), len(s.outbound), len(s.ips)
+	defer func() {
+		if len(s.buckets) == nb && len(s.chains) == nc && len(s.outbound) == no && len(s.ips) == ni {
+			s.mu.unlockClean()
+			return
+		}
+		s.mu.Unlock()
+	}()
 	if !s.maxTime.IsZero() {
 		cut := s.maxTime.Add(-s.retention).Unix() / 60
 		for k := range s.buckets {
