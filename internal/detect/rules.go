@@ -64,6 +64,8 @@ type Rule struct {
 	OnlyFailed bool     `yaml:"only_failed" json:"only_failed,omitempty"` // 仅在请求失败(4xx)时命中，用于识别盲目探测
 	TagOnly    bool     `yaml:"tag_only" json:"tag_only,omitempty"`
 	Methods    []string `yaml:"methods" json:"methods,omitempty"` // 限定 HTTP 方法，为空表示不限
+	// Shadow 表示影子运行：照常匹配，命中只计入影子运行统计（ShadowStats），不产生告警
+	Shadow bool `yaml:"shadow" json:"shadow,omitempty"`
 
 	sev     model.Severity
 	re      *regexp.Regexp

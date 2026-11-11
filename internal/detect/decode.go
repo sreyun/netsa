@@ -322,6 +322,10 @@ func (e *Engine) matchDecoded(text, method, result string) []model.Hit {
 		if loc == nil {
 			continue
 		}
+		if r.Shadow {
+			e.shadow.note(r.ID, "（编码载荷解码后）"+excerpt(text, loc[0], loc[1]))
+			continue
+		}
 		h := model.Hit{RuleID: r.ID, Name: r.Name, Category: r.Category, Severity: r.sev, Phase: r.Phase,
 			Evidence: excerpt(text, loc[0], loc[1]), Result: result}
 		if result == model.ResultSuccess && !risk.ResponseProvable(r.Category) {

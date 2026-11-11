@@ -50,6 +50,7 @@ type Engine struct {
 	decRules  []int    // 对编码载荷的解码结果生效的规则（decode.go）
 	decLits   bitset   // 这些规则用到的全部预过滤字面量：解码结果中一个都没有时不必逐条匹配
 	decAlways bool
+	shadow    *ShadowStats // 影子运行规则的命中统计（shadow.go），为空时影子规则只是不生效
 }
 
 func NewEngine(rulesFile string, successMinBytes int64) (*Engine, error) {
@@ -416,6 +417,10 @@ func (e *Engine) webHits(ev *model.Event, uri string, body bool) []model.Hit {
 					break
 				}
 			}
+		}
+		if r.Shadow { // 影子运行：只记录命中，不产生告警
+			e.shadow.note(r.ID, ev.Host+" "+ev.Method+" "+Printable(ev.URI, 160)+" | "+excerpt(text, start, end))
+			continue
 		}
 		h := model.Hit{
 			RuleID: r.ID, Name: r.Name, Category: r.Category, Severity: r.sev, Phase: r.Phase,

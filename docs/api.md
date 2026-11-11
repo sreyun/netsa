@@ -22,7 +22,7 @@
 | `GET /api/rules/managed`、`POST /api/rules/managed`、`DELETE /api/rules/managed/{id}` | 页面维护的规则 |
 | `POST /api/rules/test` | 用样本试运行规则（不保存） |
 | `POST /api/rules/packs`、`DELETE /api/rules/packs/{name}` | 安装、卸载签名规则包 |
-| `POST /api/rules/sigma` | 转换 Sigma 规则（`{"yaml":"…","apply":false}`，`apply` 为 true 时导入） |
+| `POST /api/rules/sigma` | 转换 Sigma 规则（`{"yaml":"…","apply":false}`，`apply` 为 true 时导入，`shadow` 为 true 时导入的规则先影子运行） |
 | `GET /api/integrations` | 外部系统对接状态（管理员） |
 | `GET /api/admin/backup` | 下载状态备份（管理员） |
 | `GET /api/auth/oidc/start`、`GET /api/auth/oidc/callback` | 单点登录 |

@@ -34,7 +34,16 @@ go test -race -short ./...     # 需要 CGO 与 C 编译器（gcc）
   go run ./cmd/netsa eval -v
   ```
 
-  样本在 `internal/eval/corpus/web.tsv`，每条标注“正常 / 攻击”和期望等级。内置样本是手工构造的回归基线，不代表真实流量的准确率；现场脱敏日志可以按同样格式整理后用 `-corpus` 指定。新增样本时先运行一次、记下结果再调整规则，否则样本就失去了验证作用。
+  样本在 `internal/eval/corpus/web.tsv`，每条标注“正常 / 攻击”和期望等级。内置样本是手工构造的回归基线，不代表真实流量的准确率。新增样本时先运行一次、记下结果再调整规则，否则样本就失去了验证作用。
+
+- 用现场日志做回归：`netsa corpus` 从真实的 Web 日志中按请求形态挑选样本（攻击按规则与形态、正常请求按形态各保留几条），脱敏后写成同样格式的语料，标注与期望等级取当前版本的检测结果：
+
+  ```bash
+  netsa corpus -o real.tsv -hide example.org,43.242.97.0/24 /var/log/nginx/access.log*
+  netsa eval -corpus real.tsv -v      # 之后每个版本跑一遍，不符合期望的样本就是这次改动带来的变化
+  ```
+
+  脱敏只替换不影响攻击写法的内容：内网地址映射到 10.250.0.0/16（同一地址始终映射到同一个），`-hide` 指定的域名换成 example.com、网段内的地址换成 198.51.100.0/24，口令与令牌类参数（值本身是攻击载荷时保留）、邮箱、手机号、身份证号、JWT 替换；回环、云元数据地址与其他公网地址保留。标注不是人工结论，作为准确率依据前请复核第一列。语料文件仍是现场数据，权限为 0600，不要提交到代码仓库。
 
 - 前端回归（登录、事件处置、封禁审批、规则运营，以及所有页面渲染攻击者控制的内容时不产生 XSS）用 Playwright，CI 同样执行：
 
@@ -96,16 +105,16 @@ docs/                 使用与开发文档（images/ 为 README 截图，i18n/ 
 
 | 触发 | 行为 |
 |---|---|
-| 创建 tag `v1.11.10` | 构建 + 启动自检 + 推送：`1.11.10`、`1.11`、`1`、`latest`、`sha-xxxxxxx` |
-| 创建预发布 tag `v1.11.10-rc1` | 只推 `1.11.10-rc1`、`sha-xxxxxxx`，不动 `latest` / `1.11` / `1` |
+| 创建 tag `v1.12.0` | 构建 + 启动自检 + 推送：`1.12.0`、`1.11`、`1`、`latest`、`sha-xxxxxxx` |
+| 创建预发布 tag `v1.12.0-rc1` | 只推 `1.12.0-rc1`、`sha-xxxxxxx`，不动 `latest` / `1.11` / `1` |
 | 推送 `master` / Pull Request | 不构建镜像（质量门禁由 `ci` 工作流负责） |
 | 手动触发（workflow_dispatch） | 填写要发布的 tag 与是否更新 `latest`；按该 tag 检出源码，版本与内容严格对应 |
 
 发布流程：
 
 ```bash
-git tag v1.11.10
-git push origin v1.11.10
+git tag v1.12.0
+git push origin v1.12.0
 ```
 
 需要在仓库 **Settings → Secrets and variables → Actions** 配置两个 Secret：
@@ -131,9 +140,9 @@ printf '%s' "$AK" | openssl dgst -binary -sha256 -hmac "$SK" | od -An -vtx1 | tr
 | `GOPROXY` | `https://goproxy.cn,direct` | 构建时的 Go 模块代理 |
 
 ```bash
-docker pull swr.cn-east-3.myhuaweicloud.com/sreyun/netsa:1.11.10
+docker pull swr.cn-east-3.myhuaweicloud.com/sreyun/netsa:1.12.0
 docker run -d --name netsa -p 8080:8080 -p 5514:5514/udp -v netsa-state:/app/state \
-  swr.cn-east-3.myhuaweicloud.com/sreyun/netsa:1.11.10
+  swr.cn-east-3.myhuaweicloud.com/sreyun/netsa:1.12.0
 ```
 
 - **版本随 tag 注入**：构建时通过 `-ldflags "-X main.version=<tag>"` 写入二进制，`netsa version` 与 `/api/meta` 显示的就是发布版本；本地 `docker build` 不传该参数，仍使用源码中的默认版本。

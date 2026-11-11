@@ -40,7 +40,7 @@ func (s *Server) rulesManaged(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	rules, packs := s.Rules.List()
-	writeJSON(w, map[string]any{"rules": rules, "packs": packs})
+	writeJSON(w, map[string]any{"rules": rules, "packs": packs, "shadow": s.Rules.Shadow()})
 }
 
 func (s *Server) rulesUpsert(w http.ResponseWriter, r *http.Request) {
@@ -134,8 +134,9 @@ func (s *Server) rulesSigma(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var f struct {
-		YAML  string `json:"yaml"`
-		Apply bool   `json:"apply"`
+		YAML   string `json:"yaml"`
+		Apply  bool   `json:"apply"`
+		Shadow bool   `json:"shadow"` // 导入的规则先影子运行
 	}
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 16<<20)).Decode(&f); err != nil {
 		writeError(w, http.StatusBadRequest, "请求格式错误")
@@ -147,6 +148,11 @@ func (s *Server) rulesSigma(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	applied := 0
+	if f.Shadow {
+		for i := range res.Rules {
+			res.Rules[i].Shadow = true
+		}
+	}
 	if f.Apply && len(res.Rules) > 0 {
 		applied, err = s.Rules.ImportRules(res.Rules, "sigma", s.user(r))
 		s.audit(r, "导入 Sigma 规则", strconv.Itoa(len(res.Rules))+" 条", err)

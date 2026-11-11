@@ -1450,10 +1450,19 @@ $('#blockTable').addEventListener('click', async (e) => {
 async function loadRuleOps() {
   const r = await api('/api/rules/managed');
   const rules = r.rules || [];
-  $('#ruleCount').textContent = `托管规则 ${num(rules.length)} 条`;
-  $('#ruleTable').innerHTML = `<thead><tr><th>ID</th><th>名称</th><th>分类</th><th>等级</th><th>匹配范围</th><th>表达式</th><th>来源</th><th></th></tr></thead><tbody>${rules.map((x) => `<tr>
-    <td class="mono">${esc(x.id)}</td><td>${esc(x.name)}</td><td>${esc(x.category)}</td><td>${badge(x.severity)}</td><td>${esc(x.target)}</td><td class="mono evidence">${esc(x.pattern)}</td><td>${esc(x.source)}</td>
-    <td class="nowrap">${String(x.source).startsWith('pack:') ? '' : `<button class="btn sm" data-rule-edit="${esc(x.id)}">修改</button> <button class="btn sm" data-rule-del="${esc(x.id)}">删除</button>`}</td></tr>`).join('') || '<tr><td colspan="8" class="muted">还没有自定义规则</td></tr>'}</tbody>`;
+  const shadow = r.shadow || {};
+  const nShadow = rules.filter((x) => x.shadow).length;
+  $('#ruleCount').textContent = `托管规则 ${num(rules.length)} 条${nShadow ? `，其中 ${num(nShadow)} 条影子运行` : ''}`;
+  // 影子运行：只统计命中、不产生告警；提示里列出最近几次命中，确认效果后再转为正式
+  const state = (x) => {
+    if (!x.shadow) return '<span class="muted">生效</span>';
+    const st = shadow[x.id];
+    const tip = st ? `最近命中：\n${(st.samples || []).join('\n')}` : '影子运行以来还没有命中';
+    return `<span class="tag" title="${esc(tip)}">影子运行 · ${st ? `命中 ${num(st.hits)} 次，最近 ${esc(fmtShort(st.last))}` : '尚无命中'}</span>`;
+  };
+  $('#ruleTable').innerHTML = `<thead><tr><th>ID</th><th>名称</th><th>分类</th><th>等级</th><th>匹配范围</th><th>表达式</th><th>来源</th><th>状态</th><th></th></tr></thead><tbody>${rules.map((x) => `<tr>
+    <td class="mono">${esc(x.id)}</td><td>${esc(x.name)}</td><td>${esc(x.category)}</td><td>${badge(x.severity)}</td><td>${esc(x.target)}</td><td class="mono evidence">${esc(x.pattern)}</td><td>${esc(x.source)}</td><td>${state(x)}</td>
+    <td class="nowrap">${String(x.source).startsWith('pack:') ? '' : `<button class="btn sm" data-rule-shadow="${esc(x.id)}">${x.shadow ? '转为正式' : '改为影子运行'}</button> <button class="btn sm" data-rule-edit="${esc(x.id)}">修改</button> <button class="btn sm" data-rule-del="${esc(x.id)}">删除</button>`}</td></tr>`).join('') || '<tr><td colspan="9" class="muted">还没有自定义规则</td></tr>'}</tbody>`;
   ruleOps.rules = rules;
   const packs = r.packs || [];
   $('#packTable').hidden = !packs.length;
@@ -1485,7 +1494,9 @@ function promptRule(cur) {
   if (severity === null) return null;
   const category = prompt('攻击分类（分类决定等级底线，可留空）：', cur?.category || '');
   if (category === null) return null;
-  return { id: id.trim(), name, pattern, target: target.trim(), severity: severity.trim(), category: category.trim() };
+  // 新规则默认先影子运行；修改已有规则时保持原来的状态
+  const shadow = cur ? !!cur.shadow : confirm('先影子运行这条规则吗？\n影子运行只统计命中、不产生告警，在“状态”一列查看命中情况，确认效果后再转为正式。\n\n确定：影子运行；取消：立即生效');
+  return { id: id.trim(), name, pattern, target: target.trim(), severity: severity.trim(), category: category.trim(), shadow, methods: cur?.methods, only_failed: cur?.only_failed };
 }
 async function saveRule(rule) {
   const sample = prompt('输入一条样本先试运行（可留空跳过），例如 /index.php?id=1：', '');
@@ -1503,8 +1514,16 @@ $('#ruleAdd').addEventListener('click', async () => {
 $('#ruleTable').addEventListener('click', async (e) => {
   const ed = e.target.closest('[data-rule-edit]');
   const del = e.target.closest('[data-rule-del]');
+  const sh = e.target.closest('[data-rule-shadow]');
   try {
-    if (ed) {
+    if (sh) {
+      const cur = ruleOps.rules.find((x) => x.id === sh.dataset.ruleShadow);
+      if (!cur) return;
+      const next = !cur.shadow;
+      if (!confirm(next ? `把规则 ${cur.id} 改为影子运行？之后只统计命中，不再产生告警。` : `把规则 ${cur.id} 转为正式？之后的命中会产生告警并计入统计。`)) return;
+      const { source, updated, by, ...rule } = cur;
+      await api('/api/rules/managed', 'POST', { ...rule, shadow: next });
+    } else if (ed) {
       const rule = promptRule(ruleOps.rules.find((x) => x.id === ed.dataset.ruleEdit));
       if (rule) await saveRule(rule);
     } else if (del && confirm(`删除规则 ${del.dataset.ruleDel}？`)) {
@@ -1548,8 +1567,9 @@ $('#ruleSigma').addEventListener('click', async () => {
     const skipped = (pre.skipped || []).slice(0, 10).map((s) => `· ${s.title}：${s.reason}`).join('\n');
     if (!(pre.rules || []).length) { alert(`没有可以转换的规则。\n${skipped}`); return; }
     if (!confirm(`可以转换 ${pre.rules.length} 条，跳过 ${(pre.skipped || []).length} 条。\n${skipped}\n\n确定导入？`)) return;
-    const res = await api('/api/rules/sigma', 'POST', { yaml: text, apply: true });
-    alert(`已导入 ${res.applied} 条规则`);
+    const shadow = confirm('导入的规则先影子运行吗？影子运行只统计命中、不产生告警，确认效果后再逐条转为正式。\n\n确定：影子运行；取消：立即生效');
+    const res = await api('/api/rules/sigma', 'POST', { yaml: text, apply: true, shadow });
+    alert(`已导入 ${res.applied} 条规则${shadow ? '（影子运行）' : ''}`);
     loadRuleOps().catch(console.error);
   } catch (err) { alert(err.message); }
 });

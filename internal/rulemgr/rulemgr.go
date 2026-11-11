@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -61,16 +62,17 @@ type Options struct {
 
 // Manager 管理规则。所有修改先构建新引擎，成功才保存和切换：一条错误的规则不会影响正在运行的检测。
 type Manager struct {
-	opt  Options
-	keys map[string]ed25519.PublicKey
-	mu   sync.Mutex
-	st   state
-	eng  *detect.Engine
+	opt    Options
+	keys   map[string]ed25519.PublicKey
+	mu     sync.Mutex
+	st     state
+	eng    *detect.Engine
+	shadow *detect.ShadowStats // 影子运行规则的命中，在引擎重建之间保留
 }
 
 // New 加载规则并构建引擎。已保存的规则无法加载时报错，而不是静默丢弃客户配置的检测能力。
 func New(opt Options) (*Manager, error) {
-	m := &Manager{opt: opt, keys: map[string]ed25519.PublicKey{}}
+	m := &Manager{opt: opt, keys: map[string]ed25519.PublicKey{}, shadow: detect.NewShadowStats()}
 	for _, k := range opt.Keys {
 		raw, err := base64.StdEncoding.DecodeString(strings.TrimSpace(k))
 		if err != nil || len(raw) != ed25519.PublicKeySize {
@@ -109,8 +111,16 @@ func (m *Manager) build(items []Item) (*detect.Engine, error) {
 	for i, it := range items {
 		rules[i] = it.Rule
 	}
-	return detect.NewEngineWith(m.opt.RulesFile, rules, m.opt.MinBytes)
+	eng, err := detect.NewEngineWith(m.opt.RulesFile, rules, m.opt.MinBytes)
+	if err != nil {
+		return nil, err
+	}
+	eng.SetShadow(m.shadow)
+	return eng, nil
 }
+
+// Shadow 返回影子运行规则的命中统计。
+func (m *Manager) Shadow() map[string]detect.ShadowStat { return m.shadow.Snapshot() }
 
 // Engine 返回当前引擎。
 func (m *Manager) Engine() *detect.Engine {
@@ -130,6 +140,15 @@ func (m *Manager) commitLocked(items []Item, packs []PackState) error {
 	if len(items) > maxRules {
 		return fmt.Errorf("托管规则最多 %d 条", maxRules)
 	}
+	defer func() {
+		var ids []string
+		for _, it := range m.st.Rules {
+			if it.Shadow {
+				ids = append(ids, it.ID)
+			}
+		}
+		m.shadow.Keep(ids) // 删除或转为正式的规则不再保留影子统计
+	}()
 	eng, err := m.build(items)
 	if err != nil {
 		return err
@@ -197,12 +216,13 @@ func (m *Manager) Upsert(r detect.Rule, source, user string) (*Item, error) {
 	defer m.mu.Unlock()
 	items := append([]Item(nil), m.st.Rules...)
 	it := Item{Rule: r, Source: source, Updated: time.Now(), By: user}
-	found := false
+	found, changed := false, false
 	for i := range items {
 		if items[i].ID == r.ID {
 			if strings.HasPrefix(items[i].Source, "pack:") {
 				return nil, fmt.Errorf("规则 %s 来自规则包，请更新规则包", r.ID)
 			}
+			changed = !sameMatch(items[i].Rule, r)
 			items[i] = it
 			found = true
 		}
@@ -213,7 +233,15 @@ func (m *Manager) Upsert(r detect.Rule, source, user string) (*Item, error) {
 	if err := m.commitLocked(items, m.st.Packs); err != nil {
 		return nil, err
 	}
+	if changed {
+		m.shadow.Reset(r.ID) // 匹配条件变了：此前的影子命中不再代表这条规则的效果
+	}
 	return &it, nil
+}
+
+// sameMatch 判断两条规则的匹配条件是否相同（名称、等级等展示字段的修改不影响命中）。
+func sameMatch(a, b detect.Rule) bool {
+	return a.Pattern == b.Pattern && a.Target == b.Target && a.OnlyFailed == b.OnlyFailed && slices.Equal(a.Methods, b.Methods)
 }
 
 // Delete 删除一条页面维护的规则。

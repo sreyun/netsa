@@ -63,7 +63,7 @@ import (
 
 // version 是构建版本号。默认值用于本地构建；镜像构建通过
 // -ldflags "-X main.version=<tag>" 注入，`netsa version` 与 /api/meta 都会显示注入后的值。
-var version = "1.11.10"
+var version = "1.12.0"
 
 func usage() {
 	fmt.Fprintf(os.Stderr, `netsa %s —— 网络安全态势感知与攻击面分析系统
@@ -75,6 +75,7 @@ func usage() {
   netsa rules    [-rules custom.yaml]            列出检测规则
   netsa rulepack keygen|sign                     生成规则包密钥、签名规则包
   netsa eval     [-corpus samples.tsv] [-v]      用带标注的样本评测检出率与误报
+  netsa corpus   -o real.tsv [选项] <日志文件...> 从现场 Web 日志生成脱敏的评测语料（之后用 eval -corpus 跑回归）
   netsa backup   -c config.yaml -o backup.tar.gz 备份状态目录（可在运行时执行）
   netsa restore  -c config.yaml -i backup.tar.gz 恢复状态目录（需先停止服务）
   netsa passwd   -c config.yaml -u admin         重置登录密码（忘记密码时使用）
@@ -109,6 +110,8 @@ func main() {
 		err = cmdRulePack(os.Args[2:])
 	case "eval":
 		err = cmdEval(os.Args[2:])
+	case "corpus":
+		err = cmdCorpus(os.Args[2:])
 	case "passwd":
 		err = cmdPasswd(os.Args[2:])
 	case "hash-password":
@@ -1049,6 +1052,84 @@ func cmdEval(args []string) error {
 	}
 	if rep.Violations > 0 {
 		return fmt.Errorf("%d 条样本不符合期望等级", rep.Violations)
+	}
+	return nil
+}
+
+// cmdCorpus 从现场 Web 日志挑选有代表性的请求、脱敏，按当前版本的检测结果写出评测语料。
+// 之后每个版本用 netsa eval -corpus 跑一遍，不符合期望的样本就是规则或定级改动带来的变化。
+func cmdCorpus(args []string) error {
+	fs := flag.NewFlagSet("corpus", flag.ExitOnError)
+	typ := fs.String("type", "auto", "日志类型: auto | nginx | 具体解析器名")
+	logFormat := fs.String("format", "", "自定义 nginx log_format 字符串")
+	host := fs.String("host", "", "站点名（日志中无 $host 时使用）")
+	out := fs.String("o", "corpus-real.tsv", "输出的样本文件")
+	maxCases := fs.Int("max", 5000, "样本总数上限（攻击样本最多占六成）")
+	per := fs.Int("per", 3, "同一请求形态最多保留的条数")
+	hide := fs.String("hide", "", "需要替换的本单位域名与网段，逗号分隔，如 example.org,43.242.97.0/24")
+	fs.Usage = func() {
+		fmt.Fprintln(os.Stderr, "用法: netsa corpus [选项] <日志文件...>")
+		fmt.Fprintln(os.Stderr, "标注与期望等级来自当前版本的检测结果，作为准确率依据前请人工复核第一列（benign / attack）。")
+		fs.PrintDefaults()
+	}
+	fs.Parse(args)
+	files := expandArgs(fs.Args())
+	if len(files) == 0 {
+		fs.Usage()
+		return errors.New("未指定日志文件")
+	}
+	var hides []string
+	for _, h := range strings.Split(*hide, ",") {
+		if h = strings.TrimSpace(h); h != "" {
+			hides = append(hides, h)
+		}
+	}
+	col, err := eval.NewCollector(eval.CollectOptions{MaxCases: *maxCases, PerShape: *per, Hide: hides})
+	if err != nil {
+		return err
+	}
+	m := ingest.NewManager(8)
+	done := make(chan struct{})
+	go func() {
+		for batch := range m.Out {
+			for _, ev := range batch {
+				col.Add(ev)
+			}
+		}
+		close(done)
+	}()
+	ctx := context.Background()
+	for _, f := range files {
+		if err := m.ReadFile(ctx, f, *typ, *logFormat, *host); err != nil {
+			log.Printf("跳过 %s: %v", f, err)
+		}
+	}
+	m.Wait()
+	close(m.Out)
+	<-done
+	if col.Seen == 0 {
+		return errors.New("没有读到带请求路径的 Web 日志")
+	}
+	cases, rep, err := col.Finish()
+	if err != nil {
+		return err
+	}
+	fh, err := os.OpenFile(*out, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600) // 脱敏后仍是现场数据，只允许当前账号读取
+	if err != nil {
+		return err
+	}
+	werr := eval.WriteCorpus(fh, cases, strings.Join(files, ", "), col.Seen, col.Hits)
+	if cerr := fh.Close(); werr == nil {
+		werr = cerr
+	}
+	if werr != nil {
+		return werr
+	}
+	fmt.Printf("读取 %d 条 Web 请求，其中 %d 条命中攻击规则；写出 %d 条样本（攻击 %d、正常 %d）到 %s\n",
+		col.Seen, col.Hits, len(cases), rep.Attacks, rep.Benign, *out)
+	fmt.Println("标注是当前版本的检测结果，请复核第一列后再作为准确率依据；之后用 netsa eval -corpus " + *out + " -v 检查每个版本的变化")
+	if rep.Violations > 0 {
+		return fmt.Errorf("%d 条样本重新评测时结果不一致（检测结果依赖样本之间的顺序），请检查后再使用", rep.Violations)
 	}
 	return nil
 }
