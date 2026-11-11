@@ -92,7 +92,7 @@ func TestDecodePieceLimits(t *testing.T) {
 		t.Error("没有攻击符号的文本不再匹配")
 	}
 	long := "/x?" + strings.Repeat("a=Li4vLi4vLi4vZXRjL3Bhc3N3ZA==&", 20)
-	if n := len(encodedPieces(long)); n != maxPieces {
+	if n := len(encodedPieces(long, nil)); n != maxPieces {
 		t.Errorf("每个请求最多解码 %d 个片段: %d", maxPieces, n)
 	}
 }

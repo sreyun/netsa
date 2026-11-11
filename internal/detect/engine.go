@@ -753,7 +753,7 @@ func specialWebChecks(ev *model.Event, uri, result string) []model.Hit {
 	}
 	raw := ev.URI
 	switch {
-	case ev.Method == "" && raw != "":
+	case model.NonHTTPRequest(ev.Method, raw): // 与 inspectWeb 同一定义：没有方法但路径以 / 开头的是缺少方法字段的访问日志，不是二进制探测
 		name := "非HTTP协议探测"
 		switch {
 		case strings.HasPrefix(raw, "\x16\x03"):

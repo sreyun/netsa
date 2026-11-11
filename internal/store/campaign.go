@@ -169,10 +169,28 @@ func (s *Store) buildCampaigns() *CampaignReport {
 		}
 	}
 	sort.Strings(keys) // 结果与 map 遍历顺序无关
+	// 每个成员只需算一次的目标主机集合与主要攻击类型按下标缓存（跨分桶复用），两两比对时直接求交集
+	memo := map[int]*campMemo{}
+	memoOf := func(i int) *campMemo {
+		m := memo[i]
+		if m == nil {
+			m = &campMemo{hosts: targetHosts(list[i]), top: topKey(list[i].Categories)}
+			memo[i] = m
+		}
+		return m
+	}
 	for _, k := range keys {
 		idx := buckets[k]
 		s.mu.RLock()
+		work := 0
 		for a := 0; a < len(idx); a++ {
+			if work >= scanChunk {
+				// 按工作量释放读锁：一个 300 个成员的分桶有约 4.5 万对，一次持锁做完会阻塞日志入库数百毫秒。
+				// seen / parent / edges 都是局部数据；锁外画像可能被更新，下一段比对读到的是更新后的值，与分批扫描一致
+				s.mu.RUnlock()
+				s.mu.RLock()
+				work = 0
+			}
 			i := idx[a]
 			cr := newCorrelator(list[i])
 			if cr == nil {
@@ -185,9 +203,9 @@ func (s *Store) buildCampaigns() *CampaignReport {
 				cr.tlsUsers[u] = tlsUsers[fp]
 			}
 			cr.attackers = len(list)
-			hosts := targetHosts(list[i])
 			var dummy Correlation
 			for b := a + 1; b < len(idx); b++ {
+				work++
 				j := idx[b]
 				pk := uint64(min(i, j))<<32 | uint64(max(i, j))
 				if _, ok := seen[pk]; ok {
@@ -198,7 +216,7 @@ func (s *Store) buildCampaigns() *CampaignReport {
 				score, reasons := c.score, []string(nil)
 				if score >= relatedStrong {
 					_, reasons = cr.score(&c, true)
-				} else if c.asn == 2 && sharedScan(list[i], list[j], hosts) {
+				} else if c.asn == 2 && sharedScan(list[i], list[j], memoOf(i), memoOf(j)) {
 					// 只有“同一云厂商”这条弱线索时原评分记为 0，这里按其本身的 20 分计
 					score = max(score, 20) + 40
 					_, reasons = cr.score(&c, true)
@@ -399,19 +417,29 @@ func targetHost(t string) string {
 
 // sharedScan 判断两个攻击源是否在相近时间（活动期间相互重叠，或间隔不超过 1 小时）扫描了同一台主机、
 // 主要攻击类型相同。调用方持读锁。
-func sharedScan(a, b *IPProfile, hostsA map[string]struct{}) bool {
+func sharedScan(a, b *IPProfile, ma, mb *campMemo) bool {
 	if a.FirstSeen.After(b.LastSeen.Add(time.Hour)) || b.FirstSeen.After(a.LastSeen.Add(time.Hour)) {
 		return false
 	}
-	if topKey(a.Categories) == "" || topKey(a.Categories) != topKey(b.Categories) {
+	if ma.top == "" || ma.top != mb.top {
 		return false
 	}
-	for t := range b.Targets {
-		if _, ok := hostsA[targetHost(t)]; ok {
+	x, y := ma.hosts, mb.hosts
+	if len(x) > len(y) {
+		x, y = y, x
+	}
+	for h := range x {
+		if _, ok := y[h]; ok {
 			return true
 		}
 	}
 	return false
+}
+
+// campMemo 是攻击活动归并时每个成员只需计算一次的数据。
+type campMemo struct {
+	hosts map[string]struct{} // 目标主机
+	top   string              // 主要攻击类型
 }
 
 func topKey(m map[string]int) string {

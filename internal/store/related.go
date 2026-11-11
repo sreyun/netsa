@@ -479,8 +479,14 @@ func topKeys(m map[string]int, n int) []string {
 	for k := range m {
 		keys = append(keys, k)
 	}
+	// 始终排序（计数降序、同数按键升序）：键数不超过 n 时也按计数排列，结果不随 map 遍历顺序在每次重建时变化
+	sort.Slice(keys, func(i, j int) bool {
+		if a, b := m[keys[i]], m[keys[j]]; a != b {
+			return a > b
+		}
+		return keys[i] < keys[j]
+	})
 	if len(keys) > n {
-		sort.Slice(keys, func(i, j int) bool { return m[keys[i]] > m[keys[j]] })
 		keys = keys[:n]
 	}
 	return keys

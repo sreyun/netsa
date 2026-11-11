@@ -10,7 +10,7 @@ import (
 
 func TestIncidentLifecycle(t *testing.T) {
 	s := newTestStore()
-	now := time.Now()
+	now := time.Now().Add(-48 * time.Hour) // 事件时间在过去：未来超过 1 小时的时间会按当前时间记录
 	ip := "203.0.113.20"
 	rec := func(at time.Time, rule string, sev model.Severity, result string) *model.Alert {
 		res := s.Record(&model.Event{Kind: model.KindWeb, SrcIP: ip, Method: "GET", URI: "/a?" + rule, Status: 403, Time: at},

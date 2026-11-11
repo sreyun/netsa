@@ -137,6 +137,8 @@ type Behavior struct {
 	sites      map[string]*siteWin     // 站点 → 请求量窗口与基线（分布式 CC）
 	homes      map[string]*homeSize    // 站点 → 首页的响应大小（识别对不存在的路径返回首页的兜底页面）
 	dsts       map[dstKey]*dstWin      // 目的地址:端口 → 事件量窗口与基线（多源 DDoS）
+	siteSrcN   int                     // sites 中合计记录的来源数（全局上限 maxSurgeSrcTotal）
+	dstSrcN    int                     // dsts 中合计记录的来源数
 	devFloods  map[string]devFlood     // 目的地址 → 设备最近报告的洪泛（behavior_devflood.go）
 	exfil      map[string]*exfilWin    // 内网主机 → 外发字节窗口与基线（behavior_exfil.go）
 	downloads  map[string]*dlWin       // 外部来源 → 下载量窗口

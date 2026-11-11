@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"math"
 	"os"
 	"path/filepath"
 	"sort"
@@ -28,6 +29,7 @@ type Query struct {
 	Limit       int    // 最多返回的条数（默认 200，最多 5000）
 	MaxBytes    int64  // 最多扫描的解压后字节数（默认 4GB）
 	MaxRaw      int    // 每条日志最多返回的字节数，超出部分截断（0 表示不限制，导出时使用）
+	MaxHold     int64  // 结果在内存中最多保留的日志字节数（默认 256MB）：超出后只保留最新的部分并标记为不完整
 	Cursor      Cursor // 翻页位置，零值表示第一页
 }
 
@@ -138,6 +140,11 @@ func (s *Store) Search(ctx context.Context, q Query) (Result, error) {
 	if q.MaxBytes <= 0 {
 		q.MaxBytes = 4 << 30
 	}
+	if q.MaxHold <= 0 {
+		// 按条数限制约束不了内存：入库单行最多 1MB，5000 条完整内容（每个分段还要先攒到 2 倍再裁剪）可达数 GB，
+		// 发送端能控制日志内容，高度可压缩的超长行在磁盘上只占很少空间
+		q.MaxHold = 256 << 20
+	}
 	kw := []byte(strings.ToLower(strings.TrimSpace(q.Keyword)))
 	src := strings.ToLower(strings.TrimSpace(q.Source))
 	// 与入库时一致地规范化地址（IPv4 映射地址、大小写、方括号），否则布隆过滤器与精确匹配都会漏掉
@@ -154,6 +161,8 @@ func (s *Store) Search(ctx context.Context, q Query) (Result, error) {
 		cursorKey = s.key(time.UnixMilli(q.Cursor.Ms))
 	}
 	res.MatchedAll = true
+	var held int64       // res.Records 与当前分段 found 中日志内容的字节数
+	var capMs int64 = -1 // 达到内存上限后保留的最早时间：更早的日志不再收集
 	for _, k := range segs {
 		if ctx.Err() != nil {
 			res.MatchedAll = false
@@ -178,6 +187,7 @@ func (s *Store) Search(ctx context.Context, q Query) (Result, error) {
 		// 保留该分段中时间最新的 keep 条
 		var found []Record
 		budget := false // 扫描量在本分段中途达到上限
+		capped := false // 结果字节数在本分段达到内存上限
 		err := scanSegment(ctx, path, func(line []byte) bool {
 			res.Bytes += int64(len(line)) + 1
 			if res.Bytes >= q.MaxBytes {
@@ -208,18 +218,41 @@ func (s *Store) Search(ctx context.Context, q Query) (Result, error) {
 				}
 			}
 			res.Matched++
+			if capMs >= 0 && r.Time.UnixMilli() < capMs {
+				return true // 已达到内存上限：比保留的最早一条更早的日志不再收集
+			}
 			if q.MaxRaw > 0 && len(r.Raw) > q.MaxRaw {
 				r.RawLen = len(r.Raw)
 				n := q.MaxRaw
 				for n > 0 && !utf8.RuneStart(r.Raw[n]) { // 不截断多字节字符；其中的二进制字节由接口转义显示
 					n--
 				}
-				r.Raw = r.Raw[:n]
+				r.Raw = strings.Clone(r.Raw[:n]) // 子串仍引用整行的底层数组，截断后复制一份才能释放整行
 			}
 			found = append(found, r)
+			held += int64(len(r.Raw))
 			if len(found) >= 2*keep { // 只保留按时间最新的 keep 条（写入顺序不一定是时间顺序）
 				sort.SliceStable(found, func(i, j int) bool { return found[i].Time.After(found[j].Time) })
+				for _, x := range found[keep:] {
+					held -= int64(len(x.Raw))
+				}
+				clear(found[keep:]) // 释放被裁掉的日志内容
 				found = found[:keep]
+			}
+			if held > q.MaxHold {
+				// 按时间保留最新的部分，直到回到上限以内
+				sort.SliceStable(found, func(i, j int) bool { return found[i].Time.After(found[j].Time) })
+				for len(found) > 0 && held > q.MaxHold {
+					held -= int64(len(found[len(found)-1].Raw))
+					found[len(found)-1] = Record{}
+					found = found[:len(found)-1]
+				}
+				capped = true
+				if len(found) > 0 {
+					capMs = found[len(found)-1].Time.UnixMilli()
+				} else {
+					capMs = math.MaxInt64
+				}
 			}
 			return true
 		})
@@ -231,6 +264,12 @@ func (s *Store) Search(ctx context.Context, q Query) (Result, error) {
 			cut = "检索超时，结果不完整，请缩小时间范围或增加过滤条件"
 		case budget:
 			cut = "扫描量达到上限，结果不完整，请缩小时间范围或增加过滤条件"
+		case capped:
+			size := strconv.FormatInt(q.MaxHold>>20, 10) + "MB"
+			if q.MaxHold < 1<<20 {
+				size = strconv.FormatInt(q.MaxHold>>10, 10) + "KB"
+			}
+			cut = "结果内容超过 " + size + "，只保留了最新的部分，请缩小时间范围或分页导出"
 		case errors.Is(err, ErrSkippedDamaged):
 			res.Reason = err.Error()
 		case err != nil:
@@ -238,6 +277,10 @@ func (s *Store) Search(ctx context.Context, q Query) (Result, error) {
 		}
 		sort.SliceStable(found, func(i, j int) bool { return found[i].Time.After(found[j].Time) })
 		res.Records = append(res.Records, found...)
+		if capped && len(res.Records) > 0 && len(res.Records) < keep {
+			// 达到内存上限：结果截在这里，下一页从保留的最早一条之后继续
+			res.Next = nextCursor(q.Cursor, res.Records).String()
+		}
 		if len(res.Records) >= keep {
 			// 分段按时间倒序扫描；继续扫描更早的分段不会得到更新的日志
 			res.Records = res.Records[:q.Limit]

@@ -448,6 +448,15 @@ func (s *Store) recordLocked(ev *model.Event, hits []model.Hit) RecordResult {
 	if ev.SrcPort < 0 || ev.SrcPort > 65535 {
 		ev.SrcPort = 0
 	}
+	// 设备时钟错误或解析异常产生的未来 / 远古时间按当前时间记录：统计、画像的首次 / 最近出现、阶段时间、告警节流、
+	// 告警与事件时间、攻击面与链路都用修正后的时间（在事件的副本上修改，不改调用方的事件）。否则一条时间在未来的日志
+	// 让该来源永远算作“近 1 小时活跃”、最后才被淘汰，1970 年的日志让攻击源从活跃统计与日报中消失。
+	// 离线导入的历史日志（2000 年以后、不在未来）不受影响。
+	if now := time.Now(); ev.Time.After(now.Add(time.Hour)) || ev.Time.Year() < 2000 {
+		cp := *ev
+		cp.Time = now
+		ev = &cp
+	}
 	hits = s.dropSelfRefLocked(ev, hits)
 
 	count := !ev.Replay && !ev.Aux // 补发命中的事件副本已经计入过事件量；辅助记录描述的是已经计入的连接
@@ -483,12 +492,7 @@ func (s *Store) recordLocked(ev *model.Event, hits []model.Hit) RecordResult {
 	if c2 != nil {
 		hits = append(hits[:len(hits):len(hits)], *c2) // 不修改调用方的切片
 	}
-	// 统计用时间：设备时钟错误或解析异常产生的未来 / 远古时间按当前时间统计，
-	// 否则一条异常日志就会把时间窗口推到未来，导致趋势数据被保留期清理、“近 1 小时”统计失真。
-	t := ev.Time
-	if now := time.Now(); t.After(now.Add(time.Hour)) || t.Year() < 2000 {
-		t = now
-	}
+	t := ev.Time // 已在入口修正过未来 / 远古时间
 	if s.minTime.IsZero() || t.Before(s.minTime) {
 		s.minTime = t
 	}
@@ -723,7 +727,9 @@ func (s *Store) recordLocked(ev *model.Event, hits []model.Hit) RecordResult {
 		}
 		day.Alerts += int64(len(res.Alerts))
 	}
-	if attacked && count {
+	// 补发命中的事件副本（Replay）已经记录过；辅助记录（Zeek ssl / files）的命中只在它们身上出现（TLS 指纹命中 C2 情报、
+	// 恶意文件下载），同一连接的 conn 记录没有命中，不能因为它不计入事件量就不记录外部目标
+	if attacked && !ev.Replay {
 		if s.observeOutboundLocked(ev, hits, t) { // 内部对外的攻击与异常连接：记录外部目标（攻击来源地图的外连飞线）
 			res.NewOutbound = ev.DstIP
 		}

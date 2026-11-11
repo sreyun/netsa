@@ -36,6 +36,7 @@ const (
 	maxCampaigns        = 2000
 	maxCampaignIPs      = 50
 	maxCandidates       = 5000
+	singleKeep          = 48 * time.Hour // 只有一个来源的候选与攻击活动的保留期：永远不可能晋升 / 关联，不必等 2×escalate_days
 	maxLearnedRules     = 500
 	discoverSources     = 3 // 同一请求形态至少被这么多已确认攻击源使用过，才生成观察规则
 	maxBenignIPs        = 4 // 每种请求形态最多记录这么多正常使用的来源，再多就是正常访客普遍在用
@@ -241,7 +242,91 @@ func (l *Learner) ConfirmSource(ip, kind, reason string, at time.Time) bool {
 	l.logLocked(c)
 	l.mu.Unlock()
 	l.emit([]Change{c})
+	// 按同一攻击活动确认的不再扩散（避免递归，其余成员已由触发者处理）；只凭模型判断确认的也不扩散：
+	// “同一攻击活动”算作客观依据，由模型的结论扩散出去等于把模型的判断变成了客观结论
+	if kind != "campaign" && kind != "ai" {
+		l.spreadCampaigns(ip, at)
+	}
 	return true
+}
+
+// spreadCampaigns 来源新被确认为攻击源后，与它使用过同一带外回连标识的其他来源一并确认：
+// 确认之后这些来源不一定还会发来带标识的请求，只在 observeCampaign 中检查会漏掉它们。
+func (l *Learner) spreadCampaigns(ip string, at time.Time) {
+	st := &l.atk
+	type link struct {
+		key string
+		ips []string
+	}
+	var links []link
+	st.mu.Lock()
+	for k, c := range st.campaigns {
+		if len(c.IPs) >= 2 && slices.Contains(c.IPs, ip) {
+			links = append(links, link{k, append([]string(nil), c.IPs...)})
+		}
+	}
+	st.mu.Unlock()
+	for _, lk := range links {
+		for _, x := range lk.ips {
+			if x == ip {
+				continue
+			}
+			if _, ok := l.confirmedSource(x, at); !ok {
+				l.ConfirmSource(x, "campaign", fmt.Sprintf("与已确认的攻击源 %s 使用同一带外回连标识 %s，属于同一攻击活动", ip, lk.key), at)
+			}
+		}
+	}
+}
+
+// evictCandidates 候选请求形态满时淘汰约一成（调用方持 st.mu）：来源少的在前（只有一个来源的永远不可能晋升），
+// 同数按最后出现时间从早到晚。
+func (st *attackState) evictCandidates() {
+	type kv struct {
+		k string
+		n int
+		t time.Time
+	}
+	list := make([]kv, 0, len(st.cand))
+	for k, c := range st.cand {
+		list = append(list, kv{k, len(c.sources), c.last})
+	}
+	sort.Slice(list, func(i, j int) bool {
+		if list[i].n != list[j].n {
+			return list[i].n < list[j].n
+		}
+		if !list[i].t.Equal(list[j].t) {
+			return list[i].t.Before(list[j].t)
+		}
+		return list[i].k < list[j].k
+	})
+	for _, x := range list[:max(1, len(list)/10)] {
+		delete(st.cand, x.k)
+	}
+}
+
+// evictCampaigns 攻击活动表满时淘汰约一成（调用方持 st.mu）：只有一个来源的在前，同数按最后出现时间从早到晚。
+func (st *attackState) evictCampaigns() {
+	type kv struct {
+		k string
+		n int
+		t time.Time
+	}
+	list := make([]kv, 0, len(st.campaigns))
+	for k, c := range st.campaigns {
+		list = append(list, kv{k, len(c.IPs), c.Last})
+	}
+	sort.Slice(list, func(i, j int) bool {
+		if list[i].n != list[j].n {
+			return list[i].n < list[j].n
+		}
+		if !list[i].t.Equal(list[j].t) {
+			return list[i].t.Before(list[j].t)
+		}
+		return list[i].k < list[j].k
+	})
+	for _, x := range list[:max(1, len(list)/10)] {
+		delete(st.campaigns, x.k)
+	}
 }
 
 // evictAutoLocked 淘汰最早的一成自动确认来源（调用方持锁）。
@@ -394,7 +479,10 @@ func (l *Learner) ObserveAttack(ev *model.Event, hits []model.Hit) []model.Hit {
 	c := st.cand[shape]
 	switch {
 	case confirmed:
-		if c == nil && len(st.cand) < maxCandidates {
+		if c == nil {
+			if len(st.cand) >= maxCandidates {
+				st.evictCandidates() // 满了淘汰价值最低的一批：一次目录扫描就能占满，满了直接拒绝的话未知攻击发现会停用两个月
+			}
 			c = &candidate{example: clipShape(ev.Method + " " + ev.URI), first: at}
 			st.cand[shape] = c
 		}
@@ -474,8 +562,7 @@ func (l *Learner) observeCampaign(ip, key, sample string, at time.Time) {
 	c := st.campaigns[key]
 	if c == nil {
 		if len(st.campaigns) >= maxCampaigns {
-			st.mu.Unlock()
-			return
+			st.evictCampaigns() // 每次随机子域名的回连载荷可以占满活动表：淘汰只有一个来源、最早的活动
 		}
 		c = &Campaign{Key: key, Sample: sample, First: at}
 		st.campaigns[key] = c
@@ -491,16 +578,19 @@ func (l *Learner) observeCampaign(ip, key, sample string, at time.Time) {
 	}
 	ips := append([]string(nil), c.IPs...)
 	st.mu.Unlock()
-	if !isNew || len(ips) < 2 {
+	if len(ips) < 2 {
 		return
 	}
-	l.mu.Lock()
-	l.dirty = true
-	l.mu.Unlock()
-	// 活动中有已确认的攻击源：其他来源一并确认
+	if isNew {
+		l.mu.Lock()
+		l.dirty = true
+		l.mu.Unlock()
+	}
+	// 活动中有已确认的攻击源：其他来源一并确认。不只在有新来源加入时检查：两个出口先共用同一标识、
+	// 之后其中一个才被确认时，没有第三个来源加入，另一个也要确认（ConfirmSource 新确认时同样会回头扩散）
 	var anchor string
 	for _, x := range ips {
-		if _, ok := l.confirmedSource(x, at); ok {
+		if l.objectiveSource(x, at) { // 只凭模型判断确认的来源不作为扩散的依据
 			anchor = x
 			break
 		}
@@ -816,7 +906,7 @@ func (l *Learner) pruneAttackLocked(now time.Time, days int) []Change {
 	st.mu.Lock()
 	var found []*Change
 	for k, c := range st.cand {
-		if now.Sub(c.last) > keep {
+		if now.Sub(c.last) > keep || len(c.sources) < 2 && now.Sub(c.last) > min(keep, singleKeep) {
 			delete(st.cand, k)
 			continue
 		}
@@ -826,7 +916,7 @@ func (l *Learner) pruneAttackLocked(now time.Time, days int) []Change {
 		}
 	}
 	for k, c := range st.campaigns {
-		if now.Sub(c.Last) > keep {
+		if now.Sub(c.Last) > keep || len(c.IPs) < 2 && now.Sub(c.Last) > min(keep, singleKeep) {
 			delete(st.campaigns, k)
 		}
 	}

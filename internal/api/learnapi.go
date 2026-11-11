@@ -213,7 +213,9 @@ func (s *Server) learnTick(now time.Time) {
 			}
 		}
 	}
-	if s.Cfg.Learn.ComplianceOn() && (s.lastComp.IsZero() || now.Sub(s.lastComp) >= time.Hour) {
+	// 启动后先预热再做第一次自检：文件数据源从末尾读起，自动识别的格式在读到新行之前为空，刚启动就自检会把
+	// “恶意代码防范”等测评项误报为下降（高危通知 + 审计链失败记录），一小时后恢复时又不通知
+	if s.Cfg.Learn.ComplianceOn() && time.Since(s.started) >= compWarmup && (s.lastComp.IsZero() || now.Sub(s.lastComp) >= time.Hour) {
 		s.lastComp = now
 		s.complianceWatch(now)
 	}
@@ -238,9 +240,12 @@ func firstN[T any](list []T, n int) []T {
 	return list
 }
 
+// compWarmup 是启动后到第一次合规自检的时间。
+const compWarmup = 30 * time.Minute
+
 // complianceWatch 执行一次等保合规自检，测评项结果下降时推送告警并记入审计链。
 func (s *Server) complianceWatch(now time.Time) {
-	rep := s.BuildCompliance()
+	rep := s.BuildCompliance(nil)
 	items := make([]learn.CompItem, 0, len(rep.Items))
 	for _, it := range rep.Items {
 		items = append(items, learn.CompItem{Control: it.Control, Status: it.Status, Label: it.Label, Evidence: it.Evidence, Advice: it.Advice})

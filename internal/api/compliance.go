@@ -71,8 +71,9 @@ func pick3(ok, partial bool) string {
 }
 
 // BuildCompliance 依据平台可观测的技术证据生成等保 2.0 第三级相关测评项的检查结果。
-func (s *Server) BuildCompliance() *ComplianceReport {
-	v := s.visibility(nil)
+// req 为交互式请求（后台自检为 nil）：经 HTTPS 反向代理访问时按请求判断平台访问已加密。
+func (s *Server) BuildCompliance(req *http.Request) *ComplianceReport {
+	v := s.visibility(req)
 	ov := s.Store.Overview()
 	t := ov.Totals
 	m := s.Store.Metrics()
@@ -98,16 +99,25 @@ func (s *Server) BuildCompliance() *ComplianceReport {
 	if v.Archive {
 		retentionText += "；告警归档至 PostgreSQL（保留 " + yearsText(s.Cfg.Archive.RetentionYears) + "）"
 	}
-	notify := v.Robots > 0 || s.Cfg.Report.SMTP.Host != ""
+	// 报警能力只看启用的告警机器人：report.smtp 只用于周报 / 月报邮件，平台没有邮件告警通道
+	notify := v.Robots > 0
 	senders, silentSenders := 0, 0
 	if s.Ingest.Senders != nil {
 		rep := s.Ingest.Senders.Report()
 		senders, silentSenders = rep.Totals.Senders, rep.Totals.Silent
 	}
 	threatFeeds := false
+	feeds := []string{"snort", "suricata", "paloalto", "json_firewall", "kv_firewall"}
 	for _, st := range stats {
-		for _, f := range []string{"snort", "suricata", "paloalto", "json_firewall", "kv_firewall"} {
+		for _, f := range feeds {
 			if strings.Contains(st.Detected, f) {
+				threatFeeds = true
+			}
+		}
+	}
+	for _, src := range s.Cfg.Sources { // 配置中指定了格式的数据源：重启后读到新行之前自动识别的格式还是空的
+		for _, f := range feeds {
+			if strings.Contains(strings.ToLower(src.Type), f) {
 				threatFeeds = true
 			}
 		}
@@ -128,7 +138,7 @@ func (s *Server) BuildCompliance() *ComplianceReport {
 		"配置威胁情报黑名单（intel.blocklists）与 Tor 出口节点列表，提升对新型攻击来源的识别")
 	add(L, "8.1.3.3 入侵防范 d)", "当检测到攻击行为时，记录攻击源 IP、攻击类型、攻击目标、攻击时间，在发生严重入侵事件时应提供报警",
 		pick3(notify, t.Alerts > 0), fmt.Sprintf("告警记录包含来源、类型、目标、时间与研判结果，累计 %s 条；启用的告警推送 %d 个", human(t.Alerts), v.Robots),
-		"在“告警推送”中配置钉钉 / 企业微信 / 飞书机器人或邮件，确保严重事件即时通知")
+		"在“告警推送”中配置钉钉 / 企业微信 / 飞书机器人或通用 Webhook，确保严重事件即时通知")
 	add(L, "8.1.3.4 恶意代码和垃圾邮件防范 a)", "应在关键网络节点处对恶意代码进行检测和清除，并维护恶意代码防护机制的升级和更新",
 		pick3(false, threatFeeds || t.DNS > 0), "平台可汇聚 IDS / IPS / 下一代防火墙的威胁日志并识别挖矿、远控外连等迹象；恶意代码清除需由边界防护设备完成",
 		"在边界部署具备恶意代码检测的设备（IPS / 防病毒网关），并将其威胁日志接入平台")
@@ -367,7 +377,7 @@ var compTpl = template.Must(template.New("comp").Funcs(reportFuncs).Funcs(templa
 // compliance 返回等保 2.0 合规检查报告（管理员）：format=html 返回可打印的报告页。
 func (s *Server) compliance(w http.ResponseWriter, r *http.Request) {
 	extendDeadline(w, time.Minute)
-	rep := s.BuildCompliance()
+	rep := s.BuildCompliance(r)
 	s.audit(r, "生成等保合规报告", fmt.Sprintf("符合 %d、部分符合 %d、不符合 %d", rep.Pass, rep.Partial, rep.Fail), nil)
 	if r.URL.Query().Get("format") == "html" {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")

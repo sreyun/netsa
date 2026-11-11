@@ -2,6 +2,7 @@ package detect
 
 import (
 	"fmt"
+	"strings"
 	"time"
 
 	"netsa/internal/model"
@@ -27,9 +28,12 @@ const (
 	maxSitePaths  = 512
 	maxDDoSDsts   = 5000
 	maxDDoSSrcs   = 20000
-	maxSurgeFlags = 500 // 一次分布式 CC 最多告警的来源数（集中刷接口的来源都是需要封禁的肉鸡）
-	maxDDoSFlags  = 50  // 一次 DDoS 最多告警的来源数：伪造源地址时逐个来源告警意义不大，只告警最先达到 10 条事件的参与者
-	surgeRecheck  = 256 // 达到阈值后每隔多少条重新判断一次（判断需要遍历来源）
+	// 全部站点 / 目的地址合计记录的来源数上限：每个键 2 万个来源乘以数千个键构不成有效的内存上限。
+	// 超出后新的来源只计入事件量、不单独记录（判断“来源数”以已记录的为准，已远超阈值）
+	maxSurgeSrcTotal = 2000000
+	maxSurgeFlags    = 500 // 一次分布式 CC 最多告警的来源数（集中刷接口的来源都是需要封禁的肉鸡）
+	maxDDoSFlags     = 50  // 一次 DDoS 最多告警的来源数：伪造源地址时逐个来源告警意义不大，只告警最先达到 10 条事件的参与者
+	surgeRecheck     = 256 // 达到阈值后每隔多少条重新判断一次（判断需要遍历来源）
 )
 
 // surgeBase 是按窗口统计的量与平时水平（基线）。
@@ -146,15 +150,20 @@ func (b *Behavior) observeSite(ev *model.Event, path string) (model.Hit, bool) {
 		b.sites[host] = s
 	}
 	if s.roll(ev.Time, b.th.WebWindow) {
+		b.siteSrcN -= len(s.srcs)
 		clear(s.srcs)
 		clear(s.paths)
 		s.hot, s.conc = "", 0
 	}
+	if s.srcs == nil { // 窗口过后已释放（pruneSurge）
+		s.srcs, s.paths = map[string]*ccSrc{}, map[string]int{}
+	}
 	s.n++
 	src := s.srcs[ev.SrcIP]
-	if src == nil && len(s.srcs) < maxSiteSrcs {
+	if src == nil && len(s.srcs) < maxSiteSrcs && b.siteSrcN < maxSurgeSrcTotal {
 		src = &ccSrc{}
-		s.srcs[ev.SrcIP] = src
+		s.srcs[strings.Clone(ev.SrcIP)] = src // 键不引用整行日志（解析出的字段是原始日志行的子串）
+		b.siteSrcN++
 	}
 	if src != nil {
 		src.n++
@@ -167,8 +176,10 @@ func (b *Behavior) observeSite(ev *model.Event, path string) (model.Hit, bool) {
 			src.vote--
 		}
 	}
-	if c, ok := s.paths[path]; ok || len(s.paths) < maxSitePaths {
+	if c, ok := s.paths[path]; ok {
 		s.paths[path] = c + 1
+	} else if len(s.paths) < maxSitePaths {
+		s.paths[strings.Clone(path)] = 1
 	}
 	if !s.surge {
 		if s.n < s.need(b.th.DistCCRequests, 2) || s.n-s.checked < surgeRecheck && s.checked > 0 {
@@ -251,17 +262,25 @@ func (b *Behavior) observeDst(ev *model.Event, internal bool) (model.Hit, bool) 
 		b.dsts[k] = d
 	}
 	if d.roll(ev.Time, b.th.FwWindow) {
+		b.dstSrcN -= len(d.srcs)
 		clear(d.srcs)
 		d.failed, d.nSrcs, d.topSrc, d.fired, d.trigger = 0, 0, 0, nil, false
+	}
+	if d.srcs == nil { // 窗口过后已释放（pruneSurge）
+		d.srcs = map[string]int{}
 	}
 	d.n++
 	if ev.Action == model.ActionDeny || ev.Reply == model.ReplyNone {
 		d.failed++
 	}
 	cnt, tracked := d.srcs[ev.SrcIP]
-	if tracked || len(d.srcs) < maxDDoSSrcs {
+	if tracked {
 		cnt++
 		d.srcs[ev.SrcIP] = cnt
+	} else if len(d.srcs) < maxDDoSSrcs && b.dstSrcN < maxSurgeSrcTotal {
+		cnt = 1
+		d.srcs[strings.Clone(ev.SrcIP)] = cnt
+		b.dstSrcN++
 	}
 	if !d.surge {
 		// 基线不成熟时没有参照：繁忙的对外服务本来就有大量来源，只在量大到明显异常（10 倍阈值）时判断
@@ -288,7 +307,7 @@ func (b *Behavior) observeDst(ev *model.Event, internal bool) (model.Hit, bool) 
 	if d.fired == nil {
 		d.fired = map[string]struct{}{}
 	}
-	d.fired[ev.SrcIP] = struct{}{}
+	d.fired[strings.Clone(ev.SrcIP)] = struct{}{}
 	d.trigger = true
 	d.flagged++
 	// 大部分连接被拒绝或没有应答：SYN 洪泛或已被设备拦截，资源消耗的迹象明确，判为高危；否则可能是业务量突增，中危待核实
@@ -313,16 +332,27 @@ func (b *Behavior) observeDst(ev *model.Event, internal bool) (model.Hit, bool) 
 			fmtDur(b.th.FwWindow), ev.DstIP, ev.DstPort, d.n, base, d.nSrcs, failPct, cnt) + corr}, true
 }
 
-// pruneSurge 清理长时间没有流量的站点与目的地址。
+// pruneSurge 清理长时间没有流量的站点与目的地址；窗口已经过去的条目释放来源与路径集合，只保留基线：
+// 洪泛结束后最后一个窗口的全部来源不再留到 24 小时后（clear 也不归还 map 的内存，这里换成 nil，下次有事件时再建）。
 func (b *Behavior) pruneSurge(now time.Time) {
 	for k, s := range b.sites {
-		if outside(now, s.start, 24*time.Hour) {
+		switch {
+		case outside(now, s.start, 24*time.Hour):
+			b.siteSrcN -= len(s.srcs)
 			delete(b.sites, k)
+		case s.srcs != nil && outside(now, s.start, 2*b.th.WebWindow):
+			b.siteSrcN -= len(s.srcs)
+			s.srcs, s.paths = nil, nil
 		}
 	}
 	for k, d := range b.dsts {
-		if outside(now, d.start, 24*time.Hour) {
+		switch {
+		case outside(now, d.start, 24*time.Hour):
+			b.dstSrcN -= len(d.srcs)
 			delete(b.dsts, k)
+		case d.srcs != nil && outside(now, d.start, 2*b.th.FwWindow):
+			b.dstSrcN -= len(d.srcs)
+			d.srcs, d.fired = nil, nil
 		}
 	}
 }

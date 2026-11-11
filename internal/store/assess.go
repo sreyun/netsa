@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"math"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -117,7 +118,8 @@ func (s *Store) collectAssessLocked() *assessData {
 		case f.Category == "敏感资源暴露" || f.Category == "服务暴露":
 			c := *f
 			d.exposure = append(d.exposure, &c)
-		case f.Category == "攻击成功研判" && strings.Contains(f.Title, "暴力破解"):
+		case f.Category == "攻击成功研判" && strings.Contains(f.Title, "暴力破解"),
+			f.Category == "失陷迹象" && strings.HasPrefix(f.ID, "auth-ok:"): // 认证日志（SSH / RDP / VPN）的暴力破解后登录成功
 			d.bruteSuccess++
 		}
 	}
@@ -189,7 +191,7 @@ func (s *Store) Assess(v Visibility) *Assessment {
 	}
 	// 一票否决：存在高置信失陷时总评不高于“危险”，存在疑似失陷或严重暴露面时不高于“较差”
 	high, med := countConfidence(d.comp)
-	critExposure := countSev(d.exposure, model.SevCritical) + countServices(d.services, model.SevCritical)
+	critExposure := criticalExposure(d)
 	switch {
 	case high > 0:
 		a.Score = min(a.Score, 35)
@@ -268,6 +270,27 @@ func countSev(fs []*Finding, sev model.Severity) int {
 	n := 0
 	for _, f := range fs {
 		if f.Severity == sev {
+			n++
+		}
+	}
+	return n
+}
+
+// criticalExposure 返回严重级暴露面的项数：公网放行的严重级服务同时有“服务暴露”发现，按发现计一次；
+// 只有没有对应发现的服务（发现因上限被淘汰）才另外计入。
+func criticalExposure(d *assessData) int {
+	n := 0
+	covered := map[string]bool{}
+	for _, f := range d.exposure {
+		if f.Severity == model.SevCritical {
+			n++
+			if f.Category == "服务暴露" {
+				covered[f.Asset] = true
+			}
+		}
+	}
+	for _, sv := range d.services {
+		if sv.Risk == model.SevCritical && !covered[sv.DstIP+":"+strconv.Itoa(sv.Port)+"/"+sv.Proto] {
 			n++
 		}
 	}

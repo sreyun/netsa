@@ -86,5 +86,13 @@ var periodTpl = template.Must(template.New("period").Funcs(reportFuncs).Parse(`<
 </div></body></html>`))
 
 func renderPeriodHTML(w io.Writer, r *PeriodReport, print bool) error {
-	return periodTpl.Execute(w, map[string]any{"R": r, "Print": print})
+	// 时间按报告的时区输出：事件的首次发现取自日志时间，带着日志自身的时区（nginx 容器默认按 UTC 记录），
+	// 直接格式化会比同页的生成时间早 8 小时、甚至差一天
+	loc := r.Generated.Location()
+	t, err := periodTpl.Clone()
+	if err != nil {
+		return err
+	}
+	t.Funcs(template.FuncMap{"dt": func(x time.Time) string { return x.In(loc).Format("2006-01-02 15:04") }})
+	return t.Execute(w, map[string]any{"R": r, "Print": print})
 }

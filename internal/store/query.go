@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 
 	"netsa/internal/geo"
 	"netsa/internal/model"
@@ -478,6 +479,42 @@ func (q *AttackerQuery) match(p *IPProfile) bool {
 	return q.Place == "" || mapKey(g) == q.Place
 }
 
+// profileMatch 判断攻击源是否匹配关键字（已转为小写）：逐个字段比较并短路，不为每个画像拼接、转换字符串
+// （全局搜索每次输入都会在读锁内扫描全部画像）。关键字含空格时可能跨字段，按拼接后的文本比较。
+func profileMatch(p *IPProfile, q string) bool {
+	if strings.ContainsRune(q, ' ') {
+		return strings.Contains(searchText(p), q)
+	}
+	if containsLower(p.IP, q) {
+		return true
+	}
+	if g := p.Geo; g != nil && (containsLower(g.Label, q) || containsLower(g.Country, q) || containsLower(g.Province, q) ||
+		containsLower(g.City, q) || containsLower(g.ISP, q)) {
+		return true
+	}
+	for t := range p.Tags {
+		if containsLower(t, q) {
+			return true
+		}
+	}
+	for c := range p.Categories {
+		if containsLower(c, q) {
+			return true
+		}
+	}
+	return false
+}
+
+// containsLower 判断 s 忽略大小写后是否包含 sub（sub 已转为小写）；s 中没有大写字母时不分配内存。
+func containsLower(s, sub string) bool {
+	for _, r := range s {
+		if unicode.IsUpper(r) || unicode.IsTitle(r) {
+			return strings.Contains(strings.ToLower(s), sub)
+		}
+	}
+	return strings.Contains(s, sub)
+}
+
 // searchText 返回攻击源用于关键字搜索的文本（IP、归属地、标签与全部攻击类型）。
 func searchText(p *IPProfile) string {
 	var b strings.Builder
@@ -540,7 +577,7 @@ func (s *Store) Attackers(q AttackerQuery) ([]AttackerSummary, int) {
 		if !isAttacker(p) || p.Level < q.MinLevel || !q.match(p) {
 			continue
 		}
-		if search != "" && !strings.Contains(searchText(p), search) {
+		if search != "" && !profileMatch(p, search) {
 			continue
 		}
 		total++
@@ -779,6 +816,7 @@ type MapPoint struct {
 	Attacks     int64          `json:"attacks"`
 	Level       model.Severity `json:"level"`
 	IPs         []MapIP        `json:"ips"`
+	top         *topK[MapIP]   // 评分最高的 10 个攻击源（定长堆选择：攻击源集中在少数地点时不复制、排序全部攻击源）
 	sumLat      float64        // 精确坐标累加
 	sumLon      float64
 	exact       int
@@ -829,6 +867,20 @@ func sortedRegions(m map[string]*MapRegion) []*MapRegion {
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Attacks > out[j].Attacks })
 	return out
+}
+
+// mapPointIPs 是每个地点返回的攻击源个数。
+const mapPointIPs = 10
+
+// mapIPBefore 是地点内攻击源的顺序：评分、攻击次数降序，同分按地址（顺序固定）。
+func mapIPBefore(a, b MapIP) bool {
+	if a.Score != b.Score {
+		return a.Score > b.Score
+	}
+	if a.Attacks != b.Attacks {
+		return a.Attacks > b.Attacks
+	}
+	return a.IP < b.IP
 }
 
 // MapData 返回攻击来源地图数据：地点（带 IP 列表）、国家与中国省份的着色统计。
@@ -888,20 +940,17 @@ func (s *Store) MapData(minLevel model.Severity) *MapResult {
 		if p.Level > mp.Level {
 			mp.Level = p.Level
 		}
-		mp.IPs = append(mp.IPs, MapIP{IP: p.IP, Score: p.Score, Level: p.Level, Attacks: p.Attacks, ISP: g.ISP})
+		if mp.top == nil {
+			mp.top = newTopK(mapPointIPs, mapIPBefore)
+		}
+		mp.top.add(MapIP{IP: p.IP, Score: p.Score, Level: p.Level, Attacks: p.Attacks, ISP: g.ISP})
 	}
 	for _, mp := range pts {
 		if mp.exact > 0 {
 			mp.Lat, mp.Lon = mp.sumLat/float64(mp.exact), mp.sumLon/float64(mp.exact)
 		}
-		sort.Slice(mp.IPs, func(i, j int) bool {
-			if mp.IPs[i].Score != mp.IPs[j].Score {
-				return mp.IPs[i].Score > mp.IPs[j].Score
-			}
-			return mp.IPs[i].Attacks > mp.IPs[j].Attacks
-		})
-		if len(mp.IPs) > 10 {
-			mp.IPs = mp.IPs[:10]
+		if mp.top != nil {
+			mp.IPs = mp.top.sorted()
 		}
 		res.Points = append(res.Points, mp)
 	}

@@ -20,10 +20,7 @@ const maxNoSourceKeys = 10000
 func (s *Store) recordNoSourceLocked(ev *model.Event, hits []model.Hit, b *Bucket, day *DayStat) RecordResult {
 	var res RecordResult
 	var roles chainRoles
-	t := ev.Time
-	if now := time.Now(); t.After(now.Add(time.Hour)) || t.Year() < 2000 {
-		t = now
-	}
+	t := ev.Time // recordLocked 已修正未来 / 远古时间
 	for i := range hits {
 		h := &hits[i]
 		if h.TagOnly {

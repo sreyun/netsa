@@ -39,6 +39,12 @@ const (
 	evidenceMargin     = 10 * time.Minute // 原始日志与归档告警在事件时间范围前后多取的时间
 )
 
+// evidenceRawWait 是等待原始日志检索名额（与日志检索共用）的时间。
+var evidenceRawWait = 15 * time.Second
+
+// evidenceSem 限制同时生成的取证包：每个取证包都要检索归档与原始日志，并在内存中保留全部内容。
+var evidenceSem = make(chan struct{}, 2)
+
 type evidenceFile struct {
 	Name   string `json:"name"`
 	Size   int    `json:"size"`
@@ -67,18 +73,29 @@ func (s *Server) incidentEvidence(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, store.ErrNoIncident.Error())
 		return
 	}
+	select {
+	case evidenceSem <- struct{}{}:
+		defer func() { <-evidenceSem }()
+	default:
+		writeError(w, http.StatusTooManyRequests, "正在生成的取证包较多，请稍后重试")
+		return
+	}
 	extendDeadline(w, 2*time.Minute)
-	ctx, cancel := context.WithTimeout(r.Context(), 90*time.Second)
-	defer cancel()
 	user := "anonymous"
 	if sess := sessionOf(r); sess != nil {
 		user = sess.User
 	}
 	from, to := d.FirstSeen.Add(-evidenceMargin), d.LastSeen.Add(evidenceMargin)
-	if to.Sub(from) > 31*24*time.Hour { // 原始日志检索的范围上限
+	clipped := to.Sub(from) > 31*24*time.Hour
+	if clipped { // 原始日志检索的范围上限
 		from = to.Add(-31 * 24 * time.Hour)
 	}
 	m := evidenceManifest{Incident: id, Source: d.Key, GeneratedAt: s.now(), GeneratedBy: user, Version: s.Version, From: from, To: to}
+	loc := s.now().Location()
+	if clipped {
+		m.Notes = append(m.Notes, "事件持续超过 31 天（首次发现于 "+d.FirstSeen.In(loc).Format("2006-01-02 15:04:05")+
+			"）：归档告警与原始日志只包含最近 31 天，更早的部分请在告警查询与日志检索中分段导出")
+	}
 	var files []evidenceFile
 	add := func(name string, data []byte, note string) {
 		sum := sha256.Sum256(data)
@@ -100,28 +117,25 @@ func (s *Server) incidentEvidence(w http.ResponseWriter, r *http.Request) {
 		addJSON("chains.json", chains, "涉及资产的攻击链路")
 	}
 	if s.Archive != nil {
-		if b, n, err := s.evidenceArchive(ctx, d.Key, from, to); err != nil {
+		// 归档查询与原始日志检索各有自己的时间预算：共用一个超时的话，慢的归档查询会让原始日志检索被截断
+		actx, acancel := context.WithTimeout(r.Context(), 40*time.Second)
+		b, n, more, err := s.evidenceArchive(actx, d.Key, from, to)
+		acancel()
+		switch {
+		case err != nil:
 			m.Notes = append(m.Notes, "归档告警查询失败："+err.Error())
-		} else {
+		case more:
+			note := fmt.Sprintf("归档库中该来源在事件期间的告警，共 %d 条（达到上限，结果不完整）", n)
+			add("alerts-archive.csv", b, note)
+			m.Notes = append(m.Notes, fmt.Sprintf("归档告警超过 %d 条：取证包只包含其中 %d 条，其余请在告警查询中分时间段导出", evidenceArchiveMax, n))
+		default:
 			add("alerts-archive.csv", b, fmt.Sprintf("归档库中该来源在事件期间的告警，共 %d 条", n))
 		}
 	} else {
 		m.Notes = append(m.Notes, "未启用告警归档：只包含内存中保留的告警（incident.json）")
 	}
 	if s.RawLog != nil {
-		q := rawlog.Query{From: from, To: to, IP: d.Key, Limit: evidenceRawMax}
-		res, err := s.RawLog.Search(ctx, q)
-		if err != nil {
-			m.Notes = append(m.Notes, "原始日志检索失败："+err.Error())
-		} else {
-			var buf bytes.Buffer
-			rawlog.Export(&buf, res.Records, s.now().Location())
-			note := fmt.Sprintf("事件期间该来源的原始日志，共 %d 条", len(res.Records))
-			if len(res.Records) >= evidenceRawMax {
-				note += "（达到上限，更早的日志请在日志检索中导出）"
-			}
-			add("rawlog.log", buf.Bytes(), note)
-		}
+		s.evidenceRawlog(r.Context(), d.Key, from, to, &m, add)
 	} else {
 		m.Notes = append(m.Notes, "未启用原始日志留存：不包含原始日志")
 	}
@@ -154,6 +168,44 @@ func (s *Server) incidentEvidence(w http.ResponseWriter, r *http.Request) {
 	write("manifest.json", man)
 	write("SHA256SUMS", []byte(sums.String()))
 	zw.Close()
+}
+
+// evidenceRawlog 检索事件期间该来源的原始日志写入取证包。与日志检索共用并发名额（检索要解压扫描磁盘分段），
+// 拿不到名额、检索不完整（扫描量 / 内存上限、超时、分段损坏）时在说明中写明，不把截断的结果标注为完整。
+func (s *Server) evidenceRawlog(parent context.Context, ip string, from, to time.Time, m *evidenceManifest, add func(name string, data []byte, note string)) {
+	wait, wcancel := context.WithTimeout(parent, evidenceRawWait)
+	defer wcancel()
+	select {
+	case rawSem <- struct{}{}:
+		defer func() { <-rawSem }()
+	case <-wait.Done():
+		m.Notes = append(m.Notes, "原始日志检索繁忙，取证包未包含原始日志，请稍后重新导出或在日志检索中导出")
+		return
+	}
+	ctx, cancel := context.WithTimeout(parent, 45*time.Second)
+	defer cancel()
+	res, err := s.RawLog.Search(ctx, rawlog.Query{From: from, To: to, IP: ip, Limit: evidenceRawMax})
+	if err != nil {
+		m.Notes = append(m.Notes, "原始日志检索失败："+err.Error())
+		return
+	}
+	var buf bytes.Buffer
+	loc := s.now().Location()
+	rawlog.Export(&buf, res.Records, loc)
+	note := fmt.Sprintf("事件期间该来源的原始日志，共 %d 条", len(res.Records))
+	if res.Truncated {
+		reason := res.Reason
+		if reason == "" {
+			reason = "结果不完整"
+		}
+		since := ""
+		if n := len(res.Records); n > 0 { // 记录按时间倒序：最后一条是覆盖到的最早时间
+			since = "，只包含 " + res.Records[n-1].Time.In(loc).Format("2006-01-02 15:04:05") + " 之后的日志"
+		}
+		note += "（不完整：" + reason + since + "）"
+		m.Notes = append(m.Notes, "原始日志不完整："+reason+since+"；更早的日志请在日志检索中分时间段导出")
+	}
+	add("rawlog.log", buf.Bytes(), note)
 }
 
 // evidenceTimeline 生成时间线：告警与处置记录按时间排列。
@@ -203,33 +255,29 @@ func (s *Server) evidenceChains(d *store.IncidentDetail) []*store.AssetChain {
 	if geo.IsPrivate(d.Key) {
 		ids = append(ids, d.Key)
 	}
-	seen := map[string]bool{}
-	var out []*store.AssetChain
+	valid := ids[:0]
 	for _, id := range ids {
-		if id == "" || id == "-" || len(out) >= 5 {
-			continue
+		if id != "" && id != "-" {
+			valid = append(valid, id)
 		}
-		c := s.Store.AssetChain(id)
-		if c == nil || seen[c.Key] {
-			continue
-		}
-		seen[c.Key] = true
-		out = append(out, c)
 	}
-	return out
+	return s.Store.AssetChains(valid, 5)
 }
 
 // evidenceArchive 查询归档库中该来源在事件期间的告警，生成 CSV。
-func (s *Server) evidenceArchive(ctx context.Context, ip string, from, to time.Time) ([]byte, int, error) {
+func (s *Server) evidenceArchive(ctx context.Context, ip string, from, to time.Time) (data []byte, n int, more bool, err error) {
 	var buf bytes.Buffer
 	buf.WriteString("\xef\xbb\xbf")
 	cw := csv.NewWriter(&buf)
 	cw.Write([]string{"时间", "告警编号", "来源", "归属地", "规则", "名称", "攻击类型", "等级", "阶段", "研判结果", "目标", "证据"})
-	n := 0
-	for offset := 0; n < evidenceArchiveMax; offset += 500 {
+	for offset := 0; ; offset += 500 {
+		if n >= evidenceArchiveMax {
+			more = true
+			break
+		}
 		res, err := s.Archive.Search(ctx, archive.Query{From: from, To: to, IP: ip, Limit: 500, Offset: offset})
 		if err != nil {
-			return nil, 0, err
+			return nil, 0, false, err
 		}
 		for _, a := range res.Items {
 			cw.Write(csvSafe([]string{a.Time.In(s.now().Location()).Format("2006-01-02 15:04:05"), strconv.FormatInt(a.AlertID, 10), a.SrcIP, a.Location,
@@ -241,7 +289,7 @@ func (s *Server) evidenceArchive(ctx context.Context, ip string, from, to time.T
 		}
 	}
 	cw.Flush()
-	return buf.Bytes(), n, nil
+	return buf.Bytes(), n, more, nil
 }
 
 func evidenceReadme(m evidenceManifest) []byte {

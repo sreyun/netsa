@@ -182,6 +182,9 @@ type Finding struct {
 	// 真实利用拿到命令输出），只撤销兜底页面大小的那部分，全部是兜底页面时才删除。SizesFull 表示超出上限、没有记全
 	Sizes     []int64 `json:"sizes,omitempty"`
 	SizesFull bool    `json:"sizes_full,omitempty"`
+	// Verified 表示“防火墙管理服务对公网放行”是按应答或同一来源反复连接确认的：快照恢复时清理旧版本误记的
+	// 记录不撤销它（每个来源的连接数不持久化，恢复后已无法再按连接次数核对）
+	Verified bool `json:"verified,omitempty"`
 }
 
 const maxFindingSizes = 16
@@ -237,6 +240,8 @@ type surface struct {
 	Fallback map[string][]int64 `json:"fallback,omitempty"`
 	// soft 记录各站点敏感路径 / WebShell 探测返回 200 时的响应大小 → 路径（有上限），用于识别兜底页（不持久化，运行中重新学习）
 	soft map[string]map[int64]map[string]struct{}
+	// findMin 是发现最后出现时间的下界（不持久化，零值表示未知）：表满时据此跳过不可能腾出位置的扫描
+	findMin time.Time
 }
 
 const (
@@ -386,7 +391,10 @@ func (sf *surface) catchAll(host, path string, bytes int64) bool {
 	sizes := sf.soft[host]
 	if sizes == nil {
 		if len(sf.soft) >= maxSoftHosts {
-			return false
+			for h := range sf.soft { // 满了让出一个站点（统计不持久化，被淘汰的站点之后重新学习），而不是从此不再学习新站点
+				delete(sf.soft, h)
+				break
+			}
 		}
 		sizes = map[int64]map[string]struct{}{}
 		sf.soft[host] = sizes
@@ -394,7 +402,19 @@ func (sf *surface) catchAll(host, path string, bytes int64) bool {
 	paths := sizes[bytes]
 	if paths == nil {
 		if len(sizes) >= maxSoftSizes {
-			return false
+			// 满了淘汰路径最少的一个大小：动态页面每次大小不同，只出现过一次的大小占满名额后，
+			// 兜底页面再也无法靠“3 个不同路径大小相同”识别
+			var victim int64
+			least := -1
+			for b, p := range sizes {
+				if least < 0 || len(p) < least {
+					victim, least = b, len(p)
+					if least <= 1 {
+						break
+					}
+				}
+			}
+			delete(sizes, victim)
 		}
 		paths = map[string]struct{}{}
 		sizes[bytes] = paths
@@ -558,7 +578,86 @@ const (
 	maxEndpoints = 20000
 	maxServices  = 20000
 	maxSetSize   = 2000
+	evictShare   = 20 // 表满时一次淘汰 1/evictShare：把 O(n) 的选择摊到多次插入上
 )
+
+// evictKeys 从 m 中选出最先淘汰的 n 个键（first(a, b) 表示 a 比 b 更该淘汰），用定长堆部分选择，不对全表排序。
+func evictKeys[V any](m map[string]V, n int, first func(a, b V) bool) []string {
+	type kv struct {
+		k string
+		v V
+	}
+	tk := newTopK(n, func(a, b kv) bool {
+		if first(a.v, b.v) {
+			return true
+		}
+		if first(b.v, a.v) {
+			return false
+		}
+		return a.k < b.k
+	})
+	for k, v := range m {
+		tk.add(kv{k, v})
+	}
+	out := make([]string, 0, len(tk.h))
+	for _, x := range tk.h {
+		out = append(out, x.k)
+	}
+	return out
+}
+
+// evictServices 服务数达到上限时淘汰一批：先淘汰没有公网放行的、风险低的，同级按最后出现时间从早到晚。
+func (sf *surface) evictServices() {
+	rank := func(sv *Service) int {
+		r := 0
+		if sv.Exposed {
+			r += 2
+		}
+		if sv.Risk >= model.SevMedium {
+			r++
+		}
+		return r
+	}
+	for _, k := range evictKeys(sf.Services, maxServices/evictShare, func(a, b *Service) bool {
+		if ra, rb := rank(a), rank(b); ra != rb {
+			return ra < rb
+		}
+		return a.LastSeen.Before(b.LastSeen)
+	}) {
+		delete(sf.Services, k)
+	}
+}
+
+// evictEndpoints 入口数达到上限时淘汰一批：各站点的首页、敏感入口、有正常访问基线的入口最后淘汰，
+// 同级按最后出现时间从早到晚；淘汰时同步扣减技术栈计数。发现另有上限与淘汰，不随入口删除。
+func (sf *surface) evictEndpoints() {
+	rank := func(ep *Endpoint) int {
+		r := 0
+		if ep.Path == "/" {
+			r += 4
+		}
+		if ep.Sensitive != "" {
+			r += 2
+		}
+		if ep.NormN > 0 {
+			r++
+		}
+		return r
+	}
+	for _, k := range evictKeys(sf.Endpoints, maxEndpoints/evictShare, func(a, b *Endpoint) bool {
+		if ra, rb := rank(a), rank(b); ra != rb {
+			return ra < rb
+		}
+		return a.LastSeen.Before(b.LastSeen)
+	}) {
+		for _, t := range sf.Endpoints[k].Tech {
+			if sf.Tech[t]--; sf.Tech[t] <= 0 {
+				delete(sf.Tech, t)
+			}
+		}
+		delete(sf.Endpoints, k)
+	}
+}
 
 type sensitiveRule struct {
 	re          *regexp.Regexp
@@ -821,6 +920,9 @@ func (sf *surface) observeWeb(ev *model.Event, hits []model.Hit, attacked bool) 
 	}
 	// 攻击请求只在命中敏感资源时才登记为新入口：对所有路径都返回 200 的站点（SPA 兜底路由），
 	// 扫描器的随机路径不会污染资产清单；已有入口上的攻击仍会被统计。
+	if ep == nil && exists && !fake && (!attacked || sens != nil) && len(sf.Endpoints) >= maxEndpoints {
+		sf.evictEndpoints() // 满了淘汰一批，新站点的首页仍能登记基线
+	}
 	if ep == nil && exists && !fake && (!attacked || sens != nil) && len(sf.Endpoints) < maxEndpoints {
 		ep = &Endpoint{Host: host, Path: path, Methods: map[string]int{}, Status: map[int]int{}, FirstSeen: ev.Time,
 			atk: map[string]struct{}{}, sens: sens, classified: true}
@@ -867,12 +969,31 @@ func (sf *surface) observeWeb(ev *model.Event, hits []model.Hit, attacked bool) 
 	if host == "-" {
 		asset = path
 	}
-	// 敏感资源被成功访问（兜底页面返回的 200 已在上面排除；已登记的入口再次核对首页基线）
-	if ev.Status == 200 && ev.Bytes > 0 && sens != nil && !sf.catchAll(host, path, ev.Bytes) {
-		sf.finding("sens:"+key, sens.title, "敏感资源暴露", sens.sev, asset,
-			ev.SrcIP+" 访问返回 200，响应 "+strconv.FormatInt(ev.Bytes, 10)+" 字节", sens.remediation, ev.SrcIP, ev.Time)
-		if f := sf.Findings["sens:"+key]; f != nil && f.Bytes == 0 {
-			f.Host, f.Bytes = host, ev.Bytes
+	// 敏感资源被成功访问（兜底页面返回的 200 / 206 已在上面排除；已登记的入口再次核对首页基线）。
+	// 检测规则判为“敏感文件探测 / 成功”（已经过兜底页面复核）的命中，即使路径不在攻击面的分类规则内也记暴露：
+	// 否则真实读到的 /appsettings.json、/.ssh/id_ed25519 既不列入暴露面，链路研判还会把它说成“兜底页面”
+	if ok2xx && ev.Bytes > 0 {
+		title, sev, rem := "", model.SevInfo, ""
+		if sens != nil {
+			title, sev, rem = sens.title, sens.sev, sens.remediation
+		} else if h := sensitiveSuccess(hits); h != nil {
+			title, sev, rem = "敏感文件可公开访问", h.Severity, "删除或移出 Web 目录中的配置、密钥、备份与源码文件，并在 Web 服务器上禁止访问这类文件"
+		}
+		if title != "" {
+			var fallback bool
+			if attacked || ep == nil || ep.NormN == 0 {
+				fallback = sf.catchAll(host, path, ev.Bytes)
+			} else {
+				// 有正常访问的已登记入口（管理后台等）只做只读核对：动态页面每次大小不同，写入同大小统计会占满名额
+				fallback = sf.isFallback(host, ev.Bytes) || sf.homePage(host, path, ev.Bytes)
+			}
+			if !fallback {
+				sf.finding("sens:"+key, title, "敏感资源暴露", sev, asset,
+					ev.SrcIP+" 访问返回 "+strconv.Itoa(ev.Status)+"，响应 "+strconv.FormatInt(ev.Bytes, 10)+" 字节", rem, ev.SrcIP, ev.Time)
+				if f := sf.Findings["sens:"+key]; f != nil && f.Bytes == 0 {
+					f.Host, f.Bytes = host, ev.Bytes
+				}
+			}
 		}
 	}
 	// WAF 防护效果只统计外部来源：内网来源（内部漏洞扫描器、运维）不经过边界的 WAF，计入会把拦截率拉到接近 0
@@ -909,6 +1030,16 @@ func (sf *surface) observeWeb(ev *model.Event, hits []model.Hit, attacked bool) 
 	}
 }
 
+// sensitiveSuccess 返回判为成功的敏感文件探测命中（verifySuccess 已按兜底页面复核过），没有时返回 nil。
+func sensitiveSuccess(hits []model.Hit) *model.Hit {
+	for i := range hits {
+		if h := &hits[i]; h.Category == "敏感文件探测" && h.Result == model.ResultSuccess && !h.TagOnly {
+			return h
+		}
+	}
+	return nil
+}
+
 // observeFw 更新网络服务暴露面（调用方持锁）。published 表示目标端口确实做过对外映射：
 // 未映射的端口即使被默认策略放行，也不存在可访问的服务，不能据此判定「对公网开放」。
 func (sf *surface) observeFw(ev *model.Event, published bool) {
@@ -925,8 +1056,11 @@ func (sf *surface) observeFw(ev *model.Event, published bool) {
 	if sv == nil {
 		// 只有被放行、且端口确实对外发布（DNAT 映射）的连接才能证明服务真实存在；
 		// 被拒绝的探测、以及未映射端口上的放行日志只计入“被探测端口”统计。
-		if ev.Action != model.ActionAllow || !published || len(sf.Services) >= maxServices {
+		if ev.Action != model.ActionAllow || !published {
 			return
+		}
+		if len(sf.Services) >= maxServices {
+			sf.evictServices() // 满了淘汰一批最没有价值的，而不是从此不再登记：否则新的高危服务暴露永远报不出来
 		}
 		name, risk := serviceInfo(ev.DstPort)
 		sv = &Service{DstIP: ev.DstIP, Port: ev.DstPort, Proto: ev.Proto, Name: name, Risk: risk, src: map[string]int32{}}
@@ -962,10 +1096,11 @@ func (sf *surface) observeFw(ev *model.Event, published bool) {
 
 // purgeUnusedDevice 撤销旧版本只凭策略匹配日志记下的“防火墙管理服务对公网放行”（快照恢复时调用，返回撤销的条数）：
 // 每个来源的连接数没有保存，按平均每个来源不到 deviceUseMin 次判断为扫描器的探测。新的访问照常按 deviceExposure 记录。
+// 当前版本按应答 / 反复连接确认的记录带 Verified 标记，不撤销：否则每次重启都删掉合法的发现。
 func (sf *surface) purgeUnusedDevice() int {
 	n := 0
-	for id := range sf.Findings {
-		if !strings.HasPrefix(id, "dev:") {
+	for id, f := range sf.Findings {
+		if !strings.HasPrefix(id, "dev:") || f.Verified {
 			continue
 		}
 		sv := sf.Services[strings.TrimPrefix(id, "dev:")]
@@ -1006,6 +1141,9 @@ func (sf *surface) deviceExposure(ev *model.Event, sv *Service, key string) {
 			"防火墙"+by+"放行了来自公网 "+ev.SrcIP+" 到设备自身（local 安全域）的连接（"+why+"）",
 			"在防火墙上把管理服务限制为内网或运维堡垒机地址访问（华为：local 安全域策略与接口 service-manage），"+
 				"关闭 Telnet / HTTP / SNMP v1、v2c 等明文管理协议，改用 SSH / HTTPS / SNMPv3", ev.SrcIP, ev.Time)
+		if f := sf.Findings["dev:"+key]; f != nil {
+			f.Verified = true
+		}
 		return
 	}
 	policy := ev.Policy
@@ -1023,22 +1161,65 @@ func (sf *surface) deviceExposure(ev *model.Event, sv *Service, key string) {
 			"检查范围为 any 的策略是否同时匹配了公网到设备自身的流量", ev.SrcIP, ev.Time)
 }
 
+// findingRank 是发现的保留优先级：失陷迹象与有证据的成功最后淘汰，其次是服务与敏感资源暴露，没有证据的疑似成功最先淘汰。
+func findingRank(f *Finding) int {
+	switch {
+	case f.Category == "失陷迹象" || f.Proven:
+		return 3
+	case f.Category == "服务暴露" || f.Category == "敏感资源暴露":
+		return 2
+	case f.Category != "攻击成功研判" && f.Severity >= model.SevHigh:
+		return 1
+	}
+	return 0
+}
+
+// evictFindings 发现数达到上限时一次淘汰一批（约 1/evictShare），返回是否腾出了位置：直接丢弃新发现的话，
+// 数量到上限后新的真实风险再也记不进来。按保留优先级从低到高、同级按最后出现时间从早到晚；只淘汰最后出现早于 t 的
+// （回放更早的历史日志不挤掉较新的发现）。findMin 是全部记录最后出现时间的下界：t 不晚于它时没有可淘汰的，不必扫描。
+func (sf *surface) evictFindings(t time.Time) bool {
+	if !sf.findMin.IsZero() && !t.After(sf.findMin) {
+		return false
+	}
+	type cand struct {
+		id   string
+		rank int
+		last time.Time
+	}
+	tk := newTopK(maxFindings/evictShare, func(a, b cand) bool {
+		if a.rank != b.rank {
+			return a.rank < b.rank
+		}
+		if !a.last.Equal(b.last) {
+			return a.last.Before(b.last)
+		}
+		return a.id < b.id
+	})
+	var lo time.Time
+	for id, f := range sf.Findings {
+		if lo.IsZero() || f.LastSeen.Before(lo) {
+			lo = f.LastSeen
+		}
+		if f.LastSeen.Before(t) {
+			tk.add(cand{id, findingRank(f), f.LastSeen})
+		}
+	}
+	sf.findMin = lo // 删除只会抬高最小值，之后新增的更早记录在 finding 中下调它
+	for _, c := range tk.h {
+		delete(sf.Findings, c.id)
+	}
+	return len(tk.h) > 0
+}
+
 func (sf *surface) finding(id, title, cat string, sev model.Severity, asset, evidence, remediation, ip string, t time.Time) {
 	evidence = printable(evidence) // 证据来自日志内容
 	f := sf.Findings[id]
 	if f == nil {
-		if len(sf.Findings) >= maxFindings {
-			// 满了淘汰最久没有再出现的一条：直接丢弃新发现的话，数量到上限后新的真实风险再也记不进来
-			var oldest string
-			for k, x := range sf.Findings {
-				if oldest == "" || x.LastSeen.Before(sf.Findings[oldest].LastSeen) {
-					oldest = k
-				}
-			}
-			if !sf.Findings[oldest].LastSeen.Before(t) {
-				return
-			}
-			delete(sf.Findings, oldest)
+		if len(sf.Findings) >= maxFindings && !sf.evictFindings(t) {
+			return
+		}
+		if !sf.findMin.IsZero() && t.Before(sf.findMin) {
+			sf.findMin = t
 		}
 		f = &Finding{ID: id, Title: title, Category: cat, Severity: sev, Asset: asset, Evidence: evidence, Remediation: remediation, FirstSeen: t}
 		sf.Findings[id] = f

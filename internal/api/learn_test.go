@@ -58,7 +58,13 @@ func TestLearnFeedbackAPI(t *testing.T) {
 	if resp.Report.FP != 1 {
 		t.Fatalf("撤回后: %+v", resp.Report)
 	}
-	// 后台任务：首次合规自检建立基线（未配置推送与审计链时不应出错）
+	// 后台任务：启动后的预热期内不做合规自检（数据源的格式还没有识别出来）
+	s.learnTick(time.Now())
+	if len(s.Learn.Report().Compliance) != 0 {
+		t.Fatal("预热期内不应做合规自检")
+	}
+	// 预热之后首次合规自检建立基线（未配置推送与审计链时不应出错）
+	s.started = time.Now().Add(-compWarmup)
 	s.learnTick(time.Now())
 	if len(s.Learn.Report().Compliance) != 1 {
 		t.Fatal("应记录一次合规自检")

@@ -21,13 +21,15 @@ import (
 //   - 只采信能单独说明攻击的分类：命令执行、目录穿越 / 文件包含、表达式注入、反序列化、XXE；SQL 注入与 XSS
 //     还须语法分析确认（解码结果可能只是一段普通的 JSON 或文字）。SSRF、开放重定向不采信：把回跳网址做 Base64
 //     编码放在参数里是常见的正常写法；
-//   - 每个请求最多解码 8 个片段，已被原文命中的规则不重复报。
+//   - 每个请求最多采信 8 个产生命中的片段，候选片段最多 64 个、累计解码不超过 64KB；已被原文命中的规则不重复报。
 
 const (
-	minEncoded   = 16
-	maxEncoded   = 2048
-	maxPieces    = 8
-	minDecodeOut = 8 // 解码结果至少这么多字节
+	minEncoded    = 16
+	maxEncoded    = 2048
+	maxPieces     = 8
+	maxCandidates = 64       // 每个请求尝试解码的候选片段上限
+	maxDecodeIn   = 64 << 10 // 每个请求累计解码的字节上限
+	minDecodeOut  = 8        // 解码结果至少这么多字节
 )
 
 // decodedCats 是对解码结果采信的攻击类型。
@@ -42,11 +44,22 @@ type piece struct {
 }
 
 // encodedPieces 找出 URI 中可还原的编码片段。没有候选片段时不分配内存。
-func encodedPieces(rawURI string) []piece {
+// accept 不为空时，只有它接受的片段（解码结果确实命中规则）才计入 maxPieces：普通文字里的一个撇号、括号也算
+// “攻击写法”，只按 hasAttackMark 计数的话，前面放 8 个带引号的无害 Base64 参数就能把真正的载荷挤出名额。
+// 总开销改由候选片段数与累计解码字节数约束。
+func encodedPieces(rawURI string, accept func(*piece) bool) []piece {
 	path, query, _ := strings.Cut(rawURI, "?")
 	var out []piece
+	cands, decoded := 0, 0
+	full := func() bool { return len(out) >= maxPieces || cands >= maxCandidates || decoded >= maxDecodeIn }
+	add := func(p piece) {
+		cands++
+		if accept == nil || accept(&p) {
+			out = append(out, p)
+		}
+	}
 	try := func(name, raw string) {
-		if len(raw) < minEncoded || len(out) >= maxPieces {
+		if len(raw) < minEncoded || full() {
 			return
 		}
 		v := raw
@@ -62,20 +75,20 @@ func encodedPieces(rawURI string) []piece {
 		if len(v) < minEncoded || len(v) > maxEncoded {
 			return
 		}
-		// JWT 之类用点分隔的多段 Base64：逐段尝试。只有带攻击写法的解码结果才计入片段数，
-		// 先放几个无害的编码片段凑满上限、把真正的载荷挤到后面的写法不起作用
-		for v != "" && len(out) < maxPieces {
+		// JWT 之类用点分隔的多段 Base64：逐段尝试。只有带攻击写法的解码结果才成为候选
+		for v != "" && !full() {
 			var part string
 			part, v, _ = strings.Cut(v, ".")
 			if len(part) < minEncoded {
 				continue
 			}
+			decoded += len(part)
 			if t, ok := decodeBase64(part); ok {
 				if hasAttackMark(t) {
-					out = append(out, piece{param: name, enc: "Base64", text: t})
+					add(piece{param: name, enc: "Base64", text: t})
 				}
 			} else if t, ok := decodeHex(part); ok && hasAttackMark(t) {
-				out = append(out, piece{param: name, enc: "Hex", text: t})
+				add(piece{param: name, enc: "Hex", text: t})
 			}
 		}
 	}
@@ -87,7 +100,7 @@ func encodedPieces(rawURI string) []piece {
 		}
 		try("", seg)
 	}
-	for rest := query; rest != "" && len(out) < maxPieces; {
+	for rest := query; rest != "" && !full(); {
 		var kv string
 		kv, rest, _ = strings.Cut(rest, "&")
 		k, v, _ := strings.Cut(kv, "=")
@@ -95,6 +108,7 @@ func encodedPieces(rawURI string) []piece {
 	}
 	// 路径中用 + 代替空格：/index.php/1+union+select…、/cgi-bin/x;cat+/etc/passwd。查询串中的 + 已在 Normalize 中还原
 	if strings.IndexByte(path, '+') >= 0 && len(out) < maxPieces {
+		// 路径整体只还原一次，不受候选数限制：查询串里的诱饵片段不能挤掉它
 		p := strings.ReplaceAll(path, "+", " ")
 		if !hasAttackMark(decodeValue(p)) {
 			return out
@@ -105,7 +119,9 @@ func encodedPieces(rawURI string) []piece {
 				segs = append(segs, decodeValue(s))
 			}
 		}
-		out = append(out, piece{enc: "路径中的 +", text: p, segs: segs})
+		if p := (piece{enc: "路径中的 +", text: p, segs: segs}); accept == nil || accept(&p) {
+			out = append(out, p)
+		}
 	}
 	return out
 }
@@ -205,10 +221,6 @@ func printableText(b []byte) (string, bool) {
 
 // decodedHits 还原 URI 中的编码片段并按规则匹配，返回原文没有命中的规则。
 func (e *Engine) decodedHits(ev *model.Event, result string, have []model.Hit) []model.Hit {
-	ps := encodedPieces(ev.URI)
-	if len(ps) == 0 {
-		return nil
-	}
 	var out []model.Hit
 	seen := func(id string) bool {
 		for _, h := range have {
@@ -223,7 +235,9 @@ func (e *Engine) decodedHits(ev *model.Event, result string, have []model.Hit) [
 		}
 		return false
 	}
-	for _, p := range ps {
+	// 解码与匹配逐片段进行：只有产生新命中的片段计入片段上限
+	encodedPieces(ev.URI, func(p *piece) bool {
+		n := len(out)
 		for _, h := range e.matchDecoded(Normalize(p.text), ev.Method, result) {
 			if seen(h.RuleID) {
 				continue
@@ -242,7 +256,8 @@ func (e *Engine) decodedHits(ev *model.Event, result string, have []model.Hit) [
 			h.Evidence = Printable("（"+where+"）"+h.Evidence, 400)
 			out = append(out, h)
 		}
-	}
+		return len(out) > n
+	})
 	return out
 }
 

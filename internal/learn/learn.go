@@ -329,6 +329,9 @@ func Load(opt Options) (*Learner, error) {
 				l.handled = st.Handled
 			}
 			l.changes, l.anomalies, l.compHist = st.Changes, st.Anomalies, st.CompHist
+			if len(l.changes) > maxChanges { // 手工编辑过的文件
+				l.changes = l.changes[len(l.changes)-maxChanges:]
+			}
 			if st.Users != nil {
 				l.users = st.Users
 			}
@@ -363,9 +366,11 @@ func Load(opt Options) (*Learner, error) {
 			}
 		}
 	}
-	n := len(l.changes)
+	// 启动时重建快照，不重复记录进化日志：保留原来的切片，重建期间追加的记录直接丢弃。
+	// 不能按长度截回：日志接近上限时 logLocked 会挤掉最早的记录，截回后得到的是“丢了最早几条 + 本次启动新写的记录”
+	saved := l.changes
 	l.recomputeLocked(time.Now(), "")
-	l.changes, l.dirty = l.changes[:n], false // 启动时重建快照，不重复记录进化日志
+	l.changes, l.dirty = saved, false
 	if l.migrateLoopLocked() {
 		// 从进化日志补齐的客观结论可能让模型的自动确认收紧：这次变化写入进化日志
 		l.refreshAIStatsLocked(time.Now())

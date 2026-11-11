@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"errors"
+	"io"
 	"net/http"
 	"strconv"
 	"time"
@@ -98,6 +99,10 @@ func (s *Server) rawlogExport(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Disposition", `attachment; filename="netsa-rawlog-`+time.Now().Format("20060102-150405")+`.log"`)
 	w.Header().Set("Cache-Control", "no-store")
 	rawlog.Export(w, res.Records, s.now().Location())
+	if res.Truncated && res.Reason != "" {
+		// 导出用于取证留档：结果不完整（条数、扫描量、内存上限或超时）时在文件末尾注明，不让使用者误以为是完整记录
+		io.WriteString(w, "# netsa：结果不完整（"+res.Reason+"）\n")
+	}
 }
 
 // rawlogVerify 校验留存日志的完整性（哈希链与分段内容），管理员操作。

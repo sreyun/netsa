@@ -15,8 +15,10 @@ import (
 func (s *Server) visibility(r *http.Request) store.Visibility {
 	// r 为空时（后台任务）只按配置判断是否使用 HTTPS
 	v := store.Visibility{ParseRate: 1, Archive: s.Archive != nil, AuthEnabled: s.Auth != nil,
-		Intel:         len(s.Cfg.Intel.Blocklists),
-		HTTPS:         s.Cfg.Server.TLSCert != "" || r != nil && (r.TLS != nil || strings.EqualFold(r.Header.Get("X-Forwarded-Proto"), "https")),
+		Intel: len(s.Cfg.Intel.Blocklists),
+		HTTPS: s.Cfg.Server.TLSCert != "" || r != nil && (r.TLS != nil || strings.EqualFold(r.Header.Get("X-Forwarded-Proto"), "https")) ||
+			// 后台任务没有请求：配置的访问地址是 https:// 时，平台位于 HTTPS 反向代理之后（与页面上的判断口径一致）
+			r == nil && strings.HasPrefix(strings.ToLower(s.Cfg.Alert.BaseURL), "https://"),
 		AllowNetworks: len(s.Cfg.Server.AllowNetworks) > 0,
 		Require2FA:    s.Cfg.Server.Require2FA,
 		Decoys:        s.Deception.Count(),

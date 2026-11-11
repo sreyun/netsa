@@ -166,6 +166,29 @@ type IncidentView struct {
 }
 
 // rankKeys 按计数从多到少（相同时按名称）返回前 n 个键。
+// matches 判断事件是否匹配关键字（已转为小写）：逐个字段比较并短路，不排序、不拼接（全局搜索每次输入都会在读锁内
+// 扫描全部事件）。关键字含空格时可能跨字段，按原来拼接后的文本比较。
+func (i *Incident) matches(q string) bool {
+	if strings.ContainsRune(q, ' ') {
+		return strings.Contains(strings.ToLower(i.Key+" "+i.Location+" "+strings.Join(rankKeys(i.Categories, 50), " ")+" "+
+			strings.Join(rankKeys(i.Assets, 50), " ")+" "+itoa(int(i.ID))), q)
+	}
+	if containsLower(i.Key, q) || containsLower(i.Location, q) || strings.Contains(itoa(int(i.ID)), q) {
+		return true
+	}
+	for k := range i.Categories {
+		if containsLower(k, q) {
+			return true
+		}
+	}
+	for k := range i.Assets {
+		if containsLower(k, q) {
+			return true
+		}
+	}
+	return false
+}
+
 func rankKeys(m map[string]int, n int) []string {
 	kv := make([]KV, 0, len(m))
 	for k, v := range m {
@@ -441,7 +464,7 @@ func (s *Store) Incidents(q IncidentQuery) ([]IncidentView, int, IncidentCounts)
 		if i.Severity < q.MinSeverity || q.Assignee != "" && i.Assignee != q.Assignee || q.Overdue && !(i.active() && now.After(i.Due)) {
 			continue
 		}
-		if search != "" && !strings.Contains(strings.ToLower(i.Key+" "+i.Location+" "+strings.Join(rankKeys(i.Categories, 50), " ")+" "+strings.Join(rankKeys(i.Assets, 50), " ")+" "+itoa(int(i.ID))), search) {
+		if search != "" && !i.matches(search) {
 			continue
 		}
 		list = append(list, i)

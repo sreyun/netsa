@@ -10,6 +10,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -24,11 +25,10 @@ const snapshotVersion = 2
 // ErrSnapshotTooNew 表示快照由更新版本的程序写入，当前版本无法安全解析。
 var ErrSnapshotTooNew = errors.New("快照由更新版本的程序写入，当前版本无法安全读取")
 
-// snapshotHead 是快照中除画像以外的部分。
-type snapshotHead struct {
+// snapshotMeta 是快照头部中规模有上限、在一次读锁内编码即可的部分。
+type snapshotMeta struct {
 	Version    int                   `json:"version"`
 	SavedAt    time.Time             `json:"saved_at"`
-	Alerts     []*model.Alert        `json:"alerts"`
 	NextID     uint64                `json:"next_id"`
 	Buckets    map[int64]*Bucket     `json:"buckets"`
 	Totals     Totals                `json:"totals"`
@@ -43,12 +43,19 @@ type snapshotHead struct {
 	Results    map[string]int64      `json:"results"`
 	MinTime    time.Time             `json:"min_time"`
 	MaxTime    time.Time             `json:"max_time"`
-	Surface    *surface              `json:"surface"`
 	Scores     []ScorePoint          `json:"score_history,omitempty"`
-	Incidents  map[uint64]*Incident  `json:"incidents,omitempty"`
 	NextInc    uint64                `json:"next_incident,omitempty"`
-	Days       map[string]*DayStat   `json:"days,omitempty"`
-	Chains     chainList             `json:"asset_chains,omitempty"` // 资产攻击链路
+}
+
+// snapshotHead 是快照中除画像以外的部分。告警、事件、每日汇总、攻击面与链路的规模可达数万条，保存时分段编码
+// （writeSnapshot），解析时与原来的单个对象相同。
+type snapshotHead struct {
+	snapshotMeta
+	Alerts    []*model.Alert       `json:"alerts"`
+	Surface   *surface             `json:"surface"`
+	Incidents map[uint64]*Incident `json:"incidents,omitempty"`
+	Days      map[string]*DayStat  `json:"days,omitempty"`
+	Chains    chainList            `json:"asset_chains,omitempty"` // 资产攻击链路
 }
 
 type snapshot struct {
@@ -60,7 +67,7 @@ type snapshot struct {
 const saveChunk = 2048
 
 // Save 将状态写入快照文件（.gz 后缀时压缩），先写临时文件再原子替换。
-// 画像分批在读锁内编码，压缩与写盘在锁外进行；状态规模很大时也只会短暂占用锁。
+// 头部与画像分段、分批在读锁内编码，压缩与写盘在锁外进行；状态规模很大时也只会短暂占用锁。
 func (s *Store) Save(path string) error {
 	if path == "" {
 		return nil
@@ -98,6 +105,22 @@ func (s *Store) Save(path string) error {
 	return nil
 }
 
+// surfaceRest 是攻击面中除入口、服务、发现以外的部分（字段与 surface 的 JSON 标签一致）。
+type surfaceRest struct {
+	Tech           map[string]int     `json:"tech"`
+	Ports          map[int]int64      `json:"ports"`
+	ExploitBlocked int64              `json:"exploit_blocked"`
+	ExploitPassed  int64              `json:"exploit_passed"`
+	Fallback       map[string][]int64 `json:"fallback,omitempty"`
+}
+
+// writeSnapshot 写出快照。头部分段编码，画像分批编码，批与批之间释放读锁：
+//   - 标量、计数表、分钟桶在一次读锁内编码（规模有上限）；
+//   - 告警是写时复制的（markAlertLocked 替换整个对象），读锁内只复制指针，编码在锁外；
+//   - 事件、每日汇总、攻击面的入口 / 服务 / 发现、资产链路、画像在读锁内按批编码，批间放锁。
+//
+// 满规模时（2 万条告警、400 天汇总、2 万个入口、2 万个事件）整体编码要数百毫秒到一秒以上，一次持锁做完
+// 会让每分钟一次的定时保存阻塞日志入库与大屏查询。段与段之间不是同一时刻的状态（画像与头部原本也不是）。
 func (s *Store) writeSnapshot(f io.Writer, compress bool) error {
 	out := f
 	var gz *gzip.Writer
@@ -108,45 +131,185 @@ func (s *Store) writeSnapshot(f io.Writer, compress bool) error {
 	w := bufio.NewWriterSize(out, 256<<10)
 
 	s.mu.RLock()
-	head := snapshotHead{
+	meta := snapshotMeta{
 		Version: snapshotVersion, SavedAt: time.Now(), NextID: s.nextID, Buckets: s.buckets, Totals: s.totals,
 		Categories: s.categories, Rules: s.rules, RuleNames: s.ruleNames, RuleMeta: s.ruleMeta, RuleTally: s.tally, SevCount: s.sevCount, Phases: s.phases,
-		Results: s.results, MinTime: s.minTime, MaxTime: s.maxTime, Surface: s.surf, Scores: s.scores, Incidents: s.incidents, NextInc: s.nextInc, Days: s.days, Chains: s.chainTracks(), Outbound: s.outboundList(),
+		Results: s.results, MinTime: s.minTime, MaxTime: s.maxTime, Scores: s.scores, NextInc: s.nextInc, Outbound: s.outboundList(),
 	}
+	metaJSON, err := json.Marshal(&meta)
 	n := len(s.alerts)
-	head.Alerts = make([]*model.Alert, 0, n)
+	alerts := make([]*model.Alert, 0, n)
 	for i := 0; i < n; i++ {
 		idx := i
 		if n == s.maxAlerts {
 			idx = (s.alertHead + i) % n
 		}
-		head.Alerts = append(head.Alerts, s.alerts[idx])
+		alerts = append(alerts, s.alerts[idx])
 	}
-	headJSON, err := json.Marshal(&head)
-	ips := make([]string, 0, len(s.ips))
-	for ip := range s.ips {
-		ips = append(ips, ip)
+	incKeys := mapKeys(s.incidents)
+	dayKeys := mapKeys(s.days)
+	sf := s.surf
+	var epKeys, svKeys, fdKeys []string
+	var restJSON []byte
+	if sf != nil && err == nil {
+		epKeys, svKeys, fdKeys = mapKeys(sf.Endpoints), mapKeys(sf.Services), mapKeys(sf.Findings)
+		restJSON, err = json.Marshal(surfaceRest{Tech: sf.Tech, Ports: sf.Ports, ExploitBlocked: sf.ExploitBlocked, ExploitPassed: sf.ExploitPassed, Fallback: sf.Fallback})
 	}
+	chains := s.chainTracks()
+	ips := mapKeys(s.ips)
 	s.mu.RUnlock()
 	if err != nil {
 		return err
 	}
+	// 键的排序在锁外：输出顺序固定，便于比较两份快照
+	for _, k := range [][]string{dayKeys, epKeys, svKeys, fdKeys, ips} {
+		sort.Strings(k)
+	}
+	sort.Slice(incKeys, func(i, j int) bool { return incKeys[i] < incKeys[j] })
+	sort.Slice(chains, func(i, j int) bool {
+		if chains[i].Kind != chains[j].Kind {
+			return chains[i].Kind < chains[j].Kind
+		}
+		return chains[i].Key < chains[j].Key
+	})
 
-	// {...头部字段..., "profiles": {"ip": {...}, ...}}
-	w.Write(headJSON[:len(headJSON)-1])
-	w.WriteString(`,"profiles":{`)
+	// {...头部字段..., "alerts": [...], ..., "profiles": {"ip": {...}, ...}}
+	w.Write(metaJSON[:len(metaJSON)-1])
+	w.WriteString(`,"alerts":`)
+	alertsJSON, err := json.Marshal(alerts)
+	if err != nil {
+		return err
+	}
+	w.Write(alertsJSON)
+	if len(incKeys) > 0 {
+		w.WriteString(`,"incidents":`)
+		if err := writeObject(s, w, incKeys, saveChunk, func(k uint64) any {
+			if v := s.incidents[k]; v != nil {
+				return v
+			}
+			return nil
+		}); err != nil {
+			return err
+		}
+	}
+	if len(dayKeys) > 0 {
+		w.WriteString(`,"days":`)
+		// 每天最多记 2000 个攻击源等明细：每批只编码几天
+		if err := writeObject(s, w, dayKeys, 8, func(k string) any {
+			if v := s.days[k]; v != nil {
+				return v
+			}
+			return nil
+		}); err != nil {
+			return err
+		}
+	}
+	w.WriteString(`,"surface":`)
+	if sf == nil {
+		w.WriteString("null")
+	} else {
+		w.WriteString(`{"endpoints":`)
+		if err := writeObject(s, w, epKeys, saveChunk, func(k string) any {
+			if v := sf.Endpoints[k]; v != nil {
+				return v
+			}
+			return nil
+		}); err != nil {
+			return err
+		}
+		w.WriteString(`,"services":`)
+		if err := writeObject(s, w, svKeys, saveChunk, func(k string) any {
+			if v := sf.Services[k]; v != nil {
+				return v
+			}
+			return nil
+		}); err != nil {
+			return err
+		}
+		w.WriteString(`,"findings":`)
+		if err := writeObject(s, w, fdKeys, saveChunk, func(k string) any {
+			if v := sf.Findings[k]; v != nil {
+				return v
+			}
+			return nil
+		}); err != nil {
+			return err
+		}
+		w.WriteByte(',')
+		w.Write(restJSON[1:])
+	}
+	if len(chains) > 0 {
+		w.WriteString(`,"asset_chains":[`)
+		first := true
+		var buf []byte
+		for i := 0; i < len(chains); i += 256 {
+			buf = buf[:0]
+			s.mu.RLock()
+			for _, tr := range chains[i:min(i+256, len(chains))] {
+				if s.chains[chainKey{tr.Kind, tr.Key}] != tr { // 编码期间已被清理或淘汰
+					continue
+				}
+				b, err := json.Marshal(tr)
+				if err != nil {
+					s.mu.RUnlock()
+					return err
+				}
+				if !first {
+					buf = append(buf, ',')
+				}
+				first = false
+				buf = append(buf, b...)
+			}
+			s.mu.RUnlock()
+			if _, err := w.Write(buf); err != nil {
+				return err
+			}
+		}
+		w.WriteByte(']')
+	}
+	w.WriteString(`,"profiles":`)
+	if err := writeObject(s, w, ips, saveChunk, func(ip string) any {
+		if p := s.ips[ip]; p != nil { // 编码期间已被淘汰的跳过
+			return p
+		}
+		return nil
+	}); err != nil {
+		return err
+	}
+	w.WriteString("}\n")
+	if err := w.Flush(); err != nil {
+		return err
+	}
+	if gz != nil {
+		return gz.Close()
+	}
+	return nil
+}
+
+// mapKeys 返回 map 的全部键（调用方持锁）。
+func mapKeys[K comparable, V any](m map[K]V) []K {
+	out := make([]K, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	return out
+}
+
+// writeObject 把 keys 对应的条目写成 JSON 对象 {"k": v, ...}：每 chunk 条在一次读锁内编码，批间释放读锁。
+// get 在读锁内调用，条目已不存在时返回 nil（跳过）。
+func writeObject[K comparable](s *Store, w *bufio.Writer, keys []K, chunk int, get func(K) any) error {
+	w.WriteByte('{')
 	first := true
 	var buf []byte
-	for i := 0; i < len(ips); i += saveChunk {
-		end := min(i+saveChunk, len(ips))
+	for i := 0; i < len(keys); i += chunk {
 		buf = buf[:0]
 		s.mu.RLock()
-		for _, ip := range ips[i:end] {
-			p := s.ips[ip]
-			if p == nil { // 编码期间已被淘汰
+		for _, k := range keys[i:min(i+chunk, len(keys))] {
+			v := get(k)
+			if v == nil {
 				continue
 			}
-			b, err := json.Marshal(p)
+			b, err := json.Marshal(v)
 			if err != nil {
 				s.mu.RUnlock()
 				return err
@@ -155,7 +318,7 @@ func (s *Store) writeSnapshot(f io.Writer, compress bool) error {
 				buf = append(buf, ',')
 			}
 			first = false
-			key, _ := json.Marshal(ip)
+			key, _ := json.Marshal(fmt.Sprint(k))
 			buf = append(buf, key...)
 			buf = append(buf, ':')
 			buf = append(buf, b...)
@@ -165,14 +328,7 @@ func (s *Store) writeSnapshot(f io.Writer, compress bool) error {
 			return err
 		}
 	}
-	w.WriteString("}}\n")
-	if err := w.Flush(); err != nil {
-		return err
-	}
-	if gz != nil {
-		return gz.Close()
-	}
-	return nil
+	return w.WriteByte('}')
 }
 
 // migrateSnapshot 把旧版本快照升级到当前版本；版本高于本程序时返回 ErrSnapshotTooNew。
@@ -242,13 +398,15 @@ func (s *Store) Load(path string) error {
 		}
 	}
 	defer closeFile()
-	var r interface {
-		Read([]byte) (int, error)
-	} = f
-	if strings.HasSuffix(path, ".gz") {
-		gz, err := gzip.NewReader(f)
+	br := bufio.NewReaderSize(f, 1<<16)
+	var r io.Reader = br
+	// 按文件头判断是否压缩，而不是只看扩展名：把未压缩的快照改名为 .gz（切换 storage.snapshot 配置、恢复备份）时照常读取
+	if magic, _ := br.Peek(2); len(magic) == 2 && magic[0] == 0x1f && magic[1] == 0x8b {
+		gz, err := gzip.NewReader(br)
 		if err != nil {
-			return err
+			// gzip 头损坏同样先备份：否则以空状态启动后，下一次定时保存会覆盖掉原文件
+			closeFile()
+			return snapshotLoadError(path, "corrupt", fmt.Errorf("解析快照失败: %w", err))
 		}
 		defer gz.Close()
 		r = gz
@@ -268,9 +426,19 @@ func (s *Store) Load(path string) error {
 	if snap.Profiles != nil {
 		s.ips = snap.Profiles
 	}
+	future := snap.SavedAt.Add(time.Hour) // 旧版本按设备的未来时间记下的画像时间收敛到保存时间
+	if snap.SavedAt.IsZero() {
+		future = time.Now().Add(time.Hour)
+	}
 	for ip, p := range s.ips {
 		if p.IP == "" {
 			p.IP = ip
+		}
+		if p.LastSeen.After(future) {
+			p.LastSeen = future.Add(-time.Hour)
+		}
+		if p.FirstSeen.After(p.LastSeen) {
+			p.FirstSeen = p.LastSeen
 		}
 		if p.Attacks > 0 {
 			p.ensureAttackMaps() // 兼容旧版本快照中缺失的字段

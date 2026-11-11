@@ -2,6 +2,7 @@ package store
 
 import (
 	"net/netip"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -76,6 +77,7 @@ const (
 	callbackLinkWin = 2 * time.Hour  // 服务器连接攻击来源：攻击之后多久内的连接参与合并
 	payloadLinkWin  = 24 * time.Hour // 服务器连接攻击载荷中的回连地址：载荷可能由计划任务稍后执行
 	chainSlack      = 2 * time.Minute
+	chainStaleStep  = 24 * time.Hour // 步骤满时，同一阶段超过这么久没有再出现的步骤可以为新步骤让位
 )
 
 // 外部地址在资产链路中的角色（位）。
@@ -222,8 +224,14 @@ func (tr *chainTrack) addPeer(ip string, role uint8, t time.Time) {
 	p.First, p.Last = min(p.First, u), max(p.Last, u)
 }
 
-// makeRoom 判断能否为新步骤腾出位置：侦察步骤有单独的上限；步骤满了时淘汰命中最少的一条侦察步骤给更深的阶段让位。
-func (tr *chainTrack) makeRoom(stage int) bool {
+// makeRoom 判断能否为新步骤腾出位置（rank 为新命中的 hitRank，t 为命中时间）：侦察步骤有单独的上限；步骤满了时依次
+//   - 淘汰命中最少的一条侦察步骤；
+//   - 没有侦察步骤时，淘汰比新步骤更浅的阶段中代表性最弱（hitRank 最低、最后出现最早）的一步；
+//   - 同一阶段内，新命中更有说服力（成功 / 有证据 / 等级更高），或旧步骤已超过 chainStaleStep 没有再出现时替换它。
+//
+// 利用尝试占满步骤后，之后有证据的突破、植入不能被丢弃：否则资产研判停在“未见失陷迹象”。
+// 更深阶段的步骤不会为更浅的步骤让位；被淘汰步骤的命中数计入 Dropped，阶段累计 Stages 不变。
+func (tr *chainTrack) makeRoom(stage, rank int, t time.Time) bool {
 	if stage == stRecon {
 		return tr.recon < chainMaxRecon && len(tr.Steps) < chainMaxSteps
 	}
@@ -236,6 +244,30 @@ func (tr *chainTrack) makeRoom(stage int) bool {
 			victim = i
 		}
 	}
+	weaker := func(a, b *chainStep) bool {
+		if ra, rb := hitRank(a.Severity, a.Result, a.Proven), hitRank(b.Severity, b.Result, b.Proven); ra != rb {
+			return ra < rb
+		}
+		return a.Last.Before(b.Last)
+	}
+	if victim < 0 {
+		for i, x := range tr.Steps {
+			if x.Stage < stage && (victim < 0 || weaker(x, tr.Steps[victim])) {
+				victim = i
+			}
+		}
+	}
+	if victim < 0 {
+		for i, x := range tr.Steps {
+			if x.Stage != stage {
+				continue
+			}
+			r := hitRank(x.Severity, x.Result, x.Proven)
+			if (r < rank || r == rank && t.Sub(x.Last) > chainStaleStep) && (victim < 0 || weaker(x, tr.Steps[victim])) {
+				victim = i
+			}
+		}
+	}
 	if victim < 0 {
 		return false
 	}
@@ -243,7 +275,9 @@ func (tr *chainTrack) makeRoom(stage int) bool {
 	delete(tr.idx, v.key())
 	tr.Dropped += v.Count
 	tr.Steps = append(tr.Steps[:victim], tr.Steps[victim+1:]...)
-	tr.recon--
+	if v.Stage == stRecon {
+		tr.recon--
+	}
 	return true
 }
 
@@ -579,7 +613,7 @@ func (tr *chainTrack) step(stage int, h *model.Hit, ev *model.Event, src, peer s
 	k := stepKey{stage, h.Category, src, truncate(peer, 120)}
 	st := tr.idx[k]
 	if st == nil {
-		if !tr.makeRoom(stage) {
+		if !tr.makeRoom(stage, hitRank(h.Severity, h.Result, h.Proven), t) {
 			tr.Dropped++
 			return
 		}
@@ -952,9 +986,14 @@ func (s *Store) chainIndexLocked() *chainIndex {
 		}
 		return a.Key < b.Key
 	})
+	pos := make(map[*chainTrack]int, len(ix.list))
+	var sameName [][2]int // 同一标识的不同类型（主机名与站点同名、登记台账前按站点记录的同名资产）
 	for i, tr := range ix.list {
-		if _, ok := ix.byID[tr.Key]; !ok {
+		pos[tr] = i
+		if j, ok := ix.byID[tr.Key]; !ok {
 			ix.byID[tr.Key] = i
+		} else {
+			sameName = append(sameName, [2]int{j, i})
 		}
 	}
 	for i, tr := range ix.list { // 别名优先级低于真实标识
@@ -991,12 +1030,16 @@ func (s *Store) chainIndexLocked() *chainIndex {
 			why  string
 		}{a, b, why})
 	}
-	// 0. 同一资产的其他标识（台账资产被访问时的地址与域名、DNAT 前的公网地址）另有记录：如登记台账之前的数据
+	// 0. 同名的不同类型记录是同一个资产：按标识查询时只能找到其中一条，不合并的话另一条的步骤无法查看
+	for _, p := range sameName {
+		join(p[0], p[1], "同名的站点与主机记录")
+	}
+	// 同一资产的其他标识（台账资产被访问时的地址与域名、DNAT 前的公网地址）另有记录：如登记台账之前的数据
 	for i, tr := range ix.list {
 		for _, a := range tr.Aliases {
 			for _, k := range [...]chainKey{{"host", a}, {"site", a}} {
 				if o := s.chains[k]; o != nil {
-					if j, ok := ix.byID[o.Key]; ok {
+					if j, ok := pos[o]; ok {
 						join(i, j, a+" 是 "+tr.Key+" 的地址或域名")
 					}
 				}
@@ -1011,11 +1054,33 @@ func (s *Store) chainIndexLocked() *chainIndex {
 			}
 		}
 	}
-	// 2. 服务器回连的地址是攻击该站点的来源，或出现在针对该站点的攻击载荷中
-	peerOf := map[string][]int{}
-	for i, tr := range ix.list {
-		for p := range tr.Peers {
-			peerOf[p] = append(peerOf[p], i)
+	// 2. 服务器回连的地址是攻击该站点的来源，或出现在针对该站点的攻击载荷中。
+	// 只为确实要查的对端（高危以上、未标误报的控制阶段步骤的对端）建倒排：全部资产的全部对端可达数十万项，
+	// 每次查询都在读锁内全量倒排会阻塞日志入库
+	need := map[string]struct{}{}
+	for _, tr := range ix.list {
+		for _, st := range tr.Steps {
+			if st.Stage == stControl && st.Peer != "" && st.Severity >= model.SevHigh && !s.dismissedLocked(st) {
+				need[st.Peer] = struct{}{}
+			}
+		}
+	}
+	peerOf := make(map[string][]int, len(need))
+	if len(need) > 0 {
+		for i, tr := range ix.list {
+			if len(need) < len(tr.Peers) {
+				for p := range need {
+					if tr.Peers[p] != nil {
+						peerOf[p] = append(peerOf[p], i)
+					}
+				}
+				continue
+			}
+			for p := range tr.Peers {
+				if _, ok := need[p]; ok {
+					peerOf[p] = append(peerOf[p], i)
+				}
+			}
 		}
 	}
 	for i, tr := range ix.list {
@@ -1262,7 +1327,9 @@ func (s *Store) summaryLocked(g *chainGroup, e *chainEval) ChainSummary {
 	sm := ChainSummary{Key: t.Key, Name: t.Key, Kind: t.Kind, Asset: t.Asset, Severity: e.maxSev, Confidence: e.conf,
 		Hits: e.hitsAll, Sources: len(e.srcs), FirstSeen: e.firstT, LastSeen: e.lastT, Reached: []string{}, Depth: ChainStages[e.depth].ID}
 	for _, tr := range g.tracks {
-		sm.Members = append(sm.Members, tr.Key)
+		if !slices.Contains(sm.Members, tr.Key) {
+			sm.Members = append(sm.Members, tr.Key)
+		}
 		if assetRank(tr.Level) > assetRank(sm.Level) {
 			sm.Level, sm.Owner = tr.Level, tr.Owner
 		}
@@ -1422,7 +1489,34 @@ func techsOf(cat string) []ChainTech {
 func (s *Store) AssetChain(id string) *AssetChain {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
+	return s.assetChainLocked(s.chainIndexLocked(), id)
+}
+
+// AssetChains 依次查询多个资产的攻击链路（合并为同一资产的只返回一次，最多 limit 个），只建一次合并索引：
+// 取证包对一个事件的多个目标逐个查询时，不再为每个目标在读锁内重建索引。
+func (s *Store) AssetChains(ids []string, limit int) []*AssetChain {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 	ix := s.chainIndexLocked()
+	seen := map[int]bool{}
+	var out []*AssetChain
+	for _, id := range ids {
+		if len(out) >= limit {
+			break
+		}
+		i, ok := ix.resolve(id)
+		if !ok || seen[ix.of[i]] {
+			continue
+		}
+		seen[ix.of[i]] = true
+		if c := s.assetChainLocked(ix, id); c != nil {
+			out = append(out, c)
+		}
+	}
+	return out
+}
+
+func (s *Store) assetChainLocked(ix *chainIndex, id string) *AssetChain {
 	i, ok := ix.resolve(id)
 	if !ok {
 		return nil
