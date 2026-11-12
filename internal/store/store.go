@@ -59,6 +59,8 @@ type IPProfile struct {
 
 	// 以下为增量统计的簿记字段，不持久化（快照恢复后由 rebuild 重建）
 	inAgg    bool   `json:"-"`
+	listIdx  int    `json:"-"` // 在 Store.ipList 中的位置
+	dirty    bool   `json:"-"` // 上次完整保存快照之后有改动（Store.dirtyList）
 	aggMask  uint64 `json:"-"` // 已计入 ATT&CK 矩阵的技术位
 	aggFlags uint8  `json:"-"` // 已计入的攻击手法标记
 	// retractedOnly 表示全部命中都来自已停用的误报规则（如被业务轮询停用的自学习观察规则）：不再算作攻击源，
@@ -288,9 +290,17 @@ type Totals struct {
 
 // Store 是线程安全的态势状态库。
 type Store struct {
-	mu           timedRWMutex // 读写锁，记录写锁的等待与持有时间（lock.go）
-	saveMu       sync.Mutex   // 串行化快照保存（临时文件同名）
-	savedGen     uint64       // 上次保存完成时的写代数（saveMu 保护）
+	mu           timedRWMutex        // 读写锁，记录写锁的等待与持有时间（lock.go）
+	ipList       []*IPProfile        // 全部画像（与 ips 一致，顺序不定），供分批扫描复制
+	dirtyList    []*IPProfile        // 上次完整保存快照之后改动过的画像（见 delta.go）
+	removedIPs   map[string]struct{} // 上次完整保存快照之后淘汰的画像
+	trackDirty   bool                // 已保存或载入过快照：开始记录改动（delta.go）
+	baseID       string              // 磁盘上完整快照的标识（saveMu 保护，Load 时同时持 saveMu）
+	basePath     string
+	baseAt       time.Time
+	saveStat     saveTimes  // 快照保存的耗时与时间（delta.go）
+	saveMu       sync.Mutex // 串行化快照保存（临时文件同名）
+	savedGen     uint64     // 上次保存完成时的写代数（saveMu 保护）
 	savedPath    string
 	savedAt      time.Time
 	campMu       sync.Mutex      // 攻击活动归并结果的缓存（campaign.go），计算期间不持有 mu
@@ -360,7 +370,7 @@ type Store struct {
 func New(maxIPs, maxAlerts, alertsPerRule int, retention time.Duration) *Store {
 	return &Store{
 		maxIPs: maxIPs, maxAlerts: maxAlerts, perRule: alertsPerRule, retention: retention,
-		ips: map[string]*IPProfile{}, buckets: map[int64]*Bucket{},
+		ips: map[string]*IPProfile{}, removedIPs: map[string]struct{}{}, buckets: map[int64]*Bucket{},
 		categories: map[string]int64{}, rules: map[string]int64{}, ruleNames: map[string]string{}, ruleMeta: map[string]ruleMeta{}, excluded: map[string]bool{}, retracted: map[string]bool{}, tally: map[string]*ruleTally{}, outbound: map[string]*OutboundDst{},
 		phases: map[string]int64{}, results: map[string]int64{}, surf: newSurface(), ruleBits: map[string]int{},
 		incidents: map[uint64]*Incident{}, incByKey: map[string]uint64{},
@@ -395,13 +405,20 @@ func (s *Store) Record(ev *model.Event, hits []model.Hit) RecordResult {
 	return s.recordLocked(ev, hits)
 }
 
-// RecordBatch 在一次加锁内记录一批事件，hits[i] 对应 evs[i]。
+// recordChunk 是每次持写锁处理的事件数：一批 256 条攻击事件在一次持锁内处理完要 10ms 以上（满规模时偶尔上百毫秒），
+// 期间所有查询都要等待；分成小段，每段持锁约 1ms，段间查询可以插入。
+const recordChunk = 32
+
+// RecordBatch 记录一批事件（每 recordChunk 条持一次写锁），hits[i] 对应 evs[i]。
 func (s *Store) RecordBatch(evs []*model.Event, hits [][]model.Hit) []RecordResult {
 	out := make([]RecordResult, len(evs))
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	for i, ev := range evs {
-		out[i] = s.safeRecord(ev, hits[i])
+	for i := 0; i < len(evs); i += recordChunk {
+		end := min(i+recordChunk, len(evs))
+		s.mu.Lock()
+		for j := i; j < end; j++ {
+			out[j] = s.safeRecord(evs[j], hits[j])
+		}
+		s.mu.Unlock()
 	}
 	return out
 }
@@ -472,6 +489,7 @@ func (s *Store) recordLocked(ev *model.Event, hits []model.Hit) RecordResult {
 		if !hasAttack(hits) {
 			// 没有命中的 TLS 握手：只给已有的画像记录客户端指纹（同源关联），不建立新画像
 			if p := s.ips[ev.SrcIP]; p != nil && ev.TLSFinger != "" {
+				s.markDirty(p)
 				incBounded(&p.TLS, truncate(ev.TLSFinger, 80), 4)
 			}
 			return res
@@ -548,6 +566,7 @@ func (s *Store) recordLocked(ev *model.Event, hits []model.Hit) RecordResult {
 			p.Intel = s.IntelMatch(ev.SrcIP)
 		}
 		s.ips[ev.SrcIP] = p
+		s.listAdd(p)
 		res.NewIP = true
 		s.agg.add(p) // 威胁情报命中时创建即为攻击源；普通访客由首次攻击时补登记
 		if len(p.Intel) > 0 {
@@ -571,6 +590,7 @@ func (s *Store) recordLocked(ev *model.Event, hits []model.Hit) RecordResult {
 				Phase: model.PhaseRecon, Evidence: strings.Join(p.Intel, ", ") + note, Result: res, Feeds: feedNames(p.Intel)}))
 		}
 	}
+	s.markDirty(p)
 	oldLevel, oldSeen, oldFirst := p.Level, p.LastSeen, p.FirstSeen
 	if count {
 		p.Events++
@@ -863,6 +883,7 @@ func (s *Store) UpdateGeo(ip string, info *geo.Info) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if p := s.ips[ip]; p != nil {
+		s.markDirty(p)
 		old := p.Geo
 		p.Geo = info
 		s.agg.setGeo(p, old)
@@ -891,6 +912,7 @@ func (s *Store) RefreshGeo(relocate func(ip string, old *geo.Info) *geo.Info) in
 		if info == nil || info == it.old {
 			continue
 		}
+		changed := !geo.SameContent(it.old, info) // 锁外比较
 		s.mu.Lock()
 		if p := s.ips[it.ip]; p != nil && p.Geo == it.old {
 			if !geo.SameLocation(it.old, info) {
@@ -899,6 +921,9 @@ func (s *Store) RefreshGeo(relocate func(ip string, old *geo.Info) *geo.Info) in
 				if inc := s.incidents[s.incByKey[it.ip]]; inc != nil {
 					inc.Location = info.Location()
 				}
+			}
+			if changed { // 启动时重新定位全部画像：内容没变的不写进增量快照，否则每次重启后都要完整保存一次
+				s.markDirty(p)
 			}
 			p.Geo = info
 			s.agg.setGeo(p, it.old)
@@ -932,6 +957,7 @@ func (s *Store) Tag(ip, tag, detail string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if p := s.ips[ip]; p != nil {
+		s.markDirty(p)
 		p.setTag(tag, detail)
 	}
 }
@@ -1017,7 +1043,37 @@ func (s *Store) evictLocked() {
 	for _, p := range h {
 		s.agg.remove(p)
 		delete(s.ips, p.IP)
+		s.listRemove(p)
+		if s.trackDirty {
+			s.removedIPs[p.IP] = struct{}{}
+		}
 		delete(s.retracted, p.IP)
+	}
+}
+
+// listAdd / listRemove 维护全部画像的数组（调用方持写锁）：分批扫描时复制这个数组即可，不必在读锁内遍历几十万项的 map。
+func (s *Store) listAdd(p *IPProfile) {
+	p.listIdx = len(s.ipList)
+	s.ipList = append(s.ipList, p)
+}
+
+func (s *Store) listRemove(p *IPProfile) {
+	i := p.listIdx
+	if i < 0 || i >= len(s.ipList) || s.ipList[i] != p {
+		return
+	}
+	last := s.ipList[len(s.ipList)-1]
+	s.ipList[i], last.listIdx = last, i
+	s.ipList[len(s.ipList)-1] = nil
+	s.ipList = s.ipList[:len(s.ipList)-1]
+	p.listIdx = -1
+}
+
+// rebuildList 按画像 map 重建数组（快照恢复后调用，调用方持写锁）。
+func (s *Store) rebuildList() {
+	s.ipList = make([]*IPProfile, 0, len(s.ips))
+	for _, p := range s.ips {
+		s.listAdd(p)
 	}
 }
 

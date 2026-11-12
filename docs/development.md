@@ -45,7 +45,7 @@ go test -race -short ./...     # 需要 CGO 与 C 编译器（gcc）
 
   脱敏只替换不影响攻击写法的内容：内网地址映射到 10.250.0.0/16（同一地址始终映射到同一个），`-hide` 指定的域名换成 example.com、网段内的地址换成 198.51.100.0/24，口令与令牌类参数（值本身是攻击载荷时保留）、邮箱、手机号、身份证号、JWT 替换；回环、云元数据地址与其他公网地址保留。标注不是人工结论，作为准确率依据前请复核第一列。语料文件仍是现场数据，权限为 0600，不要提交到代码仓库。
 
-- 满规模测量（默认跳过，约 2 分钟）：建立指定数量的攻击源画像，测量快照保存与恢复、各查询的耗时，以及查询并发时日志入库等待写锁的时间。改动状态库的锁、快照或查询后跑一遍，对比前后的数字：
+- 满规模测量（默认跳过，约 3 分钟）：建立指定数量的攻击源画像，测量完整 / 增量快照的保存与恢复、各查询的耗时、与每种查询或保存单独并发时日志入库每批的最长耗时，以及全部并发时入库等待写锁的时间。改动状态库的锁、快照或查询后跑一遍，对比前后的数字：
 
   ```bash
   NETSA_SCALE=200000 go test -run TestScale -v -timeout 20m ./internal/store
@@ -63,6 +63,16 @@ go test -race -short ./...     # 需要 CGO 与 C 编译器（gcc）
 
 - 测试用例中的中文名称请写成结构体字段（`[]struct{ name string; … }`），不要用作 map 的键：gofmt 按字符数对齐 map 的值，编辑器里看起来错位，手工对齐后 `gofmt -l` 就会失败。
 - 前端为原生 JavaScript，CI 只做语法检查：`for f in web/static/*.js; do node --check "$f"; done`。
+
+### 状态库的锁
+
+状态库（`internal/store`）用一把读写锁保护全部内存状态，没有按画像、告警、事件、攻击面分成多把锁：一条日志入库时要同时更新画像、分钟桶、汇总、事件、资产链路与攻击面，它们之间有一致性约束（例如事件的等级来自告警，排行来自画像），拆成多把锁就要规定加锁顺序、处理跨域的中间状态，快照也不再是同一时刻的。实测的争用来自单次持锁过长，而不是锁的数量，因此做法是缩短每次持锁：
+
+- 入库每 32 条事件持一次写锁（`recordChunk`），段间查询可以插入；
+- 扫描全部画像的查询先复制画像数组（`profileList`），再每 1024 个持一次读锁；事件搜索分批筛选、排序在锁外；
+- 快照分段编码，画像每 64 个持一次读锁；完整快照每 15 分钟一次，其余时候只写改动过的画像（`delta.go`）。
+
+新增的查询如果要遍历全部画像或事件，请沿用分批的写法，并用满规模测量确认入库等待没有变长。改动画像的新路径要调用 `markDirty`，否则这个改动只在下一次完整快照时保存（`TestDeltaSnapshot*` 覆盖了现有的路径）。
 
 ## 代码结构
 
@@ -113,16 +123,16 @@ docs/                 使用与开发文档（images/ 为 README 截图，i18n/ 
 
 | 触发 | 行为 |
 |---|---|
-| 创建 tag `v1.13.0` | 构建 + 启动自检 + 推送：`1.13.0`、`1.11`、`1`、`latest`、`sha-xxxxxxx` |
-| 创建预发布 tag `v1.13.0-rc1` | 只推 `1.13.0-rc1`、`sha-xxxxxxx`，不动 `latest` / `1.11` / `1` |
+| 创建 tag `v1.14.0` | 构建 + 启动自检 + 推送：`1.14.0`、`1.14`、`1`、`latest`、`sha-xxxxxxx` |
+| 创建预发布 tag `v1.14.0-rc1` | 只推 `1.14.0-rc1`、`sha-xxxxxxx`，不动 `latest` / `1.14` / `1` |
 | 推送 `master` / Pull Request | 不构建镜像（质量门禁由 `ci` 工作流负责） |
 | 手动触发（workflow_dispatch） | 填写要发布的 tag 与是否更新 `latest`；按该 tag 检出源码，版本与内容严格对应 |
 
 发布流程：
 
 ```bash
-git tag v1.13.0
-git push origin v1.13.0
+git tag v1.14.0
+git push origin v1.14.0
 ```
 
 需要在仓库 **Settings → Secrets and variables → Actions** 配置两个 Secret：
@@ -148,9 +158,9 @@ printf '%s' "$AK" | openssl dgst -binary -sha256 -hmac "$SK" | od -An -vtx1 | tr
 | `GOPROXY` | `https://goproxy.cn,direct` | 构建时的 Go 模块代理 |
 
 ```bash
-docker pull swr.cn-east-3.myhuaweicloud.com/sreyun/netsa:1.13.0
+docker pull swr.cn-east-3.myhuaweicloud.com/sreyun/netsa:1.14.0
 docker run -d --name netsa -p 8080:8080 -p 5514:5514/udp -v netsa-state:/app/state \
-  swr.cn-east-3.myhuaweicloud.com/sreyun/netsa:1.13.0
+  swr.cn-east-3.myhuaweicloud.com/sreyun/netsa:1.14.0
 ```
 
 - **版本随 tag 注入**：构建时通过 `-ldflags "-X main.version=<tag>"` 写入二进制，`netsa version` 与 `/api/meta` 显示的就是发布版本；本地 `docker build` 不传该参数，仍使用源码中的默认版本。

@@ -968,12 +968,15 @@ func (s *Store) MapData(minLevel model.Severity) *MapResult {
 	return res
 }
 
-// profileList 返回全部画像（一次读锁内复制指针，约每 10 万个 5ms），供分批扫描使用。
+// profileList 返回全部画像（读锁内复制指针数组，20 万个约 0.5ms），供分批扫描使用。
 // 批间放锁时画像可能被更新或淘汰：被淘汰的画像不再有写者，读取它是安全的；统计按扫描时的状态。
 func (s *Store) profileList() []*IPProfile {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	list := make([]*IPProfile, 0, len(s.ips))
+	if len(s.ipList) == len(s.ips) {
+		return append([]*IPProfile(nil), s.ipList...)
+	}
+	list := make([]*IPProfile, 0, len(s.ips)) // 不一致时（测试直接写入 map）按 map 复制
 	for _, p := range s.ips {
 		list = append(list, p)
 	}

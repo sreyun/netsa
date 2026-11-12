@@ -18,6 +18,8 @@ type timedRWMutex struct {
 
 	count     atomic.Int64 // 写锁次数
 	waitTotal atomic.Int64 // 累计等待（纳秒）
+	slow5     atomic.Int64 // 等待超过 5ms 的次数
+	slow50    atomic.Int64 // 等待超过 50ms 的次数
 	// 最近两个统计周期内的最大值（纳秒）：Maintain 每个周期轮换一次，指标反映的是最近的状况而不是启动以来的峰值
 	waitCur, waitPrev atomic.Int64
 	holdCur, holdPrev atomic.Int64
@@ -40,6 +42,12 @@ func (m *timedRWMutex) Lock() {
 	w := int64(now.Sub(t0))
 	m.count.Add(1)
 	m.waitTotal.Add(w)
+	if w > int64(5*time.Millisecond) {
+		m.slow5.Add(1)
+		if w > int64(50*time.Millisecond) {
+			m.slow50.Add(1)
+		}
+	}
 	atomicMax(&m.waitCur, w)
 	m.held = now
 }
@@ -65,15 +73,17 @@ func (m *timedRWMutex) rotate() {
 
 // LockStats 是状态库写锁的统计。
 type LockStats struct {
-	Count     int64         // 写锁次数
-	WaitTotal time.Duration // 累计等待
-	WaitMax   time.Duration // 最近两个统计周期内单次等待的最大值
-	HoldMax   time.Duration // 最近两个统计周期内单次持有的最大值
+	Count      int64         // 写锁次数
+	WaitTotal  time.Duration // 累计等待
+	WaitOver5  int64         // 等待超过 5ms 的次数
+	WaitOver50 int64         // 等待超过 50ms 的次数
+	WaitMax    time.Duration // 最近两个统计周期内单次等待的最大值
+	HoldMax    time.Duration // 最近两个统计周期内单次持有的最大值
 }
 
 // LockStats 返回写锁的统计（不持锁）。
 func (s *Store) LockStats() LockStats {
 	m := &s.mu
-	return LockStats{Count: m.count.Load(), WaitTotal: time.Duration(m.waitTotal.Load()),
+	return LockStats{Count: m.count.Load(), WaitTotal: time.Duration(m.waitTotal.Load()), WaitOver5: m.slow5.Load(), WaitOver50: m.slow50.Load(),
 		WaitMax: time.Duration(max(m.waitCur.Load(), m.waitPrev.Load())), HoldMax: time.Duration(max(m.holdCur.Load(), m.holdPrev.Load()))}
 }

@@ -442,50 +442,69 @@ func (s *Store) Incidents(q IncidentQuery) ([]IncidentView, int, IncidentCounts)
 	now := time.Now()
 	search := strings.ToLower(strings.TrimSpace(q.Search))
 	s.mu.RLock()
-	defer s.mu.RUnlock()
 	counts := s.incidentCountsLocked(now)
-	var list []*Incident
+	all := make([]*Incident, 0, len(s.incidents))
 	for _, i := range s.incidents {
-		switch q.Status {
-		case "":
-		case "active":
-			if !i.active() {
+		all = append(all, i)
+	}
+	s.mu.RUnlock()
+	// 分批在读锁内筛选并复制排序键（批间放锁）：2 万个事件逐个比较关键字要近百毫秒；排序在锁外进行
+	type cand struct {
+		i               *Incident
+		active, overdue bool
+		sev             model.Severity
+		updated         time.Time
+		id              uint64
+	}
+	var list []cand
+	for c := 0; c < len(all); c += incidentChunk {
+		s.mu.RLock()
+		for _, i := range all[c:min(c+incidentChunk, len(all))] {
+			if s.incidents[i.ID] != i { // 批间已被淘汰
 				continue
 			}
-		case "closed":
-			if i.active() {
+			switch q.Status {
+			case "":
+			case "active":
+				if !i.active() {
+					continue
+				}
+			case "closed":
+				if i.active() {
+					continue
+				}
+			default:
+				if i.Status != q.Status {
+					continue
+				}
+			}
+			if i.Severity < q.MinSeverity || q.Assignee != "" && i.Assignee != q.Assignee || q.Overdue && !(i.active() && now.After(i.Due)) {
 				continue
 			}
-		default:
-			if i.Status != q.Status {
+			if search != "" && !i.matches(search) {
 				continue
 			}
+			list = append(list, cand{i: i, active: i.active(), overdue: i.active() && now.After(i.Due), sev: i.Severity, updated: i.Updated, id: i.ID})
 		}
-		if i.Severity < q.MinSeverity || q.Assignee != "" && i.Assignee != q.Assignee || q.Overdue && !(i.active() && now.After(i.Due)) {
-			continue
-		}
-		if search != "" && !i.matches(search) {
-			continue
-		}
-		list = append(list, i)
+		s.mu.RUnlock()
 	}
 	sort.Slice(list, func(a, b int) bool {
 		x, y := list[a], list[b]
-		if x.active() != y.active() {
-			return x.active()
+		if x.active != y.active {
+			return x.active
 		}
-		if x.active() {
-			if xo, yo := now.After(x.Due), now.After(y.Due); xo != yo {
-				return xo
+		if x.active {
+			if x.overdue != y.overdue {
+				return x.overdue
 			}
-			if x.Severity != y.Severity {
-				return x.Severity > y.Severity
+			if x.sev != y.sev {
+				return x.sev > y.sev
 			}
 		}
-		if !x.Updated.Equal(y.Updated) {
-			return x.Updated.After(y.Updated)
+		if !x.updated.Equal(y.updated) {
+			return x.updated.After(y.updated)
 		}
-		return x.ID > y.ID
+		return x.id > y.id
 	})
 	total := len(list)
 	if q.Offset > 0 {
@@ -495,11 +514,16 @@ func (s *Store) Incidents(q IncidentQuery) ([]IncidentView, int, IncidentCounts)
 		list = list[:q.Limit]
 	}
 	out := make([]IncidentView, len(list))
-	for k, i := range list {
-		out[k] = i.view(now)
+	s.mu.RLock()
+	for k, c := range list {
+		out[k] = c.i.view(now)
 	}
+	s.mu.RUnlock()
 	return out, total, counts
 }
+
+// incidentChunk 是分批筛选事件时每批的数量。
+const incidentChunk = 2048
 
 // IncidentDetail 是事件详情：事件信息、处置记录、相关告警与命中规则。
 type IncidentDetail struct {
@@ -896,6 +920,7 @@ func (s *Store) excludeRuleLocked(rule string, on bool) int {
 		if p.Rules[rule] <= 0 {
 			continue
 		}
+		s.markDirty(p)
 		old := p.Level
 		was, now := p.retractedOnly, retractedOnlyOf(p, s.excluded)
 		if now && !was {
@@ -1019,6 +1044,7 @@ func (s *Store) markAlertLocked(idx int, reason string) {
 	c.Retracted = reason
 	s.alerts[idx] = &c
 	if p := s.ips[old.SrcIP]; p != nil {
+		s.markDirty(p)
 		for k, r := range p.Recent {
 			if r == old {
 				p.Recent[k] = &c

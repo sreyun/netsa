@@ -88,7 +88,8 @@
 - **API 令牌**：管理员在“系统管理 → API 令牌”中为账号创建令牌（`nsa_` 开头，只显示一次，服务端只保存哈希），权限可选只读 / 运营分析员 / 管理员 / **仅监控指标**，不超过所属账号的权限，可设有效期、随时吊销，记录最近使用时间与来源。调用：`curl -H "Authorization: Bearer nsa_…" http://服务器:8080/api/incidents?status=active`。
 - **Prometheus 指标**：`GET /metrics`（会话、Basic 认证或令牌，推荐“仅监控指标”令牌），包含各数据源的日志量 / 解析失败 / 断流状态 / 最新日志时间、syslog 发送端（在线、断流、被拒绝、限速丢弃）、攻击与告警（按等级）、攻击源数、安全评分、事件（按状态、超时数）、误报抑制、告警推送（成功 / 失败 / 排队）、告警归档与原始日志留存、Go 运行时等。
 - **背压与丢弃可见**：`netsa_pipeline_queue_depth` / `_capacity`（入库跟不上时队列长度会贴近容量）、`netsa_rawlog_dropped_total`、`netsa_archive_dropped_total`、`netsa_exposure_muted_total`、`netsa_alert_robot_queued`。这几项是「静默丢数据」的直接信号，建议配置告警。
-- **状态库争用**：`netsa_store_lock_wait_max_seconds` / `netsa_store_lock_hold_max_seconds`（最近两个维护周期内日志入库等待、持有状态库写锁的最长时间）、`netsa_store_lock_wait_seconds_total` 与 `netsa_store_lock_acquisitions_total`（可按速率算出平均等待）。等待时间持续在几百毫秒以上，说明大屏查询与日志入库争用严重，入库会积压。
+- **状态库争用**：`netsa_store_lock_wait_max_seconds` / `netsa_store_lock_hold_max_seconds`（最近两个维护周期内日志入库等待、持有状态库写锁的最长时间）、`netsa_store_lock_wait_seconds_total` 与 `netsa_store_lock_acquisitions_total`（可按速率算出平均等待）。`netsa_store_lock_slow_waits_total{over="5ms"|"50ms"}` 为等待超过阈值的次数。等待时间持续在几百毫秒以上，说明大屏查询与日志入库争用严重，入库会积压。
+- **快照**：`netsa_snapshot_save_seconds{kind="full"|"delta"}`（最近一次完整 / 增量保存的耗时）、`netsa_snapshot_full_timestamp_seconds`（磁盘上完整快照的保存时间，超过 20 分钟没有更新说明完整保存一直失败）、`netsa_snapshot_dirty_profiles`（完整快照之后改动过的攻击源画像数，即增量快照的规模）。
 - **缓存与去重可见**：`netsa_response_cache_entries` / `_bytes` / `_hits_total` / `_misses_total`（聚合接口响应缓存为 LRU，最多 1024 个键、64MB，单个超过 4MB 的响应不缓存；条目数长期贴近上限说明查询参数组合过多）、`netsa_notify_dedup_entries`（告警去重表规模，随去重窗口自然回收）。
 - **性能剖析**：`server.pprof: true` 后开放 `/debug/pprof/`（**仅管理员**，默认关闭）。用于排查 CPU / 内存 / 协程问题，例如：
   ```bash

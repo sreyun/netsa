@@ -418,6 +418,7 @@ func TestSnapshotSegmentedRoundTrip(t *testing.T) {
 			t.Fatalf("快照应是合法的 JSON: %v", err)
 		}
 		delete(m, "saved_at")
+		delete(m, "id") // 每份完整快照的标识不同
 		return m
 	}
 	a, b := read(p1), read(p2)

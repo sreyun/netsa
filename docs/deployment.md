@@ -6,7 +6,7 @@
 
 | 镜像 | 用途 |
 |---|---|
-| `swr.cn-east-3.myhuaweicloud.com/sreyun/netsa:latest` | netsa 主程序（默认）；也可使用版本号标签，如 `:1.13.0` |
+| `swr.cn-east-3.myhuaweicloud.com/sreyun/netsa:latest` | netsa 主程序（默认）；也可使用版本号标签，如 `:1.14.0` |
 | `swr.cn-east-3.myhuaweicloud.com/sreyun/pgvector:pg18` | 可选的告警归档数据库（PostgreSQL 18），只在启用归档时拉取 |
 
 ## 生产部署（Docker Compose）
@@ -69,6 +69,8 @@ docker compose up -d
 - `docker compose up -d` 不会更新本地已有的 `latest`，升级时需要先执行 `docker compose pull`。
 - 回滚时把 `NETSA_IMAGE` 改回旧版本号。新版本写入的状态快照旧版本可能拒绝读取（会改名保留，不会被覆盖），因此先停止服务、用升级前的备份覆盖数据卷，再启动：
 
+  从 1.14.0 及以后回滚到 1.13 及以前时，旧版本不认识增量快照，只读完整快照：最近一次完整保存（最多 15 分钟）之后的攻击源画像、告警与统计会丢失，分析员的处置记录从预写日志恢复，不受影响。
+
   ```bash
   docker compose down
   docker run --rm --user 0 --entrypoint tar -v netsa_netsa-state:/state -v "$PWD":/backup \
@@ -82,14 +84,14 @@ docker compose up -d
 
 ```bash
 # 联网机器：按服务器架构拉取（arm64 服务器用 --platform linux/arm64），不启用归档可不拉取 pgvector
-docker pull --platform linux/amd64 swr.cn-east-3.myhuaweicloud.com/sreyun/netsa:1.13.0
+docker pull --platform linux/amd64 swr.cn-east-3.myhuaweicloud.com/sreyun/netsa:1.14.0
 docker pull --platform linux/amd64 swr.cn-east-3.myhuaweicloud.com/sreyun/pgvector:pg18
-docker save -o netsa-images.tar swr.cn-east-3.myhuaweicloud.com/sreyun/netsa:1.13.0 \
+docker save -o netsa-images.tar swr.cn-east-3.myhuaweicloud.com/sreyun/netsa:1.14.0 \
   swr.cn-east-3.myhuaweicloud.com/sreyun/pgvector:pg18
 
 # 服务器：导入后直接启动（不要执行 docker compose pull），.env 中写入相同的镜像标签
 docker load -i netsa-images.tar
-echo 'NETSA_IMAGE=swr.cn-east-3.myhuaweicloud.com/sreyun/netsa:1.13.0' >> .env
+echo 'NETSA_IMAGE=swr.cn-east-3.myhuaweicloud.com/sreyun/netsa:1.14.0' >> .env
 docker compose up -d
 ```
 
@@ -127,7 +129,7 @@ docker compose start netsa
 ## 数据可靠性
 
 - **处置记录**：分析员和模型对事件的每次修改都先写入预写日志并落盘，进程异常退出（断电、`kill -9`、内存不足）后重放，不会丢失。
-- **其他状态**：快照默认每分钟保存一次（`storage.interval`），上次保存之后没有任何变化时不重写；异常退出时最多丢失这段时间内新产生的告警和统计。需要长期留存和更高可靠性时启用 PostgreSQL 告警归档和原始日志留存。
+- **其他状态**：快照默认每分钟保存一次（`storage.interval`），上次保存之后没有任何变化时不重写；异常退出时最多丢失这段时间内新产生的告警和统计。完整快照每 15 分钟保存一次，其余时候只写增量快照（`<快照>.delta`，只包含改动过的攻击源画像），启动时先读完整快照再叠加增量快照；两个文件配套使用，备份时一并包含，不要单独删除或替换其中一个。停止服务时程序会先写完告警归档、原始日志与快照再退出，`docker-compose.yml` 为此设置了 60 秒的 `stop_grace_period`（Docker 默认只等 10 秒）；用其他方式运行时也请留出同样的时间。需要长期留存和更高可靠性时启用 PostgreSQL 告警归档和原始日志留存。
 - **升级、重启期间的文件日志**：文件数据源记下读到的位置（状态目录中的 `ingest-offsets.json`），重新启动后从这里继续读，停机期间写入的日志不再漏掉。文件在停机期间被轮转时从头读取新文件；需要补读的内容超过 1GB 时只读最新的 1GB 并在日志中说明。进程被强制结束时，最后几秒读到的日志可能重复处理（告警归档按内容去重），不会漏掉。Syslog 发送端建议开启本地队列与重传（rsyslog 的 `action.resumeRetryCount`、`queue.type`），覆盖重启的几秒钟。
 
 ## 主备（温备机）

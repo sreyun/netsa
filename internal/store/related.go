@@ -262,10 +262,13 @@ func (s *Store) correlate(p *IPProfile) *Correlation {
 	return res
 }
 
+// listChunk 是分批扫描画像时每批的数量：每批持读锁约 1~3ms。
+const listChunk = 1024
+
 // chunked 分批在读锁内对画像执行 fn。
 func (s *Store) chunked(list []*IPProfile, fn func(o *IPProfile)) {
-	for i := 0; i < len(list); i += scanChunk {
-		end := min(i+scanChunk, len(list))
+	for i := 0; i < len(list); i += listChunk {
+		end := min(i+listChunk, len(list))
 		s.mu.RLock()
 		for _, o := range list[i:end] {
 			fn(o)

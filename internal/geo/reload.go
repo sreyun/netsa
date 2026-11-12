@@ -1,6 +1,8 @@
 package geo
 
 import (
+	"bytes"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/netip"
@@ -113,6 +115,19 @@ func (r *Resolver) Relocate(ip string, old *Info) *Info {
 	e.info = r.merge(ip, e)
 	r.cache[ip] = e
 	return e.info
+}
+
+// SameContent 判断两个定位结果保存下来的内容是否相同（不比较更新时间）。重新定位总是返回新的对象，
+// 内容没有变化时不必把画像写进下一份增量快照。
+func SameContent(a, b *Info) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	x, y := *a, *b
+	x.UpdatedAt, y.UpdatedAt = time.Time{}, time.Time{}
+	bx, err1 := json.Marshal(&x)
+	by, err2 := json.Marshal(&y)
+	return err1 == nil && err2 == nil && bytes.Equal(bx, by)
 }
 
 // SameLocation 判断两次定位结果在展示层面是否一致。

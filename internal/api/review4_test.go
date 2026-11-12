@@ -176,7 +176,7 @@ func TestStandbyBackupAudit(t *testing.T) {
 		t.Fatal("普通下载照常审计")
 	}
 	m := do(h, http.MethodGet, "/metrics", "", admin).Body.String()
-	for _, want := range []string{"netsa_standby_pull_timestamp_seconds", "netsa_store_lock_wait_max_seconds", "netsa_store_lock_acquisitions_total"} {
+	for _, want := range []string{"netsa_standby_pull_timestamp_seconds", "netsa_store_lock_wait_max_seconds", "netsa_store_lock_acquisitions_total", `netsa_store_lock_slow_waits_total{over="50ms"}`, `netsa_snapshot_save_seconds{kind="delta"}`, "netsa_snapshot_dirty_profiles"} {
 		if !strings.Contains(m, want) {
 			t.Errorf("指标缺少 %s", want)
 		}

@@ -8,12 +8,15 @@ name: netsa
 services:
   netsa:
     # 默认跟随最新发布版本；生产环境建议在 .env 中固定版本，例如
-    #   NETSA_IMAGE=swr.cn-east-3.myhuaweicloud.com/sreyun/netsa:1.13.0
+    #   NETSA_IMAGE=swr.cn-east-3.myhuaweicloud.com/sreyun/netsa:1.14.0
     # 内网环境可改为私有仓库地址；从源码构建的镜像同样通过该变量指定（见 docs/deployment.md「从源码构建镜像」）
     image: ${NETSA_IMAGE:-swr.cn-east-3.myhuaweicloud.com/sreyun/netsa:latest}
     container_name: netsa
     restart: unless-stopped
     command: ["serve", "-c", "/app/configs/docker.yaml"]
+    # 停止时先写完告警归档、原始日志与快照再退出（各有超时，合计可能超过 30 秒）；Docker 默认只等 10 秒，
+    # 之后强制结束，最近一分钟的统计与读取断点会丢
+    stop_grace_period: 60s
     # 容器加固：去掉全部 Linux 能力、禁止提权、根文件系统只读，只有状态卷和 /tmp 可写。
     # 程序监听的端口都高于 1024，不需要任何能力。需要写其他目录时请挂载卷，不要去掉 read_only。
     cap_drop: ["ALL"]

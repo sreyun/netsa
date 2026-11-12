@@ -116,6 +116,16 @@ func (s *Server) metrics(w http.ResponseWriter, r *http.Request) {
 	p.metric("netsa_store_lock_wait_seconds_total", "counter", "状态库写锁的累计等待时间（秒）", ls.WaitTotal.Seconds())
 	p.metric("netsa_store_lock_wait_max_seconds", "gauge", "最近两个维护周期内单次等待写锁的最长时间（秒）", ls.WaitMax.Seconds())
 	p.metric("netsa_store_lock_hold_max_seconds", "gauge", "最近两个维护周期内单次持有写锁的最长时间（秒）", ls.HoldMax.Seconds())
+	p.metric("netsa_store_lock_slow_waits_total", "counter", "等待写锁超过阈值的次数", float64(ls.WaitOver5), "over", "5ms")
+	p.metric("netsa_store_lock_slow_waits_total", "counter", "等待写锁超过阈值的次数", float64(ls.WaitOver50), "over", "50ms")
+	// 快照：完整快照每 15 分钟一次，其余时候只写改动过的画像（增量快照）
+	ss := s.Store.SaveStats()
+	p.metric("netsa_snapshot_save_seconds", "gauge", "最近一次保存快照的耗时（秒）", ss.Full.Seconds(), "kind", "full")
+	p.metric("netsa_snapshot_save_seconds", "gauge", "最近一次保存快照的耗时（秒）", ss.Delta.Seconds(), "kind", "delta")
+	if !ss.FullAt.IsZero() {
+		p.metric("netsa_snapshot_full_timestamp_seconds", "gauge", "磁盘上完整快照的保存时间（Unix 秒）", float64(ss.FullAt.Unix()))
+	}
+	p.metric("netsa_snapshot_dirty_profiles", "gauge", "完整快照之后改动过的攻击源画像数（增量快照的规模）", float64(ss.Dirty))
 
 	// 同名同类型的数据源合并为一条序列：默认配置里 ssh 有两个候选路径（/var/log/auth.log 与 /var/log/secure），
 	// 各输出一条的话标签完全相同，采集端会报重复序列。行数相加，任一路径在跟踪即视为正常运行。
