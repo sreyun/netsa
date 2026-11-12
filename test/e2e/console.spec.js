@@ -211,6 +211,8 @@ test('规则运营：添加规则后立即命中；改为影子运行后只统�
   await page.click('#ruleAdd');
   await expect(page.locator('#ruleTable')).toContainText('e2e-rule');
   page.off('dialog', onDialog);
+  // 按钮文字只看这条规则（“改为影子运行”本身含有“影子运行”，不能用整张表的文字判断状态）
+  await expect(page.locator('[data-rule-shadow="e2e-rule"]')).toHaveText('改为影子运行');
   await expect(page.locator('#ruleTable')).toContainText('生效');
   await sendLogs([logLine('203.0.113.60', 'GET', '/e2e-unique-marker', 404, 100, 'Mozilla/5.0', 'app.test')]);
   await expect.poll(async () => {
@@ -224,7 +226,13 @@ test('规则运营：添加规则后立即命中；改为影子运行后只统�
   const accept = (d) => d.accept();
   page.on('dialog', accept);
   await page.locator('[data-rule-shadow="e2e-rule"]').click();
-  await expect(page.locator('#ruleTable')).toContainText('影子运行');
+  // 等切换真正完成再写日志：表格在保存成功后才重新渲染；接口在与换用新引擎相同的锁内读取规则状态
+  await expect(page.locator('[data-rule-shadow="e2e-rule"]')).toHaveText('转为正式');
+  await expect(page.locator('#ruleTable')).toContainText('影子运行 ·');
+  await expect.poll(async () => {
+    const r = await page.request.get('/api/rules/managed');
+    return ((await r.json()).rules || []).find((x) => x.id === 'e2e-rule')?.shadow;
+  }, { timeout: 15_000 }).toBe(true);
   page.off('dialog', accept);
   await sendLogs([logLine('203.0.113.61', 'GET', '/e2e-unique-marker', 404, 100, 'Mozilla/5.0', 'app.test')]);
   await expect.poll(async () => {
