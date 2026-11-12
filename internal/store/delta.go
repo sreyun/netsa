@@ -33,7 +33,8 @@ func (s *Store) markDirty(p *IPProfile) {
 
 // deltaDue 判断这次可以只保存增量快照（调用方持 saveMu）。
 func (s *Store) deltaDue(path string) bool {
-	if s.baseID == "" || s.basePath != path || time.Since(s.baseAt) >= fullEvery {
+	// 系统时钟回拨时 age 为负，同样保存完整快照，否则可能很久都不再完整保存
+	if age := time.Since(s.baseAt); s.baseID == "" || s.basePath != path || age < 0 || age >= fullEvery {
 		return false
 	}
 	if _, err := os.Stat(path); err != nil { // 完整快照被删除或移走
@@ -63,7 +64,9 @@ func (s *Store) restoreDirty(list []*IPProfile, removed map[string]struct{}) {
 	s.mu.Lock()
 	defer s.mu.unlockClean()
 	for _, p := range list {
-		s.markDirty(p)
+		if s.ips[p.IP] == p { // 期间被淘汰的已记在淘汰名单里；不放回，否则保存一直失败时它们无法释放
+			s.markDirty(p)
+		}
 	}
 	for ip := range removed {
 		s.removedIPs[ip] = struct{}{}

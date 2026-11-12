@@ -514,11 +514,13 @@ func (s *Store) Incidents(q IncidentQuery) ([]IncidentView, int, IncidentCounts)
 		list = list[:q.Limit]
 	}
 	out := make([]IncidentView, len(list))
-	s.mu.RLock()
-	for k, c := range list {
-		out[k] = c.i.view(now)
+	for c := 0; c < len(list); c += incidentChunk / 8 { // 不分页（导出）时也分批生成，每个事件要复制几张表
+		s.mu.RLock()
+		for k := c; k < min(c+incidentChunk/8, len(list)); k++ {
+			out[k] = list[k].i.view(now)
+		}
+		s.mu.RUnlock()
 	}
-	s.mu.RUnlock()
 	return out, total, counts
 }
 

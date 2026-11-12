@@ -409,16 +409,20 @@ func (s *Store) Record(ev *model.Event, hits []model.Hit) RecordResult {
 // 期间所有查询都要等待；分成小段，每段持锁约 1ms，段间查询可以插入。
 const recordChunk = 32
 
+// recordRange 在一次写锁内记录 evs[from:to]（解锁放在 defer 中：异常保护之外的意外也不会让锁一直被占着）。
+func (s *Store) recordRange(evs []*model.Event, hits [][]model.Hit, out []RecordResult, from, to int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for j := from; j < to; j++ {
+		out[j] = s.safeRecord(evs[j], hits[j])
+	}
+}
+
 // RecordBatch 记录一批事件（每 recordChunk 条持一次写锁），hits[i] 对应 evs[i]。
 func (s *Store) RecordBatch(evs []*model.Event, hits [][]model.Hit) []RecordResult {
 	out := make([]RecordResult, len(evs))
 	for i := 0; i < len(evs); i += recordChunk {
-		end := min(i+recordChunk, len(evs))
-		s.mu.Lock()
-		for j := i; j < end; j++ {
-			out[j] = s.safeRecord(evs[j], hits[j])
-		}
-		s.mu.Unlock()
+		s.recordRange(evs, hits, out, i, min(i+recordChunk, len(evs)))
 	}
 	return out
 }

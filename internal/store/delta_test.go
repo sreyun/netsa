@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"sync"
 	"testing"
 	"time"
 
@@ -407,5 +408,157 @@ func TestDeltaNoTrackingWithoutSnapshot(t *testing.T) {
 	s.Record(deltaEvent("10.8.0.1", now.Add(time.Minute), 1))
 	if len(s.dirtyList) != 1 {
 		t.Fatalf("保存快照之后应开始记录改动: %d", len(s.dirtyList))
+	}
+}
+
+// 完整快照的标识写在最前面，只读开头即可取得；增量快照与旧布局（标识不在最前面）取不到。
+// 旧布局的完整快照仍能叠加标识匹配的增量快照（按画像解析后核对）。
+func TestPeekSnapshotID(t *testing.T) {
+	for _, name := range []string{"state.json.gz", "state.json"} {
+		path := filepath.Join(t.TempDir(), name)
+		s := newTestStore()
+		now := time.Now().Add(-time.Hour)
+		for i := 1; i <= 10; i++ {
+			s.Record(deltaEvent(fmt.Sprintf("203.0.113.%d", i), now, i))
+		}
+		if err := s.Save(path); err != nil {
+			t.Fatal(err)
+		}
+		if got := peekSnapshotID(path); got == "" || got != s.baseID {
+			t.Fatalf("%s: 应读到完整快照的标识 %q，实际 %q", name, s.baseID, got)
+		}
+		s.Record(deltaEvent("203.0.113.1", now.Add(time.Minute), 1))
+		if err := s.Save(path); err != nil {
+			t.Fatal(err)
+		}
+		if got := peekSnapshotID(deltaPath(path)); got != "" {
+			t.Fatalf("增量快照没有完整快照标识: %q", got)
+		}
+		// 改写成标识不在最前面的布局（按键名排序重新编码）
+		m := readSnapJSON(t, path)
+		b, _ := json.Marshal(m)
+		os.WriteFile(path, b, 0o600)
+		if got := peekSnapshotID(path); got != "" {
+			t.Fatalf("标识不在最前面时应取不到: %q", got)
+		}
+		r := newTestStore()
+		if err := r.Load(path); err != nil {
+			t.Fatal(err)
+		}
+		sameProfiles(t, s, r)
+		if len(r.dirtyList) != 1 {
+			t.Fatalf("旧布局的完整快照也应叠加匹配的增量快照: %d", len(r.dirtyList))
+		}
+	}
+}
+
+// 完整保存失败时，期间被淘汰的画像不放回改动记录（它们已在淘汰名单中）。
+func TestRestoreDirtySkipsEvicted(t *testing.T) {
+	s := New(1000, 100, 5, time.Hour)
+	if err := s.Save(filepath.Join(t.TempDir(), "s.json")); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().Add(-time.Hour)
+	s.Record(deltaEvent("10.7.0.1", now, 1))
+	s.Record(deltaEvent("10.7.0.2", now, 2))
+	list, removed := s.takeDirty()
+	s.mu.Lock()
+	gone := s.ips["10.7.0.1"]
+	delete(s.ips, gone.IP)
+	s.listRemove(gone)
+	s.removedIPs[gone.IP] = struct{}{}
+	s.mu.Unlock()
+	s.restoreDirty(list, removed)
+	if len(s.dirtyList) != 1 || s.dirtyList[0].IP != "10.7.0.2" {
+		t.Fatalf("只应放回仍在的画像: %d", len(s.dirtyList))
+	}
+	if _, ok := s.removedIPs["10.7.0.1"]; !ok {
+		t.Fatal("淘汰记录应保留")
+	}
+}
+
+// 入库、淘汰、完整 / 增量保存并发进行：停止写入后再保存一次，恢复结果与内存一致（race 检测下同样运行）。
+func TestDeltaConcurrentSaves(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.json.gz")
+	s := New(300, 100, 5, time.Hour)
+	now := time.Now().Add(-time.Hour)
+	rounds := 3000
+	if testing.Short() {
+		rounds = 800
+	}
+	done := make(chan struct{})
+	var writers sync.WaitGroup
+	writers.Add(1)
+	go func() {
+		defer writers.Done()
+		for k := 0; k < rounds; k++ {
+			ev, h := deltaEvent(fmt.Sprintf("10.6.%d.%d", k%1000/256, k%1000%256), now.Add(time.Duration(k)*time.Second), k)
+			s.RecordBatch([]*model.Event{ev}, [][]model.Hit{h})
+			if k%97 == 0 {
+				s.Maintain()
+			}
+			if k%131 == 0 {
+				s.Tag(ev.SrcIP, "t", "x")
+			}
+		}
+	}()
+	var savers sync.WaitGroup
+	savers.Add(1)
+	go func() {
+		defer savers.Done()
+		for i := 0; ; i++ {
+			select {
+			case <-done:
+				return
+			default:
+			}
+			if i%4 == 0 {
+				s.saveMu.Lock()
+				s.baseAt = time.Time{} // 强制完整保存
+				s.saveMu.Unlock()
+			}
+			if err := s.Save(path); err != nil {
+				t.Error(err)
+				return
+			}
+			s.Overview()
+			s.Attackers(AttackerQuery{Limit: 10})
+		}
+	}()
+	writers.Wait()
+	close(done)
+	savers.Wait()
+	s.mu.gen.Add(1)
+	if err := s.Save(path); err != nil {
+		t.Fatal(err)
+	}
+	checkList(t, s)
+	r := New(300, 100, 5, time.Hour)
+	if err := r.Load(path); err != nil {
+		t.Fatal(err)
+	}
+	sameProfiles(t, s, r)
+	checkList(t, r)
+}
+
+// 系统时钟回拨（完整快照的时间在未来）时保存完整快照，不会长期只写增量快照。
+func TestDeltaClockBackwards(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.json")
+	s := newTestStore()
+	now := time.Now().Add(-time.Hour)
+	for i := 1; i <= 10; i++ {
+		s.Record(deltaEvent(fmt.Sprintf("203.0.113.%d", i), now, i))
+	}
+	if err := s.Save(path); err != nil {
+		t.Fatal(err)
+	}
+	id := s.baseID
+	s.baseAt = time.Now().Add(24 * time.Hour)
+	s.Record(deltaEvent("203.0.113.1", now.Add(time.Minute), 1))
+	if err := s.Save(path); err != nil {
+		t.Fatal(err)
+	}
+	if s.baseID == id {
+		t.Fatal("完整快照的时间在未来时应保存完整快照")
 	}
 }

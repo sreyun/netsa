@@ -28,6 +28,7 @@ var ErrSnapshotTooNew = errors.New("快照由更新版本的程序写入，当�
 
 // snapshotMeta 是快照头部中规模有上限、在一次读锁内编码即可的部分。
 type snapshotMeta struct {
+	ID         string                `json:"id,omitempty"` // 完整快照的标识，写在最前面：恢复时只读开头就能判断增量快照是否属于它
 	Version    int                   `json:"version"`
 	SavedAt    time.Time             `json:"saved_at"`
 	NextID     uint64                `json:"next_id"`
@@ -46,7 +47,6 @@ type snapshotMeta struct {
 	MaxTime    time.Time             `json:"max_time"`
 	Scores     []ScorePoint          `json:"score_history,omitempty"`
 	NextInc    uint64                `json:"next_incident,omitempty"`
-	ID         string                `json:"id,omitempty"`         // 完整快照的标识
 	DeltaBase  string                `json:"delta_base,omitempty"` // 增量快照所基于的完整快照标识
 }
 
@@ -476,6 +476,13 @@ func (s *Store) Load(path string) error {
 	if err != nil {
 		log.Printf("[store] 忽略增量快照: %v", err)
 	}
+	// 完整保存之后留下的旧增量快照（标识不符）直接按完整快照恢复，不必先按画像解析一遍再整份重读；
+	// 读不到开头的标识（1.14.0 写入的快照标识不在最前面）时按画像解析后再核对
+	if d != nil && d.DeltaBase != "" {
+		if id := peekSnapshotID(path); id != "" && id != d.DeltaBase {
+			d = nil
+		}
+	}
 	if d != nil && d.DeltaBase != "" {
 		var base snapshotProfiles
 		if ok, err := decodeSnapshotFile(path, &base); err != nil {
@@ -544,6 +551,38 @@ type snapshotProfiles struct {
 	SavedAt  time.Time             `json:"saved_at"`
 	ID       string                `json:"id"`
 	Profiles map[string]*IPProfile `json:"profiles"`
+}
+
+// peekSnapshotID 读取完整快照开头的标识（只解压、解析开头几十个字节）；标识不在最前面或读取失败时返回空。
+func peekSnapshotID(path string) string {
+	f, err := os.Open(path)
+	if err != nil {
+		return ""
+	}
+	defer f.Close()
+	br := bufio.NewReaderSize(f, 4096)
+	var r io.Reader = br
+	if magic, _ := br.Peek(2); len(magic) == 2 && magic[0] == 0x1f && magic[1] == 0x8b {
+		gz, err := gzip.NewReader(br)
+		if err != nil {
+			return ""
+		}
+		defer gz.Close()
+		r = gz
+	}
+	dec := json.NewDecoder(r)
+	if t, err := dec.Token(); err != nil || t != json.Delim('{') {
+		return ""
+	}
+	if t, err := dec.Token(); err != nil || t != "id" {
+		return ""
+	}
+	t, err := dec.Token()
+	if err != nil {
+		return ""
+	}
+	id, _ := t.(string)
+	return id
 }
 
 // decodeSnapshotFile 解析快照文件到 v，文件不存在时 ok 为 false。文件损坏时先改名备份再返回错误。
