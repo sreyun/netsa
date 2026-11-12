@@ -62,11 +62,14 @@ type source struct {
 	lastError string
 	sample    string
 
-	batch    []*model.Event // 仅由该数据源的读取协程（或 syslog 汇聚协程）访问
-	live     atomic.Bool    // 已追上文件末尾，之后读到的都是实时写入的日志
-	tf       timeFix        // 时区偏差自动校正
-	offsetFn func() string  // 非空时用于展示时区校正情况（syslog 汇总多个发送端）
-	detectFn func() string  // 非空时用于展示识别出的格式（syslog 汇总多个发送端）
+	batch []*model.Event // 仅由该数据源的读取协程（或 syslog 汇聚协程）访问
+	// 文件数据源的读取断点（tracker.go）：track 记录每批送出后的读取位置，pos 返回当前位置（只在读取协程中调用）
+	track    *offsetTracker
+	pos      func() (checkpoint, bool)
+	live     atomic.Bool   // 已追上文件末尾，之后读到的都是实时写入的日志
+	tf       timeFix       // 时区偏差自动校正
+	offsetFn func() string // 非空时用于展示时区校正情况（syslog 汇总多个发送端）
+	detectFn func() string // 非空时用于展示识别出的格式（syslog 汇总多个发送端）
 }
 
 func (s *source) setStatus(status, errMsg string) {
@@ -107,11 +110,14 @@ type Manager struct {
 	DefaultSilence time.Duration
 	// Checkpoints 保存文件数据源的读取断点（checkpoint.go）：重启后从上次读到的位置继续，为空时按原来的规则从末尾开始
 	Checkpoints *Checkpoints
-	mu          sync.Mutex
-	sources     []*source
-	smu         sync.Mutex
-	silence     map[string]*silenceState
-	wg          sync.WaitGroup
+	// batches 是文件数据源送入处理队列、还没处理完的批次（以第一条事件标识，tracker.go）：读取断点只越过处理完的日志
+	tmu     sync.Mutex
+	batches map[*model.Event]batchRef
+	mu      sync.Mutex
+	sources []*source
+	smu     sync.Mutex
+	silence map[string]*silenceState
+	wg      sync.WaitGroup
 	// 测试中缩短文件被删除后的处理时限（零值使用 rotateGrace / fileGoneAfter）
 	goneGrace, goneAfter time.Duration
 }
@@ -267,9 +273,12 @@ func (m *Manager) flush(ctx context.Context, s *source) {
 	if len(s.batch) == 0 {
 		return
 	}
+	first := s.batch[0]
+	m.trackBatch(s, first)
 	select {
 	case m.Out <- s.batch:
 	case <-ctx.Done():
+		m.untrackBatch(first) // 没有送出：不算处理完，断点停在它之前
 	}
 	s.batch = make([]*model.Event, 0, BatchSize)
 }
@@ -471,20 +480,28 @@ func (m *Manager) tail(ctx context.Context, s *source, path string, fromStart bo
 			old = nil
 		}
 	}
-	// 断点：日志送入处理队列之后才前移（ctx 已结束时这一批可能没有送出，不前移）
+	// 断点：停在已读完整行的末尾（不含还没写完的半行）。每批送出时记下当时的位置，处理流水线报告处理完后才生效
+	// （tracker.go）；读到末尾时没有新批次，也记下当前位置（跳过、无法解析的行同样算读过）
 	var prefix string
 	var prefixGot int
-	mark := func() {
-		if m.Checkpoints == nil || f == nil || ctx.Err() != nil {
-			return
-		}
-		if prefixGot < prefixLen && fi != nil {
-			if st, err := f.Stat(); err == nil && st.Size() > int64(prefixGot) {
-				prefix, prefixGot = filePrefix(f, prefixLen)
+	if m.Checkpoints != nil {
+		s.track = &offsetTracker{path: path, cps: m.Checkpoints}
+		s.pos = func() (checkpoint, bool) {
+			if f == nil || lr == nil {
+				return checkpoint{}, false
 			}
+			if prefixGot < prefixLen && fi != nil {
+				if st, err := f.Stat(); err == nil && st.Size() > int64(prefixGot) {
+					prefix, prefixGot = filePrefix(f, prefixLen)
+				}
+			}
+			pos := offset - lr.partialBytes()
+			return checkpoint{Offset: pos, PrefixLen: prefixGot, Prefix: prefix}, prefixGot > 0 && pos >= 0
 		}
-		if prefixGot > 0 {
-			m.Checkpoints.set(path, checkpoint{Offset: offset, PrefixLen: prefixGot, Prefix: prefix})
+	}
+	mark := func() {
+		if s.track != nil && ctx.Err() == nil {
+			s.track.idle(s.pos())
 		}
 	}
 	idle := 250 * time.Millisecond
@@ -520,10 +537,13 @@ func (m *Manager) tail(ctx context.Context, s *source, path string, fromStart bo
 			if first {
 				resumed := false
 				if cp, ok := m.Checkpoints.get(path); ok && fi != nil {
-					if pos, why := resumeAt(f, fi.Size(), cp); why != "" {
+					pos, why, use := resumeAt(f, fi.Size(), cp)
+					if use {
 						offset, _ = f.Seek(pos, io.SeekStart)
 						resumed, skipPartial = true, pos > 0 && pos != cp.Offset
 						log.Printf("[ingest] %s: %s（%d 字节待读）", path, why, fi.Size()-pos)
+					} else if why != "" {
+						log.Printf("[ingest] %s: %s", path, why)
 					}
 				}
 				if !resumed && !fromStart {

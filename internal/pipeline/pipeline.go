@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 	"unicode/utf8"
 
 	"netsa/internal/alert"
@@ -56,6 +57,11 @@ type Pipeline struct {
 	Exposure          *exposure.Manager  // 对外发布服务清单（DNAT 映射，可为空）
 	Learn             *learn.Learner     // 自学习：按研判准确率校准规则等级（可为空）
 	Intel             *intel.DB          // 威胁情报：DNS 查询与域名情报比对（可为空）
+	// BatchDone 在一批事件处理完（入库、告警）之后调用，参数是这一批的第一条事件（可为空）：文件数据源据此让读取断点生效，
+	// 断点不会越过还在队列中、退出时可能被丢弃的日志
+	BatchDone func(first *model.Event)
+	// Drain 是退出（ctx 结束）后继续处理队列中已有日志的最长时间；0 表示立即停止（离线分析按 Ctrl+C 时）
+	Drain time.Duration
 
 	whitelist []netip.Prefix
 	processed atomic.Int64
@@ -112,25 +118,50 @@ func (p *Pipeline) Run(ctx context.Context, in <-chan []*model.Event, workers in
 		workers = runtime.NumCPU()
 	}
 	agg := make(chan []item, workers*4)
+	// 退出时的排空期限：从第一次发现 ctx 结束开始计算
+	var drainOnce sync.Once
+	var drainUntil time.Time
+	draining := func() bool {
+		if p.Drain <= 0 {
+			return false
+		}
+		drainOnce.Do(func() { drainUntil = time.Now().Add(p.Drain) })
+		return time.Now().Before(drainUntil)
+	}
+	// recv 取下一批事件；ctx 结束后只取队列中已有的（排空期限内），队列空了就结束
+	recv := func() ([]*model.Event, bool) {
+		select {
+		case b, ok := <-in:
+			return b, ok
+		case <-ctx.Done():
+		}
+		if !draining() {
+			return nil, false
+		}
+		select {
+		case b, ok := <-in:
+			return b, ok
+		default:
+			return nil, false
+		}
+	}
 	var wg sync.WaitGroup
 	for i := 0; i < workers; i++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
 			for {
-				var batch []*model.Event
-				select {
-				case b, ok := <-in:
-					if !ok {
-						return
-					}
-					batch = b
-				case <-ctx.Done():
+				batch, ok := recv()
+				if !ok {
 					return
 				}
 				items := make([]item, len(batch))
 				for j, ev := range batch {
 					items[j] = p.safeInspect(ev)
+				}
+				if p.Drain > 0 { // 汇总协程一直处理到 agg 关闭，阻塞发送不会卡死；已检测的一批不丢弃
+					agg <- items
+					continue
 				}
 				select {
 				case agg <- items:
@@ -149,6 +180,9 @@ func (p *Pipeline) Run(ctx context.Context, in <-chan []*model.Event, workers in
 		defer close(done)
 		for items := range agg {
 			p.safeAggregate(items)
+			if p.BatchDone != nil && len(items) > 0 {
+				p.BatchDone(items[0].ev)
+			}
 		}
 	}()
 	return done

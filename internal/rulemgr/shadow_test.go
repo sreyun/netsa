@@ -1,6 +1,8 @@
 package rulemgr
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
 
 	"netsa/internal/detect"
@@ -76,5 +78,46 @@ level: high
 	}
 	if hits(m.Engine(), "/x.php?cmd=whoami")[res.Rules[0].ID] || m.Shadow()[res.Rules[0].ID].Hits != 1 {
 		t.Fatal("导入的影子规则只记录命中")
+	}
+}
+
+// 影子统计跟随实际生效的规则：Sigma 重新导入、规则包升级等改了匹配条件同样清零，条件不变则保留；
+// rules_file 中的影子规则不会因为托管规则变更而丢失统计。
+func TestShadowSyncOnCommit(t *testing.T) {
+	dir := t.TempDir()
+	rulesFile := filepath.Join(dir, "rules.yaml")
+	if err := os.WriteFile(rulesFile, []byte("rules:\n  - id: file-shadow\n    name: 文件中的影子规则\n    severity: high\n    pattern: file-shadow-marker\n    shadow: true\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	m, err := New(Options{Path: filepath.Join(dir, "rules.json"), RulesFile: rulesFile, MinBytes: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	hits(m.Engine(), "/file-shadow-marker")
+	if m.Shadow()["file-shadow"].Hits != 1 {
+		t.Fatalf("rules_file 中的影子规则应记录命中: %v", m.Shadow())
+	}
+	sigma := []detect.Rule{{ID: "sig-1", Name: "Sigma", Pattern: "sigma-old", Shadow: true}}
+	if _, err := m.ImportRules(sigma, "sigma", "root"); err != nil {
+		t.Fatal(err)
+	}
+	hits(m.Engine(), "/sigma-old")
+	if m.Shadow()["sig-1"].Hits != 1 || m.Shadow()["file-shadow"].Hits != 1 {
+		t.Fatalf("托管规则变更不应清掉 rules_file 影子规则的统计: %v", m.Shadow())
+	}
+	// 重新导入、条件不变：保留
+	if _, err := m.ImportRules(sigma, "sigma", "root"); err != nil {
+		t.Fatal(err)
+	}
+	if m.Shadow()["sig-1"].Hits != 1 {
+		t.Fatal("条件不变的重新导入不应清零")
+	}
+	// 重新导入、条件改变：清零
+	sigma[0].Pattern = "sigma-new"
+	if _, err := m.ImportRules(sigma, "sigma", "root"); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := m.Shadow()["sig-1"]; ok {
+		t.Fatal("重新导入改变了匹配条件，此前的影子统计应清零")
 	}
 }

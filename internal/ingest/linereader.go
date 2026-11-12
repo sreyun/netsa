@@ -14,6 +14,7 @@ const MaxLineBytes = 1 << 20
 type lineReader struct {
 	r       *bufio.Reader
 	pending []byte
+	partial int // 末尾未以换行结束的内容已消耗的原始字节数（超长行截断前的长度）
 }
 
 func newLineReader(r io.Reader) *lineReader {
@@ -26,6 +27,7 @@ func (lr *lineReader) next() (line string, n int, ok bool, err error) {
 	for {
 		chunk, err := lr.r.ReadSlice('\n')
 		n += len(chunk)
+		lr.partial += len(chunk)
 		if room := MaxLineBytes - len(lr.pending); room > 0 {
 			if len(chunk) > room {
 				chunk = chunk[:room]
@@ -61,7 +63,12 @@ func (lr *lineReader) reset(r io.Reader) {
 	lr.clear()
 }
 
+// partialBytes 返回已消耗、但还没有组成完整一行的字节数：读取断点要退回到这一行的开头，
+// 否则重启后从半行中间开始读，这一行被拆成一条无法解析的残行。
+func (lr *lineReader) partialBytes() int64 { return int64(lr.partial) }
+
 func (lr *lineReader) clear() {
+	lr.partial = 0
 	if cap(lr.pending) > 64*1024 {
 		lr.pending = nil // 释放偶发超长行占用的大缓冲区
 		return

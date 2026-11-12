@@ -286,6 +286,11 @@ func (s *Server) adminBackup(w http.ResponseWriter, r *http.Request) {
 		}
 		due := time.Since(s.standbyAudit[key]) >= time.Hour
 		if due {
+			for k, t := range s.standbyAudit { // 一小时前的记录已不再限制，清掉（令牌、来源地址变化时不累积）
+				if time.Since(t) >= time.Hour {
+					delete(s.standbyAudit, k)
+				}
+			}
 			s.standbyAudit[key] = time.Now()
 		}
 		s.standbyMu.Unlock()

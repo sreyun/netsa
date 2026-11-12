@@ -140,15 +140,6 @@ func (m *Manager) commitLocked(items []Item, packs []PackState) error {
 	if len(items) > maxRules {
 		return fmt.Errorf("托管规则最多 %d 条", maxRules)
 	}
-	defer func() {
-		var ids []string
-		for _, it := range m.st.Rules {
-			if it.Shadow {
-				ids = append(ids, it.ID)
-			}
-		}
-		m.shadow.Keep(ids) // 删除或转为正式的规则不再保留影子统计
-	}()
 	eng, err := m.build(items)
 	if err != nil {
 		return err
@@ -170,11 +161,36 @@ func (m *Manager) commitLocked(items []Item, packs []PackState) error {
 			return err
 		}
 	}
+	prev := m.st.Rules
 	m.st, m.eng = next, eng
+	m.syncShadow(prev, eng)
 	if m.opt.OnChange != nil {
 		m.opt.OnChange(eng)
 	}
 	return nil
+}
+
+// syncShadow 让影子运行统计跟上新生效的规则：只保留新引擎中仍是影子运行的规则（含 rules_file 中的），
+// 匹配条件变了的规则清零（页面修改、Sigma 重新导入、规则包升级都一样），此前的命中不再代表它的效果。
+func (m *Manager) syncShadow(prev []Item, eng *detect.Engine) {
+	var keep []string
+	for _, r := range eng.Rules() {
+		if r.Shadow {
+			keep = append(keep, r.ID)
+		}
+	}
+	m.shadow.Keep(keep)
+	old := make(map[string]detect.Rule, len(prev))
+	for _, it := range prev {
+		old[it.ID] = it.Rule
+	}
+	var reset []string
+	for _, it := range m.st.Rules {
+		if r, ok := old[it.ID]; ok && !sameMatch(r, it.Rule) {
+			reset = append(reset, it.ID)
+		}
+	}
+	m.shadow.Reset(reset...)
 }
 
 func checkRule(r *detect.Rule) error {
@@ -216,13 +232,12 @@ func (m *Manager) Upsert(r detect.Rule, source, user string) (*Item, error) {
 	defer m.mu.Unlock()
 	items := append([]Item(nil), m.st.Rules...)
 	it := Item{Rule: r, Source: source, Updated: time.Now(), By: user}
-	found, changed := false, false
+	found := false
 	for i := range items {
 		if items[i].ID == r.ID {
 			if strings.HasPrefix(items[i].Source, "pack:") {
 				return nil, fmt.Errorf("规则 %s 来自规则包，请更新规则包", r.ID)
 			}
-			changed = !sameMatch(items[i].Rule, r)
 			items[i] = it
 			found = true
 		}
@@ -230,11 +245,8 @@ func (m *Manager) Upsert(r detect.Rule, source, user string) (*Item, error) {
 	if !found {
 		items = append(items, it)
 	}
-	if err := m.commitLocked(items, m.st.Packs); err != nil {
+	if err := m.commitLocked(items, m.st.Packs); err != nil { // 匹配条件变了时影子统计清零（syncShadow）
 		return nil, err
-	}
-	if changed {
-		m.shadow.Reset(r.ID) // 匹配条件变了：此前的影子命中不再代表这条规则的效果
 	}
 	return &it, nil
 }

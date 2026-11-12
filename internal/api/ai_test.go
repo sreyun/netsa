@@ -191,7 +191,7 @@ func TestTriageUsesLearnedHistory(t *testing.T) {
 	if rec := do(h, http.MethodPost, "/api/incidents/2/ai", "", nil); rec.Code != 200 {
 		t.Fatalf("研判: %d %s", rec.Code, rec.Body.String())
 	}
-	if !strings.Contains(sent, "同规则同目标历史研判：sqli-bool @ shop.example.com /api/search：确认攻击 0 次、误报 1 次") {
+	if !strings.Contains(sent, "同规则同目标历史研判：sqli-bool @ ⟦shop.example.com /api/search⟧：确认攻击 0 次、误报 1 次") {
 		t.Fatalf("研判应附带历史人工结论:\n%s", sent)
 	}
 	if a := s.Learn.Report().AI; len(a) != 1 || a[0].Pending != 1 || s.Learn.Report().Cases != 1 {

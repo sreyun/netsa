@@ -6,7 +6,7 @@
 
 | 镜像 | 用途 |
 |---|---|
-| `swr.cn-east-3.myhuaweicloud.com/sreyun/netsa:latest` | netsa 主程序（默认）；也可使用版本号标签，如 `:1.14.1` |
+| `swr.cn-east-3.myhuaweicloud.com/sreyun/netsa:latest` | netsa 主程序（默认）；也可使用版本号标签，如 `:1.14.2` |
 | `swr.cn-east-3.myhuaweicloud.com/sreyun/pgvector:pg18` | 可选的告警归档数据库（PostgreSQL 18），只在启用归档时拉取 |
 
 ## 生产部署（Docker Compose）
@@ -84,14 +84,14 @@ docker compose up -d
 
 ```bash
 # 联网机器：按服务器架构拉取（arm64 服务器用 --platform linux/arm64），不启用归档可不拉取 pgvector
-docker pull --platform linux/amd64 swr.cn-east-3.myhuaweicloud.com/sreyun/netsa:1.14.1
+docker pull --platform linux/amd64 swr.cn-east-3.myhuaweicloud.com/sreyun/netsa:1.14.2
 docker pull --platform linux/amd64 swr.cn-east-3.myhuaweicloud.com/sreyun/pgvector:pg18
-docker save -o netsa-images.tar swr.cn-east-3.myhuaweicloud.com/sreyun/netsa:1.14.1 \
+docker save -o netsa-images.tar swr.cn-east-3.myhuaweicloud.com/sreyun/netsa:1.14.2 \
   swr.cn-east-3.myhuaweicloud.com/sreyun/pgvector:pg18
 
 # 服务器：导入后直接启动（不要执行 docker compose pull），.env 中写入相同的镜像标签
 docker load -i netsa-images.tar
-echo 'NETSA_IMAGE=swr.cn-east-3.myhuaweicloud.com/sreyun/netsa:1.14.1' >> .env
+echo 'NETSA_IMAGE=swr.cn-east-3.myhuaweicloud.com/sreyun/netsa:1.14.2' >> .env
 docker compose up -d
 ```
 
@@ -130,7 +130,7 @@ docker compose start netsa
 
 - **处置记录**：分析员和模型对事件的每次修改都先写入预写日志并落盘，进程异常退出（断电、`kill -9`、内存不足）后重放，不会丢失。
 - **其他状态**：快照默认每分钟保存一次（`storage.interval`），上次保存之后没有任何变化时不重写；异常退出时最多丢失这段时间内新产生的告警和统计。完整快照每 15 分钟保存一次，其余时候只写增量快照（`<快照>.delta`，只包含改动过的攻击源画像），启动时先读完整快照再叠加增量快照；两个文件配套使用，备份时一并包含，不要单独删除或替换其中一个。停止服务时程序会先写完告警归档、原始日志与快照再退出，`docker-compose.yml` 为此设置了 60 秒的 `stop_grace_period`（Docker 默认只等 10 秒）；用其他方式运行时也请留出同样的时间。需要长期留存和更高可靠性时启用 PostgreSQL 告警归档和原始日志留存。
-- **升级、重启期间的文件日志**：文件数据源记下读到的位置（状态目录中的 `ingest-offsets.json`），重新启动后从这里继续读，停机期间写入的日志不再漏掉。文件在停机期间被轮转时从头读取新文件；需要补读的内容超过 1GB 时只读最新的 1GB 并在日志中说明。进程被强制结束时，最后几秒读到的日志可能重复处理（告警归档按内容去重），不会漏掉。Syslog 发送端建议开启本地队列与重传（rsyslog 的 `action.resumeRetryCount`、`queue.type`），覆盖重启的几秒钟。
+- **升级、重启期间的文件日志**：文件数据源记下读到的位置（状态目录中的 `ingest-offsets.json`），重新启动后从这里继续读，停机期间写入的日志不再漏掉。断点只越过已经处理完的日志，停在完整一行的末尾；停止服务时先处理完队列中已有的日志（最长 15 秒），没处理完的部分下次启动重新读取。文件在停机期间被轮转时从头读取新文件；需要补读的内容超过 1GB 时只读最新的 1GB 并在日志中说明。进程被强制结束时，最后几秒读到的日志可能重复处理（告警归档按内容去重），不会漏掉。Syslog 发送端建议开启本地队列与重传（rsyslog 的 `action.resumeRetryCount`、`queue.type`），覆盖重启的几秒钟。
 
 ## 主备（温备机）
 
@@ -151,6 +151,7 @@ docker compose start netsa
 - 自动接管后备机在本进程内启动 `serve`。原主机恢复后**不要直接以主机启动**：把它改为 `netsa standby` 指向新的主机，同步一次后再按需切回。
 - 备机同步在主机的审计中每个令牌每小时记一条“备机同步状态”；主机的指标 `netsa_standby_pull_timestamp_seconds` 给出最近一次同步的时间，超过几个同步间隔没有更新时应告警。
 - 原始日志不随状态同步：需要的话用存储层复制或在两台机器上都留存。
+- 文件日志的读取断点随状态同步，并标记为来自主机：主备读取的是同一个文件（共用存储）时，接管后从主机读到的位置继续；备机上同一路径的是另一个文件时按没有断点处理，从末尾开始读，不会把本机已有的日志当作新内容从头补读。
 
 ## 容器加固
 

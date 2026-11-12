@@ -154,3 +154,31 @@ func TestCreateFileAndRotate(t *testing.T) {
 		t.Fatalf("只保留最新的 2 个: %v", list)
 	}
 }
+
+// 增量快照紧挨着排在它的完整快照之前读取：两次读取之间恰好完整保存时，拿到的是旧增量快照（恢复时基准对不上被忽略）
+// 与新的完整快照，而不是旧的完整快照与对不上的新增量快照。
+func TestBackupOrderDeltaFirst(t *testing.T) {
+	src := t.TempDir()
+	writeState(t, src, map[string]string{"state.json": "base", "state.json.delta": "delta", "state.json.journal": "j", "ai.json": "{}", "users.json": "{}"})
+	var buf bytes.Buffer
+	if _, err := Create(&buf, src, Options{}); err != nil {
+		t.Fatal(err)
+	}
+	gz, err := gzip.NewReader(&buf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tr := tar.NewReader(gz)
+	var order []string
+	for {
+		hd, err := tr.Next()
+		if err != nil {
+			break
+		}
+		order = append(order, hd.Name)
+	}
+	want := []string{"ai.json", "state.json.delta", "state.json", "state.json.journal", "users.json", manifestName}
+	if strings.Join(order, ",") != strings.Join(want, ",") {
+		t.Fatalf("备份顺序: %v，应为 %v", order, want)
+	}
+}

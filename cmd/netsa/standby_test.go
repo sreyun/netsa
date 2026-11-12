@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"netsa/internal/backup"
+	"netsa/internal/ingest"
 )
 
 // 备机同步：带令牌下载主机的状态备份并恢复到本机状态目录；令牌错误时不改动本机状态；健康检查区分主机不可用。
@@ -66,6 +67,23 @@ func TestStandbySync(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(local, ".standby-download.tmp")); err == nil {
 		t.Fatal("下载的临时文件应删除")
+	}
+	// 读取断点：主机的断点同步过来后标记为来自主机（接管后只在读同一个文件时使用）；
+	// 主机没有断点文件时，删掉本机以前做主机时留下的过时断点
+	stale := filepath.Join(local, ingest.CheckpointFile)
+	os.WriteFile(stale, []byte(`{"/var/log/a.log":{"offset":5,"prefix_len":3,"prefix":"x"}}`), 0o600)
+	if _, err := standbySync(ctx, srv.Client(), srv.URL, "good", local); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(stale); !os.IsNotExist(err) {
+		t.Fatal("主机没有断点文件时应删除本机过时的断点")
+	}
+	os.WriteFile(filepath.Join(primary, ingest.CheckpointFile), []byte(`{"/var/log/a.log":{"offset":9,"prefix_len":3,"prefix":"y"}}`), 0o600)
+	if _, err := standbySync(ctx, srv.Client(), srv.URL, "good", local); err != nil {
+		t.Fatal(err)
+	}
+	if b, _ := os.ReadFile(stale); !strings.Contains(string(b), `"foreign": true`) || !strings.Contains(string(b), `"offset": 9`) {
+		t.Fatalf("同步来的断点应标记为来自主机: %s", b)
 	}
 	down.Store(true)
 	if standbyHealthy(ctx, srv.Client(), srv.URL) {

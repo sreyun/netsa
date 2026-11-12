@@ -24,6 +24,7 @@ import (
 	"reflect"
 	"sort"
 	"strings"
+	"sync"
 	"syscall"
 	"text/tabwriter"
 	"time"
@@ -66,7 +67,7 @@ import (
 
 // version 是构建版本号。默认值用于本地构建；镜像构建通过
 // -ldflags "-X main.version=<tag>" 注入，`netsa version` 与 /api/meta 都会显示注入后的值。
-var version = "1.14.1"
+var version = "1.14.2"
 
 func usage() {
 	fmt.Fprintf(os.Stderr, `netsa %s —— 网络安全态势感知与攻击面分析系统
@@ -328,10 +329,11 @@ func build(cfg *config.Config) (*app, error) {
 		return nil, err
 	}
 	a.ingest.AutoTime = cfg.TimeCorrection != "off"
-	// 文件数据源的读取断点：重启、升级期间写入的日志在重新启动后补读
-	if a.ingest.Checkpoints, err = ingest.LoadCheckpoints(dataFile(cfg, "", "ingest-offsets.json")); err != nil {
+	// 文件数据源的读取断点：重启、升级期间写入的日志在重新启动后补读；断点在日志处理完之后才生效
+	if a.ingest.Checkpoints, err = ingest.LoadCheckpoints(dataFile(cfg, "", ingest.CheckpointFile)); err != nil {
 		return nil, err
 	}
+	a.pipe.BatchDone = a.ingest.BatchDone
 	if dsn := archiveDSN(cfg); dsn != "" {
 		host, _ := os.Hostname()
 		ar, err := archive.Open(context.Background(), archive.Options{
@@ -545,6 +547,9 @@ func cmdServe(args []string) error {
 	a.intel.StartTor(ctx, cfg.Intel.TorExitURL)
 	a.intel.StartFeeds(ctx, cfg.Intel.Feeds, dataFile(cfg, "", "intel-feeds"))
 	a.forward.Start(ctx)
+	// 退出时先处理完队列中已有的日志（最长 shutdownDrain）：此前退出时直接丢弃队列，而读取断点已经越过了这些日志，
+	// 升级、重启时它们就永远丢失了
+	a.pipe.Drain = shutdownDrain
 	done := a.pipe.Run(ctx, a.ingest.Out, 0)
 
 	for _, src := range cfg.Sources {
@@ -616,15 +621,23 @@ func cmdServe(args []string) error {
 			}
 		case <-ctx.Done():
 			log.Printf("正在退出...")
+			drainBy := time.Now().Add(shutdownDrain + 3*time.Second)
 			shutdown, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			srv.Shutdown(shutdown)
 			cancel()
 			select {
 			case <-done:
-			case <-time.After(3 * time.Second):
+			case <-time.After(time.Until(drainBy)):
 			}
-			a.archive.Close(10 * time.Second) // 写完归档队列中剩余的告警
-			a.raw.Close(10 * time.Second)
+			if n := a.ingest.InFlight(); n > 0 {
+				log.Printf("[ingest] 退出时还有 %d 批日志没有处理完，读取断点停在它们之前，下次启动重新读取", n)
+			}
+			// 写完归档队列中剩余的告警与原始日志（两者互不依赖，同时进行，缩短停止服务的时间）
+			var closing sync.WaitGroup
+			closing.Add(2)
+			go func() { defer closing.Done(); a.archive.Close(10 * time.Second) }()
+			go func() { defer closing.Done(); a.raw.Close(10 * time.Second) }()
+			closing.Wait()
 			a.suppress.Flush()
 			a.authscan.Flush()
 			a.deception.Flush()
@@ -646,6 +659,10 @@ func cmdServe(args []string) error {
 		}
 	}
 }
+
+// shutdownDrain 是退出时继续处理队列中已有日志的最长时间。停止服务的总时长还包括归档与原始日志收尾（最长 10 秒）
+// 与保存快照，docker-compose.yml 的 stop_grace_period 为 60 秒。
+const shutdownDrain = 15 * time.Second
 
 // retryGeo 定期为还缺在线定位的攻击源与外连目标重新发起在线查询（启用在线库时）：
 // 查询失败（网络错误、接口限流）或当时没有结果的地址，此前只有等级再次提升才会重试。
@@ -1357,6 +1374,17 @@ func standbySync(ctx context.Context, client *http.Client, base, token, dir stri
 	m, err := backup.Restore(f, dir, true)
 	if err != nil {
 		return 0, err
+	}
+	// 读取断点是按文件记录的：主机的断点只在本机读的是同一个文件（共用存储）时才可用，标记为来自主机；
+	// 主机没有断点文件时删掉本机留下的（本机以前做主机时的断点已经过时，接管后会从很久以前的位置补读）
+	cp := filepath.Join(dir, ingest.CheckpointFile)
+	if _, ok := m.Files[ingest.CheckpointFile]; ok {
+		err = ingest.MarkForeign(cp)
+	} else if err = os.Remove(cp); errors.Is(err, os.ErrNotExist) {
+		err = nil
+	}
+	if err != nil {
+		return 0, fmt.Errorf("处理读取断点文件: %w", err)
 	}
 	return len(m.Files), nil
 }

@@ -52,10 +52,16 @@ func skip(rel string, raw bool) bool {
 }
 
 // Create 把状态目录写入 w。状态文件都是原子替换的，可以在服务运行时备份。
+//
+// 增量快照（<快照>.delta）先于它的完整快照读取：两次读取之间如果恰好做了一次完整保存，读到的是旧增量快照与
+// 新的完整快照，恢复时增量快照的基准对不上而被忽略，新的完整快照本身已包含全部内容；反过来的顺序会拿到
+// 旧的完整快照与新的增量快照，恢复时只剩旧的完整快照（最多丢掉 15 分钟的变化）。
 func Create(w io.Writer, dir string, opt Options) (*Manifest, error) {
 	gz := gzip.NewWriter(w)
 	tw := tar.NewWriter(gz)
 	m := &Manifest{Version: opt.Version, Created: time.Now(), RawLog: opt.RawLog, Files: map[string]string{}}
+	type entry struct{ p, rel string }
+	var list []entry
 	err := filepath.WalkDir(dir, func(p string, d fs.DirEntry, err error) error {
 		if err != nil {
 			if errors.Is(err, fs.ErrNotExist) { // 备份期间被轮转的文件
@@ -77,18 +83,22 @@ func Create(w io.Writer, dir string, opt Options) (*Manifest, error) {
 		if !d.Type().IsRegular() {
 			return nil
 		}
-		sum, err := addFile(tw, p, rel)
-		if errors.Is(err, fs.ErrNotExist) {
-			return nil
-		}
-		if err != nil {
-			return fmt.Errorf("备份 %s: %w", rel, err)
-		}
-		m.Files[rel] = sum
+		list = append(list, entry{p, rel})
 		return nil
 	})
 	if err != nil {
 		return nil, err
+	}
+	sort.SliceStable(list, func(i, j int) bool { return backupOrder(list[i].rel) < backupOrder(list[j].rel) })
+	for _, e := range list {
+		sum, err := addFile(tw, e.p, e.rel)
+		if errors.Is(err, fs.ErrNotExist) { // 备份期间被删除或轮转的文件
+			continue
+		}
+		if err != nil {
+			return nil, fmt.Errorf("备份 %s: %w", e.rel, err)
+		}
+		m.Files[e.rel] = sum
 	}
 	if len(m.Files) == 0 {
 		return nil, fmt.Errorf("状态目录 %s 没有可备份的文件", dir)
@@ -107,6 +117,14 @@ func Create(w io.Writer, dir string, opt Options) (*Manifest, error) {
 		return nil, err
 	}
 	return m, gz.Close()
+}
+
+// backupOrder 是文件在备份中的排序键：X.delta 紧挨着排在 X 之前，其余按路径排序。
+func backupOrder(rel string) string {
+	if base, ok := strings.CutSuffix(rel, ".delta"); ok {
+		return base + "\x00"
+	}
+	return rel + "\x01"
 }
 
 func addFile(tw *tar.Writer, p, rel string) (string, error) {

@@ -80,7 +80,7 @@ func (s *Server) incidentFacts(d *store.IncidentDetail, m *ai.Masker) string {
 		}
 		var ctx []string
 		for _, c := range h.Contexts {
-			ctx = append(ctx, c.Rule+" @ "+c.Target+"：确认攻击 "+strconv.Itoa(c.TP)+" 次、误报 "+strconv.Itoa(c.FP)+" 次")
+			ctx = append(ctx, c.Rule+" @ "+fence(c.Target)+"：确认攻击 "+strconv.Itoa(c.TP)+" 次、误报 "+strconv.Itoa(c.FP)+" 次")
 		}
 		line("同规则同目标历史研判", strings.Join(ctx, "；"))
 		// 本单位分析员处理过的相似案例（含纠正过模型的判断）：让模型吸取本环境的经验
@@ -91,7 +91,7 @@ func (s *Server) incidentFacts(d *store.IncidentDetail, m *ai.Masker) string {
 				if c.Verdict == learn.VerdictFP {
 					v = "误报"
 				}
-				item := "- " + c.Rule + " @ " + c.Target + "：" + v
+				item := "- " + c.Rule + " @ " + fence(c.Target) + "：" + v // 历史目标同样来自攻击者，按原样摘录包住
 				if c.Corrected != "" {
 					item += "（模型曾判断为" + ai.VerdictLabel[c.Corrected] + "，被分析员纠正）"
 				}
