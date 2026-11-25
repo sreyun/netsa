@@ -39,6 +39,7 @@ type Config struct {
 	Report         ReportConfig    `yaml:"report"`
 	Learn          LearnConfig     `yaml:"learn"`
 	AI             AIConfig        `yaml:"ai"`
+	AIUse          AIUseConfig     `yaml:"ai_usage"`
 	Storage        StorageConfig   `yaml:"storage"`
 	// 对接外部系统（说明见 docs/integrations.md）
 	Forward   []ForwardConfig  `yaml:"forward"`
@@ -568,6 +569,9 @@ func (c *Config) Validate() error {
 		return err
 	}
 	if err := c.AI.validate(); err != nil {
+		return err
+	}
+	if err := c.AIUse.validate(); err != nil {
 		return err
 	}
 	for i, cl := range c.Geo.Custom {

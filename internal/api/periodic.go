@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"netsa/internal/aiuse"
 	"netsa/internal/assets"
 	"netsa/internal/config"
 	"netsa/internal/ingest"
@@ -75,6 +76,7 @@ type PeriodReport struct {
 	Compromised []*store.Compromised `json:"compromised"`
 	Actions     []*store.Action      `json:"actions"`
 	Vulns       *assets.Summary      `json:"vulns,omitempty"`
+	AIUse       *aiuse.Brief         `json:"aiuse,omitempty"` // AI 使用摘要（只有汇总与服务排行，不列出终端）
 	Sources     []ingest.Stat        `json:"sources"`
 	Senders     *ingest.SenderReport `json:"-"`
 	SenderTotal map[string]int       `json:"senders,omitempty"`
@@ -245,6 +247,7 @@ func (s *Server) BuildPeriodReport(kind, rng string) *PeriodReport {
 		r.SenderTotal = map[string]int{"senders": rep.Totals.Senders, "online": rep.Totals.Online, "silent": rep.Totals.Silent, "rejected": rep.Totals.Rejected}
 	}
 	r.Suppressed = s.Suppress.Total()
+	r.AIUse = s.AIUse.Brief(from, to)
 
 	// 结论
 	t := r.Totals
@@ -275,12 +278,38 @@ func (s *Server) BuildPeriodReport(kind, rng string) *PeriodReport {
 	if r.Vulns != nil && r.Vulns.OpenVulns > 0 {
 		r.Summary = append(r.Summary, fmt.Sprintf("资产上尚有 %d 个未修复漏洞，其中核心资产高危及以上 %d 个。", r.Vulns.OpenVulns, r.Vulns.CoreOpenHigh))
 	}
+	if b := r.AIUse; b != nil {
+		line := fmt.Sprintf("使用 AI 服务的终端 %d 个，涉及 %d 个服务", b.Subjects, b.Services)
+		if b.OverseasSubj > 0 {
+			line += fmt.Sprintf("，其中使用境外服务的 %d 个", b.OverseasSubj)
+			if b.BytesKnown && b.OverseasUp > 0 {
+				line += "（上传 " + humanBytes(b.OverseasUp) + "）"
+			}
+		}
+		if b.DenySubjects > 0 {
+			line += fmt.Sprintf("；%d 个终端使用了单位禁止的 AI 服务（%s）", b.DenySubjects, strings.Join(b.DenyServices[:min(len(b.DenyServices), 3)], "、"))
+		}
+		r.Summary = append(r.Summary, line+"。")
+	}
 	for _, st := range r.Sources {
 		if st.Silent {
 			r.Summary = append(r.Summary, "数据源 "+st.Name+" 已断流，存在监测盲区。")
 		}
 	}
 	return r
+}
+
+// humanBytes 把字节数写成 KB / MB / GB。
+func humanBytes(n int64) string {
+	switch {
+	case n >= 1<<30:
+		return fmt.Sprintf("%.2f GB", float64(n)/(1<<30))
+	case n >= 1<<20:
+		return fmt.Sprintf("%.1f MB", float64(n)/(1<<20))
+	case n >= 1<<10:
+		return fmt.Sprintf("%.0f KB", float64(n)/(1<<10))
+	}
+	return fmt.Sprintf("%d B", n)
 }
 
 func human(n int64) string {

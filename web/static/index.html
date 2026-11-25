@@ -36,6 +36,7 @@
       <div class="nav-menu" role="menu">
         <button data-tab="assess" data-label="安全评估" role="menuitem"><b>安全评估</b><span>安全评分、失陷研判与处置建议</span></button>
         <button data-tab="assets" data-label="资产漏洞" role="menuitem"><b>资产漏洞</b><span>资产台账与漏洞关联</span></button>
+        <button data-tab="aiuse" data-label="AI 使用" role="menuitem" class="need-analyst" id="tabAIUse"><b>AI 使用</b><span>员工使用的 AI 服务、数据上传与疑似 AI 服务发现</span></button>
         <button data-tab="reports" data-label="报表合规" role="menuitem"><b>报表合规</b><span>周报月报与等保 2.0 合规检查</span></button>
       </div>
     </div>
@@ -343,6 +344,33 @@
     </div>
     <div class="kpis av-kpis" id="avKpis"></div>
     <div class="panel"><div class="table-wrap"><table class="table" id="avTable"></table></div></div>
+  </section>
+
+  <!-- AI 使用 -->
+  <section id="tab-aiuse" class="tab">
+    <div class="toolbar">
+      <span class="seg au-seg" id="auRange"><button data-r="today">今天</button><button data-r="7d" class="active">近 7 天</button><button data-r="30d">近 30 天</button><button data-r="month">本月</button></span>
+      <input id="auSearch" placeholder="筛选终端 / 资产 / 负责人 / 部门 / 服务" aria-label="筛选终端与服务">
+      <select id="auPolicy" aria-label="按策略筛选"><option value="">全部策略</option><option value="deny">禁止</option><option value="restrict">受限</option><option value="allow">允许</option><option value="unset">未设定</option></select>
+      <span class="spacer"></span>
+      <button type="button" class="btn" id="auExport" title="按终端与服务导出当前范围的统计（记入操作审计）">导出 CSV</button>
+      <button type="button" class="btn" id="auCatalog">服务目录</button>
+    </div>
+    <div class="nt-help" id="auNote"></div>
+    <div class="kpis au-kpis" id="auKpis"></div>
+    <div class="grid-2">
+      <div class="panel"><h3>每日使用 <small>终端数与上传量</small></h3><div class="chart" id="cAuTrend" style="min-height:220px"></div></div>
+      <div class="panel"><h3>按类别 <small>使用该类服务的终端数</small></h3><div class="chart" id="cAuCat" style="min-height:220px"></div></div>
+    </div>
+    <div class="panel"><h3>AI 服务 <small id="auSvcCount"></small></h3><div class="table-wrap"><table class="table" id="auSvcTable"></table></div></div>
+    <div class="grid-2">
+      <div class="panel"><h3>终端 <small id="auSubjCount"></small></h3><div class="scroll"><table class="table" id="auSubjTable"></table></div></div>
+      <div class="panel"><h3>部门 <small>按资产台账中登记的办公网段与终端汇总</small></h3><div class="scroll"><table class="table" id="auDeptTable"></table></div></div>
+    </div>
+    <div class="grid-2">
+      <div class="panel"><h3>疑似 AI 服务 <small>不在目录中、域名具有 AI 特征（API 中转站、新工具），确认后登记到目录</small></h3><div class="scroll"><table class="table" id="auCandTable"></table></div></div>
+      <div class="panel"><h3>AI 接口发现 <small>Web 日志中出现大模型接口路径的站点：内网自建的模型服务、对外提供的模型接口</small></h3><div class="scroll"><table class="table" id="auEpTable"></table></div></div>
+    </div>
   </section>
 
   <!-- 报表与合规 -->
@@ -754,8 +782,51 @@
   </form>
 </div>
 
+<!-- AI 服务目录 -->
+<div class="modal-mask" id="auCatModal" hidden>
+  <div class="modal wide" role="dialog" aria-modal="true" aria-labelledby="auCatTitle">
+    <div class="modal-head"><b id="auCatTitle">AI 服务目录</b><button type="button" class="close" data-close="auCatModal" aria-label="关闭">✕</button></div>
+    <div class="modal-body">
+      <div class="nt-help">按单位的 AI 使用管理制度设定每个服务的策略：允许 / 受限 / 禁止。当前版本只用于统计（如“使用了禁止类服务的终端数”），不拦截、不告警。
+        内置服务按域名识别；SaaS 产品里内嵌的 AI 功能（飞书、钉钉、WPS、Office 365 Copilot 等）与产品本身使用同一域名，无法区分，不在目录中。
+        配置文件 <code>ai_usage</code> 中的服务与策略同样生效，页面设定的策略优先。</div>
+      <div class="toolbar"><input id="auCatSearch" placeholder="筛选服务 / 厂商 / 域名" aria-label="筛选服务"><span class="spacer"></span><button type="button" class="btn primary need-admin" id="auSvcAdd">＋ 登记服务</button></div>
+      <div class="scroll"><table class="table" id="auCatTable"></table></div>
+      <div class="form-msg" id="auCatMsg" role="status"></div>
+    </div>
+  </div>
+</div>
+
+<!-- 登记 AI 服务 -->
+<div class="modal-mask" id="auSvcModal" hidden>
+  <form class="modal" role="dialog" aria-modal="true" aria-labelledby="auSvcTitle" id="auSvcForm" autocomplete="off" novalidate>
+    <div class="modal-head"><b id="auSvcTitle">登记 AI 服务</b><button type="button" class="close" data-close="auSvcModal" aria-label="关闭">✕</button></div>
+    <div class="modal-body">
+      <label class="field"><span class="flabel">名称</span><input id="auSvcName" maxlength="60" placeholder="如：某 GPT 中转站、内部大模型网关"></label>
+      <label class="field"><span class="flabel">厂商</span><input id="auSvcVendor" maxlength="40"></label>
+      <label class="field"><span class="flabel">类别</span><select id="auSvcCat"></select></label>
+      <div class="field"><span class="flabel">所在地</span>
+        <span class="seg nt-type" id="auSvcRegion"><button type="button" data-v="domestic" class="active">境内</button><button type="button" data-v="overseas">境外</button></span></div>
+      <label class="field"><span class="flabel">策略</span><select id="auSvcPolicy"><option value="">未设定</option><option value="allow">允许</option><option value="restrict">受限</option><option value="deny">禁止</option></select></label>
+      <label class="field"><span class="flabel">域名</span><textarea id="auSvcDomains" rows="3" maxlength="2000" spellcheck="false" placeholder="每行一个，或用逗号分隔；example.com 含其子域名"></textarea></label>
+      <label class="field"><span class="flabel">备注</span><input id="auSvcNote" maxlength="200"></label>
+      <div class="form-msg" id="auSvcMsg" role="status"></div>
+    </div>
+    <div class="modal-foot"><span class="spacer"></span><button type="button" class="btn" data-close="auSvcModal">取消</button><button type="submit" class="btn primary" id="auSvcSave">保存</button></div>
+  </form>
+</div>
+
+<!-- 终端的 AI 使用明细 -->
+<div class="modal-mask" id="auSubjModal" hidden>
+  <div class="modal wide" role="dialog" aria-modal="true" aria-labelledby="auSubjTitle">
+    <div class="modal-head"><b id="auSubjTitle">终端明细</b><button type="button" class="close" data-close="auSubjModal" aria-label="关闭">✕</button></div>
+    <div class="modal-body"><div id="auSubjInfo"></div><div class="scroll"><table class="table" id="auSubjDetail"></table></div></div>
+  </div>
+</div>
+
 <script src="/vendor/echarts.min.js"></script>
 <script src="app.js"></script>
 <script src="ops.js"></script>
+<script src="aiuse.js"></script>
 </body>
 </html>

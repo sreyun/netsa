@@ -511,6 +511,23 @@ func (m *Manager) Find(ip, host string) *model.AssetRef {
 	return (&Match{Asset: a, Group: !a.exactly(ip, host)}).Ref()
 }
 
+// Holder 返回内网地址所属资产的名称、负责人与部门（终端或按网段登记的办公区域），未登记时 ok 为 false。
+// AI 使用统计据此把终端地址显示为使用者与部门：按部门登记办公网段即可按部门汇总。
+func (m *Manager) Holder(ip string) (name, owner, dept string, ok bool) {
+	if m == nil {
+		return "", "", "", false
+	}
+	idx := m.idx.Load()
+	if len(idx.exact) == 0 && len(idx.nets) == 0 {
+		return "", "", "", false
+	}
+	a := idx.byIP(ip)
+	if a == nil {
+		return "", "", "", false
+	}
+	return a.Name, a.Owner, a.Dept, true
+}
+
 // Lookup 返回事件目标（目的 IP、站点域名）对应的资产与未修复漏洞。未登记资产且没有漏洞时返回 nil。
 func (m *Manager) Lookup(ev *model.Event) *Match {
 	if m == nil {

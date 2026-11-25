@@ -40,6 +40,7 @@ var reportFuncs = template.FuncMap{
 	"css":     func() template.CSS { return template.CSS(reportCSS) },
 	"add":     func(a, b int) int { return a + b },
 	"dur":     cnDuration,
+	"bytes":   humanBytes,
 }
 
 var periodTpl = template.Must(template.New("period").Funcs(reportFuncs).Parse(`<!doctype html>
@@ -82,6 +83,12 @@ var periodTpl = template.Must(template.New("period").Funcs(reportFuncs).Parse(`<
 <table><tr><th>数据源</th><th>格式</th><th>状态</th><th class="n">日志行数</th><th class="n">解析失败</th></tr>
 {{range .R.Sources}}<tr><td>{{.Name}}</td><td>{{.Detected}}</td><td>{{if .Silent}}<b class="bad">断流</b>{{else}}{{.Status}}{{end}}</td><td class="n">{{human .Lines}}</td><td class="n">{{.Failed}}</td></tr>{{else}}<tr><td colspan="5" class="na">无</td></tr>{{end}}</table>
 {{if .R.SenderTotal}}<p class="note">syslog 发送端 {{index .R.SenderTotal "senders"}} 个，在线 {{index .R.SenderTotal "online"}}、断流 {{index .R.SenderTotal "silent"}}、被拒绝 {{index .R.SenderTotal "rejected"}}；误报抑制累计过滤 {{.R.Suppressed}} 次命中。</p>{{end}}
+{{with .R.AIUse}}<h2>附：AI 使用情况</h2>
+<p>使用 AI 服务的终端 <b>{{.Subjects}}</b> 个，涉及 {{.Services}} 个服务；使用境外服务的终端 {{.OverseasSubj}} 个{{if .BytesKnown}}，境外服务上传 {{bytes .OverseasUp}}{{end}}；使用单位禁止的服务的终端 <b class="{{if .DenySubjects}}bad{{else}}ok{{end}}">{{.DenySubjects}}</b> 个{{if .Denied}}，被拦截的访问尝试 {{.Denied}} 次{{end}}。</p>
+<table><tr><th>AI 服务 TOP 10</th><th class="n">终端数</th></tr>{{range .Top}}<tr><td>{{.Name}}</td><td class="n">{{.Value}}</td></tr>{{end}}</table>
+{{if .DenyServices}}<p>有人使用的禁止类服务：<b class="bad">{{range $i, $x := .DenyServices}}{{if $i}}、{{end}}{{$x}}{{end}}</b>。</p>{{end}}
+{{if .NewServices}}<p>本期首次出现的服务：{{range $i, $x := .NewServices}}{{if $i}}、{{end}}{{$x}}{{end}}。</p>{{end}}
+<p class="note">按 DNS 查询、TLS 握手（SNI）与会话日志统计，具体终端见平台“风险管理 → AI 使用”（需要运营分析员权限）。{{if not .BytesKnown}}未接入 TLS 握手日志（如 Zeek ssl.log）时没有上传量。{{end}}</p>{{end}}
 <div class="foot">本报告由 netsa 根据接入的日志自动生成，统计口径以日志时间为准。报告中的 IP、资产等信息属于内部敏感信息，请勿外传。</div>
 </div></body></html>`))
 

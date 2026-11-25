@@ -23,6 +23,7 @@
 | `alert.source_silence` / `sources[].silence` | 数据源断流告警的默认阈值（默认 30m，`off` 关闭）/ 单个数据源的阈值 |
 | `flow.netflow` / `sflow` / `sampling` / `exporters` / `allowlist` / `window` | 流量采集：NetFlow v5 / v9 与 IPFIX、sFlow v5 的 UDP 监听地址（为空不启用）/ 设备没有报告采样率时使用的采样率 / 按设备（地址或网段）登记名称与采样率 / 只接收登记的设备（UDP 源地址可伪造，建议开启）/ 合并窗口（默认 10s） |
 | `deception.paths` / `tokens` / `accounts` / `hosts` / `file` | 诱饵：诱饵路径（`*` 结尾为前缀）/ 写在诱饵内容中的线索 / 诱饵账号 / 蜜罐地址（IP、网段或 `地址:端口`）/ 页面登记的诱饵与命中记录文件（默认 `deception.json`）；与“事件处置 → 诱饵”中登记的合并生效 |
+| `ai_usage.enabled` / `policies` / `services` / `disable` / `retention_days` / `max_records` / `file` | [AI 使用统计](ai-usage.md)：开关（默认开启）/ 服务的使用策略（服务编号 → `allow` / `restrict` / `deny`）/ 新增服务或按 `id` 覆盖内置服务 / 停用的内置服务 / 按天统计的保留天数（默认 62）/ 记录数上限（默认 300000，约 40 MB）/ 状态文件（默认 `aiuse.json.gz`）；与“风险管理 → AI 使用 → 服务目录”中的设定合并生效，页面设定的策略优先 |
 | `rawlog.*` | 原始日志留存：`enabled`、`dir`、`retention_days`（默认 180）、`max_size_gb`、`attacks_only` |
 | `audit.dir` / `retention_days` | 防篡改审计链的目录与留存天数（默认 180） |
 | `report.recipients` / `weekly` / `monthly` / `smtp.*` | 周报 / 月报的收件人、发送时间（如 `mon 09:00`、`1 09:00`）与发信服务器 |

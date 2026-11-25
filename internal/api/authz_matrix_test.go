@@ -39,6 +39,9 @@ var routePolicy = map[string]string{
 	"POST /api/suppressions": auth.RoleAnalyst, "DELETE /api/suppressions/{id}": auth.RoleAnalyst,
 	"POST /api/authscans": auth.RoleAnalyst, "POST /api/authscans/{id}/end": auth.RoleAnalyst, "DELETE /api/authscans/{id}": auth.RoleAnalyst, "POST /api/deception": auth.RoleAnalyst, "DELETE /api/deception/{id}": auth.RoleAnalyst, "PUT /api/vulns/{id}": auth.RoleAnalyst,
 	"GET /api/block": auth.RoleAnalyst, "POST /api/block": auth.RoleAnalyst,
+	// AI 使用统计是员工的上网行为：查看、导出与忽略疑似域名需要运营分析员
+	"GET /api/aiuse": auth.RoleAnalyst, "GET /api/aiuse/export": auth.RoleAnalyst, "GET /api/aiuse/services": auth.RoleAnalyst,
+	"POST /api/aiuse/candidates/{domain}/{action}": auth.RoleAnalyst,
 
 	// 管理员：账号、审计、配置、会改变检测结果的操作、审批封禁、备份
 	"GET /api/admin/backup": auth.RoleAdmin, "GET /api/integrations": auth.RoleAdmin, "GET /api/ai/settings": auth.RoleAdmin, "PUT /api/ai/settings": auth.RoleAdmin,
@@ -49,6 +52,7 @@ var routePolicy = map[string]string{
 	"DELETE /api/alert/robots/{id}": auth.RoleAdmin, "POST /api/alert/robots/{id}/test": auth.RoleAdmin, "POST /api/alert/robots/{id}/report": auth.RoleAdmin, "POST /api/alert/test": auth.RoleAdmin,
 	"POST /api/assets": auth.RoleAdmin, "POST /api/assets/import": auth.RoleAdmin, "PUT /api/assets/{id}": auth.RoleAdmin, "DELETE /api/assets/{id}": auth.RoleAdmin,
 	"DELETE /api/vulns/{id}": auth.RoleAdmin, "POST /api/block/{id}/{action}": auth.RoleAdmin, "POST /api/learn/rules/{rule}/{action}": auth.RoleAdmin, "PUT /api/learn/policy": auth.RoleAdmin,
+	"POST /api/aiuse/services": auth.RoleAdmin, "PUT /api/aiuse/services/{id}": auth.RoleAdmin, "DELETE /api/aiuse/services/{id}": auth.RoleAdmin, // AI 服务目录决定统计口径
 	"POST /api/rawlog/verify": auth.RoleAdmin, "POST /api/reports/email": auth.RoleAdmin, "POST /api/rules/managed": auth.RoleAdmin, "DELETE /api/rules/managed/{id}": auth.RoleAdmin,
 	"POST /api/rules/packs": auth.RoleAdmin, "DELETE /api/rules/packs/{name}": auth.RoleAdmin, "POST /api/rules/sigma": auth.RoleAdmin, "POST /api/rules/test": auth.RoleAdmin,
 	"POST /api/syslog/senders": auth.RoleAdmin, "PUT /api/syslog/senders/{id}": auth.RoleAdmin, "DELETE /api/syslog/senders/{id}": auth.RoleAdmin, "PUT /api/syslog/policy": auth.RoleAdmin,

@@ -83,6 +83,7 @@ internal/detect/      URL 归一化、特征规则、libinjection 语法分析�
 internal/risk/        威胁等级统一裁决（攻击分类底线、拦截与成功的等级上限）
 internal/pipeline/    处理流水线、真实 IP 还原（含反向代理自动识别）、DNAT 暴露面过滤、资产关联
 internal/exposure/    对外发布服务清单、会话证据研判（是否到达服务）、候选映射与可疑放行策略
+internal/aiuse/       AI 使用统计（服务目录、按 DNS / SNI / 会话字节统计、疑似 AI 服务与 AI 接口发现），与攻击检测分开
 internal/geo/         多源定位融合、ip2region / MaxMind / ip-api、区划地名库、内网网段、RDAP
 internal/intel/       本地黑名单、Tor 出口、rDNS 测绘机构识别
 internal/store/       攻击者画像与评分、告警、安全事件、时间序列、地图聚合、攻击面、安全评估、快照

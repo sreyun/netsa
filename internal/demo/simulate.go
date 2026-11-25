@@ -1,4 +1,4 @@
-// Package demo 生成用于演示与测试的模拟日志（nginx + UFW + FortiGate + Linux auth.log + Zeek DNS + 服务器进程日志）。
+// Package demo 生成用于演示与测试的模拟日志（nginx + UFW + FortiGate + Linux auth.log + Zeek DNS / ssl + 服务器进程日志）。
 // 所有 IP 均为随机生成的公网地址，日志内容仅用于本地演示检测效果。
 package demo
 
@@ -14,8 +14,8 @@ import (
 )
 
 type writer struct {
-	nginx, ufw, forti, auth, dns, proc *bufio.Writer
-	files                              []*os.File
+	nginx, ufw, forti, auth, dns, proc, ssl *bufio.Writer
+	files                                   []*os.File
 }
 
 func open(dir string, appendMode bool) (*writer, error) {
@@ -27,7 +27,7 @@ func open(dir string, appendMode bool) (*writer, error) {
 		flag = os.O_CREATE | os.O_WRONLY | os.O_APPEND
 	}
 	w := &writer{}
-	for _, name := range []string{"access.log", "ufw.log", "fortigate.log", "auth.log", "dns.log", "process.log"} {
+	for _, name := range []string{"access.log", "ufw.log", "fortigate.log", "auth.log", "dns.log", "process.log", "zeek_ssl.log"} {
 		f, err := os.OpenFile(filepath.Join(dir, name), flag, 0o644)
 		if err != nil {
 			w.close()
@@ -37,11 +37,12 @@ func open(dir string, appendMode bool) (*writer, error) {
 	}
 	w.nginx, w.ufw, w.forti = bufio.NewWriter(w.files[0]), bufio.NewWriter(w.files[1]), bufio.NewWriter(w.files[2])
 	w.auth, w.dns, w.proc = bufio.NewWriter(w.files[3]), bufio.NewWriter(w.files[4]), bufio.NewWriter(w.files[5])
+	w.ssl = bufio.NewWriter(w.files[6])
 	return w, nil
 }
 
 func (w *writer) flush() {
-	for _, b := range []*bufio.Writer{w.nginx, w.ufw, w.forti, w.auth, w.dns, w.proc} {
+	for _, b := range []*bufio.Writer{w.nginx, w.ufw, w.forti, w.auth, w.dns, w.proc, w.ssl} {
 		if b != nil {
 			b.Flush()
 		}
@@ -66,6 +67,7 @@ type Sim struct {
 	intruder  attacker // 完整入侵剧本的攻击者（见 intrusion）
 	liveStory time.Time
 	liveDone  map[int]bool
+	ar        *rand.Rand // AI 使用演示数据的随机数源（见 aiuse.go）
 }
 
 type attacker struct {
@@ -311,6 +313,7 @@ func (s *Sim) emit(w *writer, t time.Time, intensity int) {
 	}
 	s.beacon(w, t)
 	s.hostLogs(w, t, intensity)
+	s.aiTraffic(w, t, intensity)
 	for i := 0; i < intensity; i++ {
 		if s.r.Intn(3) == 0 {
 			s.attack(w, t, s.attackers[s.r.Intn(len(s.attackers))])
@@ -482,6 +485,9 @@ func (s *Sim) emitLive(w *writer, now time.Time, intensity int) {
 	}
 	for i := 0; i < intensity; i++ {
 		fmt.Fprintln(w.dns, s.dnsLine(now, fmt.Sprintf("10.0.0.%d", 40+s.r.Intn(20)), pick(s.r, normalDomains), "A", "NOERROR"))
+	}
+	if s.aiRand().Intn(3) == 0 {
+		s.aiTraffic(w, now.Add(-59*time.Second).Truncate(time.Minute), 1)
 	}
 	if s.r.Intn(20) == 0 {
 		s.hostLogs(w, now.Add(-59*time.Second).Truncate(time.Minute), 1)

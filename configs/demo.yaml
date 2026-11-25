@@ -37,6 +37,10 @@ sources:
     type: edr            # 服务器的进程日志（Elastic Agent / ECS 格式）
     paths: ["demo-logs/process.log"]
     from_beginning: true
+  - name: zeek
+    type: zeek           # 流量探针的 TLS 握手日志（Zeek ssl.log）：AI 使用统计按 SNI 识别服务、归属会话字节
+    paths: ["demo-logs/zeek_ssl.log"]
+    from_beginning: true
 
 syslog:
   enabled: true
@@ -78,3 +82,14 @@ audit:
 # 演示用诱饵：/backup.zip、/old/ 是扫描器常探测的路径，模拟日志中的扫描会命中；页面中可继续登记
 deception:
   paths: ["/backup.zip", "/old/*"]
+
+# AI 使用统计（风险管理 → AI 使用）：演示用的使用策略，也可在页面“服务目录”中设定
+ai_usage:
+  policies:
+    openai-api: deny       # 直接调用境外模型接口，绕过单位的模型网关
+    chatgpt: restrict
+    claude: restrict
+    huggingface: restrict
+    deepseek: allow
+    kimi: allow
+    doubao: allow

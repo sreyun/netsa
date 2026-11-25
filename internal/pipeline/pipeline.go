@@ -13,6 +13,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"netsa/internal/aiuse"
 	"netsa/internal/alert"
 	"netsa/internal/assets"
 	"netsa/internal/authscan"
@@ -57,6 +58,7 @@ type Pipeline struct {
 	Exposure          *exposure.Manager  // 对外发布服务清单（DNAT 映射，可为空）
 	Learn             *learn.Learner     // 自学习：按研判准确率校准规则等级（可为空）
 	Intel             *intel.DB          // 威胁情报：DNS 查询与域名情报比对（可为空）
+	AIUse             *aiuse.Manager     // AI 使用统计（可为空）：与攻击检测分开，只统计、不告警
 	// BatchDone 在一批事件处理完（入库、告警）之后调用，参数是这一批的第一条事件（可为空）：文件数据源据此让读取断点生效，
 	// 断点不会越过还在队列中、退出时可能被丢弃的日志
 	BatchDone func(first *model.Event)
@@ -249,6 +251,7 @@ func (p *Pipeline) aggregate(items []item) {
 	for i, it := range items {
 		evs[i], hits[i] = it.ev, it.hits
 		p.learnIntranet(it.ev)
+		p.AIUse.Observe(it.ev) // 白名单来源同样统计：AI 使用统计不是攻击检测
 		if !it.whitelisted && p.Behavior != nil {
 			hits[i] = append(hits[i], p.Behavior.ObserveHits(it.ev, it.hits)...)
 			late = append(late, p.Behavior.TakeLate()...) // 按目的地址告警的带宽型 DDoS

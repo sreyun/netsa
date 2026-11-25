@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"netsa/internal/ai"
+	"netsa/internal/aiuse"
 	"netsa/internal/alert"
 	"netsa/internal/archive"
 	"netsa/internal/assets"
@@ -93,6 +94,7 @@ type Server struct {
 	Forward   *forward.Forwarder // SIEM 转发，未配置时为 nil
 	Playbooks *playbook.Engine   // 处置剧本，未配置时为 nil
 	Intel     *intel.DB          // 情报库
+	AIUse     *aiuse.Manager     // AI 使用统计，未开启时为 nil
 	StateDir  string             // 状态目录，用于下载备份
 
 	started    time.Time
@@ -263,6 +265,13 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/deception", s.deceptionStatus)
 	mux.HandleFunc("POST /api/deception", s.deceptionCreate)
 	mux.HandleFunc("DELETE /api/deception/{id}", s.deceptionDelete)
+	mux.HandleFunc("GET /api/aiuse", s.aiuseReport)
+	mux.HandleFunc("GET /api/aiuse/export", s.aiuseExport)
+	mux.HandleFunc("GET /api/aiuse/services", s.aiuseCatalog)
+	mux.HandleFunc("POST /api/aiuse/services", s.aiuseServiceCreate)
+	mux.HandleFunc("PUT /api/aiuse/services/{id}", s.aiuseServicePolicy)
+	mux.HandleFunc("DELETE /api/aiuse/services/{id}", s.aiuseServiceDelete)
+	mux.HandleFunc("POST /api/aiuse/candidates/{domain}/{action}", s.aiuseCandidate)
 
 	mux.HandleFunc("GET /api/alert/robots", s.alertInfo)
 	mux.HandleFunc("POST /api/alert/robots", s.robotCreate)
@@ -398,6 +407,7 @@ func (s *Server) meta(w http.ResponseWriter, r *http.Request) {
 		"exposure_reach":      s.Exposure.ReachCheck(), "exposure_unreached": s.Exposure.Unreached(), "exposure_learned": s.Exposure.LearnedCount(), "learn": s.Learn != nil, "ai": s.AI.Status(), "exposure_policies": topPolicies(s.Exposure.Policies(), 5),
 		"require_2fa": s.Cfg.Server.Require2FA, "rawlog": s.RawLog != nil, "assets": s.Assets != nil, "audit": s.Trail != nil,
 		"syslog": s.Cfg.Syslog.Enabled, "suppress": s.Suppress != nil, "authscan_active": s.AuthScan.Active(), "auth": s.Auth != nil, "block": s.Block != nil,
+		"aiuse": s.AIUse != nil,
 	})
 }
 

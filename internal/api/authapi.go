@@ -83,6 +83,11 @@ func requiredRole(r *http.Request) string {
 	if strings.HasPrefix(p, "/api/rawlog/search") || strings.HasPrefix(p, "/api/rawlog/export") || p == "/api/incidents/assignees" || strings.HasPrefix(p, "/api/learn") {
 		return auth.RoleAnalyst
 	}
+	// AI 使用统计是员工的上网行为：查看与导出需要运营分析员权限；疑似域名的忽略由分析员处理；
+	// 服务目录（策略、登记、删除）决定统计口径，只允许管理员修改（见最后的默认值）
+	if strings.HasPrefix(p, "/api/aiuse") && (r.Method == http.MethodGet || r.Method == http.MethodHead || strings.HasPrefix(p, "/api/aiuse/candidates/")) {
+		return auth.RoleAnalyst
+	}
 	if r.Method == http.MethodGet || r.Method == http.MethodHead {
 		return auth.RoleViewer
 	}

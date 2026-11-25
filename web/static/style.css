@@ -879,3 +879,20 @@ kbd { display: inline-block; min-width: 18px; padding: 0 4px; border: 1px solid 
 .map-panel:fullscreen .map-stats b, .map-panel.map-max .map-stats b { font-size: 18px; }
 .map-panel:fullscreen .map-pop, .map-panel.map-max .map-pop { max-height: calc(100vh - 160px); }
 body.map-max-open { overflow: hidden; }
+
+/* AI 使用 */
+.kpis.au-kpis { grid-template-columns: repeat(6, minmax(0, 1fr)); }
+@media (max-width: 1200px) { .kpis.au-kpis { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
+@media (max-width: 700px) { .kpis.au-kpis { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+.au-seg { margin-left: 0; }
+#tab-aiuse > .nt-help { margin-bottom: 12px; }
+#tab-aiuse > .nt-help:empty { display: none; }
+.au-pol { display: inline-block; padding: 0 6px; border-radius: 3px; font-size: 12px; white-space: nowrap; border: 1px solid var(--border-hi); color: var(--muted); }
+.au-pol.deny { color: #ff4d4f; border-color: rgba(255,77,79,.6); background: rgba(255,77,79,.12); }
+.au-pol.restrict { color: #ffc53d; border-color: rgba(255,197,61,.6); background: rgba(255,197,61,.10); }
+.au-pol.allow { color: #52c41a; border-color: rgba(82,196,26,.55); background: rgba(82,196,26,.10); }
+.au-region.overseas { color: #ff9c6e; }
+#auCatTable select { background: var(--bg2); color: var(--text); border: 1px solid var(--border-hi); border-radius: 4px; padding: 2px 6px; font-size: 12px; color-scheme: dark; }
+#auCatTable .mono, #auEpTable .mono, #auCandTable .mono { word-break: break-all; }
+.modal .field textarea { width: 100%; resize: vertical; }
+#auSvcTable tr.sel td { background: rgba(58,139,255,.12); }

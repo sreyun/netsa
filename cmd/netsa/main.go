@@ -33,6 +33,7 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"netsa/internal/ai"
+	"netsa/internal/aiuse"
 	"netsa/internal/alert"
 	"netsa/internal/api"
 	"netsa/internal/archive"
@@ -67,7 +68,7 @@ import (
 
 // version 是构建版本号。默认值用于本地构建；镜像构建通过
 // -ldflags "-X main.version=<tag>" 注入，`netsa version` 与 /api/meta 都会显示注入后的值。
-var version = "1.14.2"
+var version = "1.15.0"
 
 func usage() {
 	fmt.Fprintf(os.Stderr, `netsa %s —— 网络安全态势感知与攻击面分析系统
@@ -150,6 +151,7 @@ type app struct {
 	suppress  *suppress.Manager  // 误报抑制规则
 	authscan  *authscan.Manager  // 授权扫描登记
 	deception *deception.Manager // 诱饵
+	aiuse     *aiuse.Manager     // AI 使用统计（未开启时为 nil）
 	raw       *rawlog.Store      // 原始日志留存
 	assets    *assets.Manager    // 资产与漏洞
 	exposure  *exposure.Manager  // 对外发布服务清单（DNAT 映射）
@@ -250,6 +252,9 @@ func build(cfg *config.Config) (*app, error) {
 	if a.assets, err = assets.Load(dataFile(cfg, "", "assets.json")); err != nil {
 		return nil, err
 	}
+	if a.aiuse, err = newAIUse(cfg, loc); err != nil {
+		return nil, err
+	}
 	a.store.AssetOf = a.assets.Find // 资产攻击链路按台账合并同一资产的地址与域名
 	if a.exposure, err = exposure.Load(cfg.Exposure); err != nil {
 		return nil, err
@@ -288,7 +293,7 @@ func build(cfg *config.Config) (*app, error) {
 		Engine: a.engine, Behavior: a.behavior(cfg), Store: a.store, Geo: a.geo, Intel: a.intel,
 		RealIP: pipeline.NewRealIP(cfg.RealIP), Notifier: a.notifier,
 		EnrichLevel: model.ParseSeverity(cfg.Geo.EnrichLevel), OnAlert: a.onAlert, Suppress: a.suppress, AuthScan: a.authscan, Deception: a.deception, Assets: a.assets,
-		Exposure: a.exposure, Learn: a.learn,
+		Exposure: a.exposure, Learn: a.learn, AIUse: a.aiuse,
 	}
 	// 自学习识别出新的内网网段：已有攻击源按新网段重新定位（不再显示为境外）
 	a.pipe.OnIntranetLearned = func(string) {
@@ -383,6 +388,7 @@ func (a *app) server(listen string) (*http.Server, error) {
 	}
 	s.OIDC = sso.NewOIDC(a.cfg.Server.OIDC)
 	s.Rules, s.Block, s.Forward, s.Playbooks, s.Intel = a.rules, a.block, a.forward, a.playbooks, a.intel
+	s.AIUse = a.aiuse
 	s.StateDir, _ = stateDir(a.cfg)
 	a.api = s
 	dir := dataFile(a.cfg, a.cfg.Audit.Dir, "audit")
@@ -537,6 +543,16 @@ func cmdServe(args []string) error {
 	} else if n := a.exposure.LearnedCount(); n > 0 {
 		log.Printf("[exposure] 已恢复 %d 个自动识别的对外服务", n)
 	}
+	// 恢复 AI 使用统计（同样只在实时服务中恢复）。文件损坏时保留为 .bad 以便排查，重新开始统计
+	if a.aiuse != nil {
+		path := dataFile(cfg, cfg.AIUse.File, "aiuse.json.gz")
+		if err := a.aiuse.SetPath(path); err != nil {
+			log.Printf("[aiuse] 恢复 AI 使用统计失败（已改名为 %s.bad，重新开始统计）: %v", path, err)
+			os.Rename(path, path+".bad")
+		} else if n := a.aiuse.Records(); n > 0 {
+			log.Printf("[aiuse] 已恢复 %d 条 AI 使用记录", n)
+		}
+	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -616,6 +632,10 @@ func cmdServe(args []string) error {
 			if err := a.exposure.Flush(); err != nil {
 				log.Printf("[exposure] %v", err)
 			}
+			a.aiuse.Prune()
+			if err := a.aiuse.Flush(false); err != nil {
+				log.Printf("[aiuse] %v", err)
+			}
 			if err := a.ingest.Checkpoints.Save(); err != nil {
 				log.Printf("[ingest] 保存读取断点失败: %v", err)
 			}
@@ -647,6 +667,9 @@ func cmdServe(args []string) error {
 			a.ingest.Senders.Flush()
 			if err := a.exposure.Flush(); err != nil {
 				log.Printf("[exposure] %v", err)
+			}
+			if err := a.aiuse.Flush(true); err != nil {
+				log.Printf("[aiuse] %v", err)
 			}
 			if err := a.store.Save(cfg.Storage.Snapshot); err != nil {
 				log.Printf("[store] 保存快照失败: %v", err)
@@ -736,6 +759,21 @@ func dataFile(cfg *config.Config, explicit, name string) string {
 		return filepath.Join(filepath.Dir(cfg.Storage.Snapshot), name)
 	}
 	return ""
+}
+
+// newAIUse 按配置创建 AI 使用统计（未开启时返回 nil）。状态文件在启动实时服务时恢复（见 SetPath）。
+func newAIUse(cfg *config.Config, loc *time.Location) (*aiuse.Manager, error) {
+	c := cfg.AIUse
+	if !c.On() {
+		return nil, nil
+	}
+	svcs := make([]aiuse.Service, 0, len(c.Services))
+	for _, s := range c.Services {
+		svcs = append(svcs, aiuse.Service{ID: s.ID, Name: s.Name, Vendor: s.Vendor, Category: s.Category, Region: s.Region, Policy: s.Policy,
+			Domains: s.Domains, Note: s.Note})
+	}
+	return aiuse.New(aiuse.Options{Services: svcs, Policies: c.Policies, Disable: c.Disable, RetentionDays: c.RetentionDays,
+		MaxRecords: c.MaxRecords, Location: loc})
 }
 
 // anyReady 判断是否至少有一个离线定位库已加载。
@@ -966,7 +1004,7 @@ func cmdSimulate(args []string) error {
 		if err := demo.Generate(*dir, *hours, *intensity, *seed); err != nil {
 			return err
 		}
-		fmt.Printf("已生成 %d 小时演示日志到 %s/ (access.log, ufw.log, fortigate.log, auth.log, dns.log, process.log)\n", *hours, *dir)
+		fmt.Printf("已生成 %d 小时演示日志到 %s/ (access.log, ufw.log, fortigate.log, auth.log, dns.log, process.log, zeek_ssl.log)\n", *hours, *dir)
 	}
 	if !*live {
 		return nil

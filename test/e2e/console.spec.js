@@ -75,7 +75,7 @@ async function checkNoInjection(page, where, issues) {
   expect.soft(issues, `${where}: 页面错误`).toEqual([]);
 }
 
-const TABS = ['overview', 'attackers', 'alerts', 'rawlog', 'surface', 'incidents', 'assess', 'assets', 'reports', 'learn', 'notify', 'system', 'sources'];
+const TABS = ['overview', 'attackers', 'alerts', 'rawlog', 'surface', 'incidents', 'assess', 'assets', 'aiuse', 'reports', 'learn', 'notify', 'system', 'sources'];
 
 async function openTab(page, tab) {
   await page.evaluate((t) => { location.hash = `#tab=${t}`; }, tab);
@@ -117,6 +117,8 @@ test('写入攻击日志后，定级符合证据', async ({ page }) => {
   const lines = PAYLOADS.map((p, i) => logLine(`203.0.113.${i + 10}`, 'GET', p, 200, 1000 + i, `<img src=x onerror="window.${MARK}=1">`, 'app.test'));
   lines.push(logLine('203.0.113.50', 'GET', '/item?id=1+union+select+1,2,3--', 200, 3000, ua, 'app.test')); // 与接口基线一致
   lines.push(logLine('203.0.113.51', 'GET', '/item?id=1+union+select+user(),2', 200, 30000, ua, 'app.test')); // 明显大于基线
+  // 大模型接口路径上的 Host 头由客户端提供：AI 使用 → AI 接口发现中同样只能作为文字显示
+  lines.push(logLine('10.9.9.9', 'POST', '/v1/chat/completions', 200, 800, ua, `<img src=x onerror="window.${MARK}=1">`));
   await sendLogs(lines);
   await expect.poll(async () => {
     const r = await page.request.get('/api/incidents?status=active&q=203.0.113.51');
@@ -136,6 +138,8 @@ test('所有页面渲染攻击者控制的内容都不会产生注入', async ({
   // 确认载荷确实显示在页面上（作为文字）：否则上面的检查没有意义
   await openTab(page, 'alerts');
   await expect(page.locator('#tab-alerts')).toContainText('onerror');
+  await openTab(page, 'aiuse');
+  await expect(page.locator('#auEpTable')).toContainText('onerror');
   // 事件详情、告警详情和攻击源详情
   const list = await (await page.request.get('/api/incidents?status=active&limit=20')).json();
   const xss = list.incidents.filter((i) => i.key.startsWith('203.0.113.1'));

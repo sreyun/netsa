@@ -124,6 +124,7 @@ go build -o bin/netsa ./cmd/netsa
 | [攻击面分析](docs/log-sources.md#未做-dnat-映射的端口探测) | 梳理对外服务，发现源码、密钥、备份泄露与管理接口暴露；结合 DNAT 映射与防火墙会话证据，过滤打不到任何服务的背景扫描 |
 | [安全评估与失陷研判](docs/detection.md#安全评估与失陷研判) | 七个维度打分并给出 A~E 总评与 P0~P3 处置建议；C2 心跳、恶意 TLS 指纹、攻击载荷落地、[被攻击后回连](docs/detection.md#防火墙与-web-日志联动被攻击后回连)；MITRE ATT&CK 矩阵 |
 | [自学习与 AI 研判](docs/self-learning.md) | 规则级、目标级与情报源准确率自动校准；从日志学习内网网段、攻击源、攻击活动、[参数正常取值与站点产品](docs/self-learning.md#参数的正常取值与站点产品)；[自我纠错闭环](docs/self-learning.md#自我纠错闭环)：客观核实、纠错回溯（停用规则不再计入评分与排行）、撤销纠错、自动归档；AI 研判支持 OpenAI 兼容与 Anthropic 接口 |
+| [AI 使用统计](docs/ai-usage.md) | 按 DNS、TLS 握手（SNI）与会话日志统计员工使用的 AI 服务（内置 70 多个境内外对话、编程、模型接口、AI 搜索、模型下载服务）、使用者与部门、上传量与境外上传；服务目录按单位制度设定允许 / 受限 / 禁止；发现目录之外的疑似 AI 服务（API 中转站）与内网自建的模型接口；周报月报附摘要 |
 | [事件处置与推送](docs/operations.md#事件处置与误报抑制) | 告警自动聚合为事件，指派、处置时限与超时提醒；误报抑制；[授权扫描登记](docs/detection.md#授权扫描登记)；[钉钉 / 企业微信 / 飞书推送](docs/operations.md#告警推送钉钉--企业微信--飞书)；导出 nginx、iptables、ipset 等封禁列表 |
 | [留存、合规与审计](docs/operations.md#原始日志留存与检索) | 原始日志按小时压缩留存，哈希链防篡改；[PostgreSQL 长期归档](docs/operations.md#告警归档可选postgresql)（可选）；周报月报、等保 2.0 自查；[三种角色、双因素认证与防篡改审计链](docs/operations.md#登录账号与审计)；Prometheus 指标 |
 
@@ -213,6 +214,7 @@ flowchart TB
 | [检测与研判](docs/detection.md) | 威胁等级判定、研判复核、攻击活动与资产攻击链路、数据窃取与横向移动、诱饵、主机进程检测、账号盗用、威胁评分、安全评估与失陷研判 |
 | [攻击源溯源](docs/traceability.md) | 多源定位、内网网段、定位库热更新、同源关联分析、攻击地图飞线与密度 |
 | [自学习与 AI 研判](docs/self-learning.md) | 自动生效的范围与边界、自我纠错闭环与撤销纠错、行为基线、合规自检、外部模型配置与模型适配 |
+| [AI 使用统计](docs/ai-usage.md) | 数据来源与上传量的归属方法、服务目录与策略、疑似 AI 服务与 AI 接口发现、使用者与部门、权限与报表、能力边界 |
 | [安全运营](docs/operations.md) | 事件处置、告警推送、原始日志、资产漏洞、报表合规、账号审计、监控指标、告警归档 |
 | [配置参考](docs/configuration.md) | 常用配置项与运行注意事项 |
 | [API](docs/api.md) | REST 接口一览 |

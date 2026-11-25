@@ -396,3 +396,20 @@ ai:
   desensitize: true             # 发送前脱敏：内网地址、口令 / 令牌类参数与认证头、手机号、身份证号、邮箱；攻击来源公网地址保留
   auto_triage: false            # 新出现的高危及以上事件自动研判
   auto_triage_medium: false     # 自动研判的范围扩大到中危事件（模型调用量会明显增加）
+
+# AI 使用统计（默认开启，说明见 docs/ai-usage.md）：按已接入的 DNS、TLS 握手（Zeek ssl.log 的 SNI）与会话日志，
+# 统计内网终端使用了哪些 AI 服务、用了多少、上传了多少数据，并列出目录之外的疑似 AI 服务与 AI 接口。
+# 只统计与展示（风险管理 → AI 使用，需要运营分析员权限），不拦截、不告警，不进入攻击检测与评分。
+# 页面“服务目录”中设定的策略与登记的服务保存在状态目录（aiuse.json.gz），与这里合并生效（页面设定的策略优先）。
+ai_usage:
+  enabled: true
+  policies: {}          # 按单位的 AI 使用管理制度设定策略（服务编号 → allow / restrict / deny），例如 {chatgpt: restrict, openai-api: deny}
+  services: []          # 新增服务（API 中转站、自建模型网关），或按 id 覆盖内置服务
+  #  - name: 内部大模型网关
+  #    category: api      # chat / coding / api / image / audio / search / writing / agent / model / other
+  #    region: domestic   # domestic（境内）/ overseas（境外）
+  #    policy: allow
+  #    domains: ["llm.corp.example"]
+  disable: []           # 停用的内置服务编号
+  retention_days: 62    # 按天统计的保留天数（覆盖“上月”月报）
+  max_records: 300000   # “天 × 终端 × 服务”的记录数上限（约 40 MB 内存），超过时先淘汰最早一天
