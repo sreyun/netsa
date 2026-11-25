@@ -39,7 +39,7 @@ AI 服务大多部署在 Cloudflare、Azure 等共享地址上，同一个地址
 
 ## 发现目录之外的 AI 服务
 
-- **疑似 AI 服务**：DNS 查询或 TLS 握手中出现 openai、chatgpt、gpt、claude、anthropic、deepseek、llm、ollama、aigc、chatglm、qwen 等特征词（按 `.` `-` `_` 分隔后的完整词或以它开头，`egypt` 里的 gpt 不算），或使用 `.ai` 顶级域名、又不在目录中的，按注册域名列出，附出现过的完整域名与终端数。常见的是 API 中转站与新出现的工具。确认后点“登记”加入目录（之后的访问计入统计），不相关的点“忽略”。
+- **疑似 AI 服务**：DNS 查询或 TLS 握手中出现 openai、chatgpt、gpt、claude、anthropic、deepseek、llm、ollama、aigc、chatglm、qwen 等特征词（按 `.` `-` `_` 分隔后的完整词或以它开头，`egypt` 里的 gpt 不算），或使用 `.ai` 顶级域名、又不在目录中的，按注册域名列出，附出现过的完整域名与终端数。常见的是 API 中转站与新出现的工具。确认后点“登记”加入目录（之后的访问计入统计），不相关的点“忽略”。最多列 2000 个注册域名，满了以后淘汰只有一个终端、超过一天没有再出现的条目（优先淘汰只因 `.ai` 顶级域名列出的），`.ai` 域名不会挤掉含特征词的条目。
 - **AI 接口发现**：Web 或流量日志中出现大模型接口路径的站点：OpenAI 兼容接口（`/v1/chat/completions`、`/v1/embeddings`、`/v1/models` 等，含 `/compatible-mode/v1/chat/completions` 这类路径）、Anthropic（`/v1/messages`）、Gemini（`:generateContent`）、Dify 应用接口，以及 11434 端口上的 Ollama 接口。用于发现内网自建、没有登记的模型服务，以及对外提供的模型接口（列出外网来源数）。只记录存在的接口（2xx / 3xx、401 / 403、405、429），扫描器在各网站上探测 `/v1/models` 时的 404 不算。
 
 ## 使用者与部门

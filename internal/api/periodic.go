@@ -393,6 +393,15 @@ func (s *Server) reportEmail(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "收件人过多（最多 50 个）")
 		return
 	}
+	// 配置问题直接说明（此前按发信失败返回 502，看起来像是邮件服务器故障）
+	if !s.smtpConfig().Enabled() {
+		writeError(w, http.StatusBadRequest, "未配置邮件服务器（report.smtp.host / from）")
+		return
+	}
+	if len(orDefault(f.To, s.Cfg.Report.Recipients)) == 0 {
+		writeError(w, http.StatusBadRequest, "没有收件人：请在 report.recipients 中配置，或在请求中填写 to")
+		return
+	}
 	extendDeadline(w, 2*time.Minute)
 	title, err := s.SendPeriodReport(f.Period, f.Range, f.To)
 	s.audit(r, "发送安全报告邮件", title+" → "+strings.Join(orDefault(f.To, s.Cfg.Report.Recipients), ","), err)

@@ -2082,10 +2082,14 @@ function openPasswordForm(forced) {
   $('#pwCancel').hidden = forced;
   $('#pwUser').value = me.user;
   ['#pwCurrent', '#pwNew', '#pwNew2'].forEach((s) => { $(s).value = ''; });
-  $('#pwMsg').textContent = '';
-  $('#pwMsg').className = 'form-msg';
+  // 配置文件账号、外部账号不能在页面修改密码：打开时直接说明，不必填完再提交
+  const note = forced ? '' : me.password_note;
+  $('#pwMsg').textContent = note || '';
+  $('#pwMsg').className = 'form-msg' + (note ? ' err' : '');
+  ['#pwCurrent', '#pwNew', '#pwNew2'].forEach((s) => { $(s).disabled = !!note; });
+  $('#pwModal').querySelector('[type=submit]').disabled = !!note;
   $('#pwModal').hidden = false;
-  $('#pwCurrent').focus();
+  if (!note) $('#pwCurrent').focus();
 }
 function closePasswordForm() { $('#pwModal').hidden = true; }
 $('#pwClose').addEventListener('click', closePasswordForm);
@@ -2429,7 +2433,7 @@ document.addEventListener('fullscreenchange', () => setTimeout(resizeCharts, 200
   try {
     const s = await api('/api/auth/session');
     if (!s.authenticated) { goLogin(); return; }
-    me = { user: s.user, role: s.role, auth: s.auth_enabled, must_change: s.must_change, two_factor: s.two_factor, must_enroll: s.must_enroll };
+    me = { user: s.user, role: s.role, auth: s.auth_enabled, must_change: s.must_change, two_factor: s.two_factor, must_enroll: s.must_enroll, password_note: s.password_note || '' };
   } catch (_) { return; }
   renderUserMenu();
   if (!me.auth) applyRoles();

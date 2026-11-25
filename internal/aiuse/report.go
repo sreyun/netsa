@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -139,18 +140,57 @@ func (m *Manager) Range(rng string) (from, to time.Time) {
 	return to.AddDate(0, 0, -6), to
 }
 
-type subjAgg struct {
-	row   SubjectRow
-	usage map[string]int64
+// cellRow 是复制出来的一条记录：汇总在锁外进行。
+type cellRow struct {
+	k cellKey
+	c cell
 }
 
-// Report 汇总查询范围内的使用情况。
+// subjAgg 是一个终端的汇总。一个终端通常只用几个服务、几天，用切片线性查找，比每个终端建三个 map 快得多。
+type subjAgg struct {
+	row         SubjectRow
+	first, last int64
+	uses        []svcUse
+	days        []day // 有使用的日子（不重复）
+}
+
+type svcUse struct {
+	id   string
+	n    int64 // 使用量（排序用）
+	used bool  // 用过（不只是被拦截的尝试）
+}
+
+func (sa *subjAgg) use(id string, n int64, used bool) {
+	for i := range sa.uses {
+		if sa.uses[i].id == id {
+			sa.uses[i].n += n
+			sa.uses[i].used = sa.uses[i].used || used
+			return
+		}
+	}
+	sa.uses = append(sa.uses, svcUse{id: id, n: n, used: used})
+}
+
+func (sa *subjAgg) usedOn(d day) {
+	for _, x := range sa.days {
+		if x == d {
+			return
+		}
+	}
+	sa.days = append(sa.days, d)
+}
+
+type svcAgg struct {
+	row         ServiceRow
+	first, last int64
+}
+
+// Report 汇总查询范围内的使用情况。持锁期间只复制范围内的记录与目录，汇总在锁外进行：
+// 满规模（30 万条记录）时汇总要几百毫秒，此前全程持锁，期间流水线的统计都要等它。
 func (m *Manager) Report(q Query) *Report {
 	if m == nil {
 		return &Report{}
 	}
-	m.mu.Lock()
-	defer m.mu.Unlock()
 	if q.To.IsZero() {
 		_, q.To = m.Range("7d")
 	}
@@ -161,51 +201,60 @@ func (m *Manager) Report(q Query) *Report {
 		q.Limit = 500
 	}
 	d0, d1 := m.dayOf(q.From), m.dayOf(q.To)
-	r := &Report{From: q.From.In(m.loc).Format("2006-01-02"), To: q.To.In(m.loc).Format("2006-01-02"), Subjects: []SubjectRow{},
-		Services: []ServiceRow{}, Candidates: []Candidate{}, Endpoints: []Endpoint{}}
-	svcs := map[string]*ServiceRow{}
-	svcSubj := map[string]map[string]bool{}
-	subjects := map[string]*subjAgg{}
-	type dayAgg struct {
-		row  DayRow
-		subj map[string]bool
+	m.mu.Lock()
+	rows := m.rowsLocked(d0, d1, q.IP, q.Service)
+	svcs := make(map[string]Service, len(m.services))
+	for id, s := range m.services {
+		svcs[id] = *s
 	}
-	days := map[day]*dayAgg{}
-	catSubj := map[string]map[string]bool{}
-	overseasSubj := map[string]bool{}
-	for k, c := range m.cells {
-		if k.d < d0 || k.d > d1 || q.IP != "" && k.ip != q.IP || q.Service != "" && k.svc != q.Service {
+	firstSeen := make(map[string]time.Time, len(m.svcSeen))
+	for id, s := range m.svcSeen {
+		firstSeen[id] = s.First
+	}
+	var cands []Candidate
+	var eps []Endpoint
+	if q.IP == "" && q.Service == "" {
+		for _, c := range m.candidates {
+			if !c.Ignored {
+				cp := *c
+				cp.clients = nil
+				cands = append(cands, cp)
+			}
+		}
+		for _, e := range m.endpoints {
+			cp := *e
+			cp.clients = nil
+			eps = append(eps, cp)
+		}
+	}
+	cov := m.coverageLocked()
+	m.mu.Unlock()
+
+	r := &Report{From: q.From.In(m.loc).Format("2006-01-02"), To: q.To.In(m.loc).Format("2006-01-02"), Subjects: []SubjectRow{},
+		Services: []ServiceRow{}, Candidates: []Candidate{}, Endpoints: []Endpoint{}, Coverage: cov}
+	svc := map[string]*svcAgg{}
+	subjects := map[string]*subjAgg{}
+	days := map[day]*DayRow{}
+	for i := range rows {
+		k, c := rows[i].k, &rows[i].c
+		s, ok := svcs[k.svc]
+		if !ok {
 			continue
 		}
-		s := m.services[k.svc]
-		if s == nil {
-			continue
+		a := svc[k.svc]
+		if a == nil {
+			a = &svcAgg{row: ServiceRow{Service: s}, first: c.first, last: c.last}
+			svc[k.svc] = a
 		}
-		first, last := time.Unix(c.first, 0).In(m.loc), time.Unix(c.last, 0).In(m.loc)
-		sr := svcs[k.svc]
-		if sr == nil {
-			sr = &ServiceRow{Service: *s, First: first, Last: last}
-			svcs[k.svc] = sr
-			svcSubj[k.svc] = map[string]bool{}
-		}
-		sr.Queries += c.queries
-		sr.Conns += c.conns
-		sr.Denied += c.denied
-		sr.Up = satAdd(sr.Up, c.up)
-		sr.Down = satAdd(sr.Down, c.down)
-		if first.Before(sr.First) {
-			sr.First = first
-		}
-		if last.After(sr.Last) {
-			sr.Last = last
-		}
-		used := c.queries+c.conns > 0 || c.up > 0 // 只有被拦截的尝试不算“使用”
-		if used {
-			svcSubj[k.svc][k.ip] = true
-		}
+		a.row.Queries += c.queries
+		a.row.Conns += c.conns
+		a.row.Denied += c.denied
+		a.row.Up = satAdd(a.row.Up, c.up)
+		a.row.Down = satAdd(a.row.Down, c.down)
+		a.first, a.last = min(a.first, c.first), max(a.last, c.last)
 		sa := subjects[k.ip]
 		if sa == nil {
-			sa = &subjAgg{row: SubjectRow{IP: k.ip, First: first, Last: last}, usage: map[string]int64{}}
+			sa = &subjAgg{row: SubjectRow{IP: k.ip}, first: c.first, last: c.last}
 			subjects[k.ip] = sa
 		}
 		sa.row.Queries += c.queries
@@ -213,40 +262,29 @@ func (m *Manager) Report(q Query) *Report {
 		sa.row.Denied += c.denied
 		sa.row.Up = satAdd(sa.row.Up, c.up)
 		sa.row.Down = satAdd(sa.row.Down, c.down)
-		if first.Before(sa.row.First) {
-			sa.row.First = first
-		}
-		if last.After(sa.row.Last) {
-			sa.row.Last = last
-		}
-		sa.usage[k.svc] += c.queries + c.conns + c.denied + c.up/65536 + 1
-		if used && s.Policy == PolicyDeny {
-			sa.row.Deny = true
-		}
-		if used && s.Region == RegionOverseas {
-			sa.row.Overseas = true
-			overseasSubj[k.ip] = true
-			r.Totals.OverseasUp = satAdd(r.Totals.OverseasUp, c.up)
-		}
+		sa.first, sa.last = min(sa.first, c.first), max(sa.last, c.last)
+		used := c.queries+c.conns > 0 || c.up > 0 // 只有被拦截的尝试不算“使用”
+		sa.use(k.svc, c.queries+c.conns+c.denied+c.up/65536+1, used)
 		if used {
-			if catSubj[s.Category] == nil {
-				catSubj[s.Category] = map[string]bool{}
+			sa.usedOn(k.d)
+			if s.Policy == PolicyDeny {
+				sa.row.Deny = true
 			}
-			catSubj[s.Category][k.ip] = true
+			if s.Region == RegionOverseas {
+				sa.row.Overseas = true
+				r.Totals.OverseasUp = satAdd(r.Totals.OverseasUp, c.up)
+			}
 		}
-		da := days[k.d]
-		if da == nil {
-			da = &dayAgg{subj: map[string]bool{}}
-			days[k.d] = da
+		dr := days[k.d]
+		if dr == nil {
+			dr = &DayRow{}
+			days[k.d] = dr
 		}
-		if used {
-			da.subj[k.ip] = true
-		}
-		da.row.Requests += c.queries + c.conns
-		da.row.Up = satAdd(da.row.Up, c.up)
-		da.row.Denied += c.denied
+		dr.Requests += c.queries + c.conns
+		dr.Up = satAdd(dr.Up, c.up)
+		dr.Denied += c.denied
 		if s.Region == RegionOverseas {
-			da.row.OverseasUp = satAdd(da.row.OverseasUp, c.up)
+			dr.OverseasUp = satAdd(dr.OverseasUp, c.up)
 		}
 		r.Totals.Queries += c.queries
 		r.Totals.Conns += c.conns
@@ -258,16 +296,67 @@ func (m *Manager) Report(q Query) *Report {
 				Denied: c.denied, Up: c.up, Down: c.down, First: c.first, Last: c.last})
 		}
 	}
-	for id, sr := range svcs {
-		sr.Subjects = len(svcSubj[id])
-		if s := m.svcSeen[id]; s != nil {
-			sr.FirstAll = s.First.In(m.loc)
-			sr.New = m.dayOf(s.First) >= d0 && m.dayOf(s.First) <= d1
+	// 按终端汇总后再数各服务、类别、每天的使用者：比逐条记录维护按地址的集合快得多
+	svcSubj := map[string]int{}
+	catSubj := map[string]int64{}
+	daySubj := map[day]int{}
+	var cats []string
+	for _, sa := range subjects {
+		cats = cats[:0]
+		nUsed := 0
+		for _, u := range sa.uses {
+			if !u.used {
+				continue
+			}
+			nUsed++
+			svcSubj[u.id]++
+			if c := svcs[u.id].Category; !slices.Contains(cats, c) {
+				cats = append(cats, c)
+			}
 		}
-		if sr.New {
+		for _, c := range cats {
+			catSubj[c]++
+		}
+		for _, d := range sa.days {
+			daySubj[d]++
+		}
+		sort.Slice(sa.uses, func(i, j int) bool {
+			if sa.uses[i].n != sa.uses[j].n {
+				return sa.uses[i].n > sa.uses[j].n
+			}
+			return sa.uses[i].id < sa.uses[j].id
+		})
+		ids := make([]string, len(sa.uses))
+		for i, u := range sa.uses {
+			ids[i] = u.id
+		}
+		sa.row.Services = ids
+		sa.row.First, sa.row.Last = time.Unix(sa.first, 0).In(m.loc), time.Unix(sa.last, 0).In(m.loc)
+		if sa.row.Deny {
+			r.Totals.DenySubjects++
+		}
+		if sa.row.Overseas {
+			r.Totals.OverseasSubj++
+		}
+		if nUsed > 0 {
+			r.Totals.Subjects++
+		}
+		r.Subjects = append(r.Subjects, sa.row)
+	}
+	for id, a := range svc {
+		a.row.Subjects = svcSubj[id]
+		a.row.First, a.row.Last = time.Unix(a.first, 0).In(m.loc), time.Unix(a.last, 0).In(m.loc)
+		if t, ok := firstSeen[id]; ok {
+			a.row.FirstAll = t.In(m.loc)
+			a.row.New = m.dayOf(t) >= d0 && m.dayOf(t) <= d1
+		}
+		if a.row.New {
 			r.Totals.NewServices++
 		}
-		r.Services = append(r.Services, *sr)
+		if a.row.Subjects > 0 {
+			r.Totals.Services++
+		}
+		r.Services = append(r.Services, a.row)
 	}
 	sort.Slice(r.Services, func(i, j int) bool {
 		a, b := r.Services[i], r.Services[j]
@@ -279,26 +368,6 @@ func (m *Manager) Report(q Query) *Report {
 		}
 		return a.ID < b.ID
 	})
-	for _, sa := range subjects {
-		ids := make([]string, 0, len(sa.usage))
-		for id := range sa.usage {
-			ids = append(ids, id)
-		}
-		sort.Slice(ids, func(i, j int) bool {
-			if sa.usage[ids[i]] != sa.usage[ids[j]] {
-				return sa.usage[ids[i]] > sa.usage[ids[j]]
-			}
-			return ids[i] < ids[j]
-		})
-		sa.row.Services = ids
-		if sa.row.Deny {
-			r.Totals.DenySubjects++
-		}
-		if sa.row.Queries+sa.row.Conns > 0 || sa.row.Up > 0 {
-			r.Totals.Subjects++
-		}
-		r.Subjects = append(r.Subjects, sa.row)
-	}
 	r.SubjectsAll = len(r.Subjects)
 	sort.Slice(r.Subjects, func(i, j int) bool {
 		a, b := r.Subjects[i], r.Subjects[j]
@@ -319,24 +388,17 @@ func (m *Manager) Report(q Query) *Report {
 	if len(r.Subjects) > q.Limit {
 		r.Subjects = r.Subjects[:q.Limit]
 	}
-	r.Totals.Services = 0
-	for _, sr := range r.Services {
-		if sr.Subjects > 0 {
-			r.Totals.Services++
-		}
-	}
-	r.Totals.OverseasSubj = len(overseasSubj)
 	for d := d0; d <= d1 && d-d0 < 400; d++ {
-		row := DayRow{Date: m.dateOf(d).Format("2006-01-02")}
-		if da := days[d]; da != nil {
-			row = da.row
-			row.Date = m.dateOf(d).Format("2006-01-02")
-			row.Subjects = len(da.subj)
+		row := DayRow{}
+		if dr := days[d]; dr != nil {
+			row = *dr
 		}
+		row.Date = m.dateOf(d).Format("2006-01-02")
+		row.Subjects = daySubj[d]
 		r.Daily = append(r.Daily, row)
 	}
-	for cat, set := range catSubj {
-		r.Categories = append(r.Categories, RankItem{Name: cat, Value: int64(len(set))})
+	for cat, n := range catSubj {
+		r.Categories = append(r.Categories, RankItem{Name: cat, Value: n})
 	}
 	sort.Slice(r.Categories, func(i, j int) bool {
 		if r.Categories[i].Value != r.Categories[j].Value {
@@ -350,47 +412,44 @@ func (m *Manager) Report(q Query) *Report {
 		}
 		return r.Detail[i].Last > r.Detail[j].Last
 	})
-	if q.IP == "" && q.Service == "" {
-		for _, c := range m.candidates {
-			if !c.Ignored {
-				r.Candidates = append(r.Candidates, *c)
-			}
+	sort.Slice(cands, func(i, j int) bool {
+		a, b := cands[i], cands[j]
+		if a.Clients != b.Clients {
+			return a.Clients > b.Clients
 		}
-		sort.Slice(r.Candidates, func(i, j int) bool {
-			a, b := r.Candidates[i], r.Candidates[j]
-			if a.Clients != b.Clients {
-				return a.Clients > b.Clients
-			}
-			if a.Hits != b.Hits {
-				return a.Hits > b.Hits
-			}
-			return a.Domain < b.Domain
-		})
-		if len(r.Candidates) > 200 {
-			r.Candidates = r.Candidates[:200]
+		if a.Hits != b.Hits {
+			return a.Hits > b.Hits
 		}
-		for _, e := range m.endpoints {
-			r.Endpoints = append(r.Endpoints, *e)
+		return a.Domain < b.Domain
+	})
+	r.Candidates = append(r.Candidates, cands[:min(len(cands), 200)]...)
+	sort.Slice(eps, func(i, j int) bool {
+		a, b := eps[i], eps[j]
+		if a.Internal != b.Internal {
+			return a.Internal
 		}
-		sort.Slice(r.Endpoints, func(i, j int) bool {
-			a, b := r.Endpoints[i], r.Endpoints[j]
-			if a.Internal != b.Internal {
-				return a.Internal
-			}
-			if a.Clients != b.Clients {
-				return a.Clients > b.Clients
-			}
-			if a.Hits != b.Hits {
-				return a.Hits > b.Hits
-			}
-			return a.Host < b.Host
-		})
-		if len(r.Endpoints) > 200 {
-			r.Endpoints = r.Endpoints[:200]
+		if a.Clients != b.Clients {
+			return a.Clients > b.Clients
 		}
-	}
-	r.Coverage = m.coverageLocked()
+		if a.Hits != b.Hits {
+			return a.Hits > b.Hits
+		}
+		return a.Host < b.Host
+	})
+	r.Endpoints = append(r.Endpoints, eps[:min(len(eps), 200)]...)
 	return r
+}
+
+// rowsLocked 复制自然日范围内（可按终端、服务筛选）的记录（调用方持锁）。
+func (m *Manager) rowsLocked(d0, d1 day, ip, svc string) []cellRow {
+	rows := make([]cellRow, 0, 256)
+	for k, c := range m.cells {
+		if k.d < d0 || k.d > d1 || ip != "" && k.ip != ip || svc != "" && k.svc != svc {
+			continue
+		}
+		rows = append(rows, cellRow{k: k, c: *c})
+	}
+	return rows
 }
 
 func (m *Manager) coverageLocked() Coverage {
@@ -459,23 +518,27 @@ func (m *Manager) Catalog() []CatalogItem {
 	if m == nil {
 		return []CatalogItem{}
 	}
-	m.mu.Lock()
-	defer m.mu.Unlock()
 	cut := m.dayOf(m.now()) - 29
-	users := map[string]map[string]bool{}
-	for k, c := range m.cells {
-		if k.d >= cut && c.queries+c.conns > 0 {
-			if users[k.svc] == nil {
-				users[k.svc] = map[string]bool{}
-			}
-			users[k.svc][k.ip] = true
-		}
-	}
+	m.mu.Lock()
+	rows := m.rowsLocked(cut, m.dayOf(m.now())+1, "", "")
 	out := make([]CatalogItem, 0, len(m.order))
 	for _, id := range m.order {
 		s := *m.services[id]
 		s.Domains = append([]string(nil), s.Domains...)
-		out = append(out, CatalogItem{Service: s, Subjects30: len(users[id])})
+		out = append(out, CatalogItem{Service: s})
+	}
+	m.mu.Unlock()
+	users := map[string]map[string]bool{} // 锁外统计近 30 天的使用者
+	for _, r := range rows {
+		if r.c.queries+r.c.conns > 0 {
+			if users[r.k.svc] == nil {
+				users[r.k.svc] = map[string]bool{}
+			}
+			users[r.k.svc][r.k.ip] = true
+		}
+	}
+	for i := range out {
+		out[i].Subjects30 = len(users[out[i].ID])
 	}
 	return out
 }
@@ -626,23 +689,26 @@ func (m *Manager) Rows(q Query) []UsageRow {
 	if m == nil {
 		return nil
 	}
-	m.mu.Lock()
-	defer m.mu.Unlock()
 	d0, d1 := m.dayOf(q.From), m.dayOf(q.To)
+	m.mu.Lock()
+	rows := m.rowsLocked(d0, d1, q.IP, q.Service)
+	svcs := make(map[string]Service, len(m.services))
+	for id, s := range m.services {
+		svcs[id] = *s
+	}
+	m.mu.Unlock()
 	type key struct{ ip, svc string }
 	agg := map[key]*UsageRow{}
-	for k, c := range m.cells {
-		if k.d < d0 || k.d > d1 || q.IP != "" && k.ip != q.IP || q.Service != "" && k.svc != q.Service {
-			continue
-		}
-		s := m.services[k.svc]
-		if s == nil {
+	for i := range rows {
+		k, c := rows[i].k, &rows[i].c
+		s, ok := svcs[k.svc]
+		if !ok {
 			continue
 		}
 		first, last := time.Unix(c.first, 0).In(m.loc), time.Unix(c.last, 0).In(m.loc)
 		r := agg[key{k.ip, k.svc}]
 		if r == nil {
-			r = &UsageRow{IP: k.ip, Service: *s, First: first, Last: last}
+			r = &UsageRow{IP: k.ip, Service: s, First: first, Last: last}
 			agg[key{k.ip, k.svc}] = r
 		}
 		r.Queries += c.queries

@@ -41,7 +41,7 @@
 | `GET /api/vulns?status=&severity=&q=&ip=`、`PUT /api/vulns/{id}`、`DELETE /api/vulns/{id}` | 漏洞列表与状态修改 |
 | `GET /api/reports/periodic?period=week|month&range=recent|last&format=html`、`POST /api/reports/email` | 周报 / 月报（JSON 或可打印 HTML）/ 立即发送邮件（管理员） |
 | `GET /api/compliance/mlps?format=html` | 等保 2.0 合规检查报告（管理员） |
-| `POST /api/auth/login` / `POST /api/auth/logout` / `GET /api/auth/session` | 登录 / 退出 / 当前会话（其余接口均需登录，或使用 HTTP Basic 认证） |
+| `POST /api/auth/login` / `POST /api/auth/logout` / `GET /api/auth/session` | 登录 / 退出 / 当前会话（其余接口均需登录，或使用 HTTP Basic 认证）；配置文件账号、外部账号的会话带 `password_note`，说明密码不能在页面修改的原因 |
 | `POST /api/auth/password` | 修改自己的密码 |
 | `GET/POST /api/auth/users`、`PUT/DELETE /api/auth/users/{name}`、`GET /api/auth/audit` | 账号管理与登录记录（管理员） |
 | `POST /api/alert/robots/{id}/report` | 立即向该机器人发送安全日报（管理员） |

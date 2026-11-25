@@ -2,6 +2,7 @@ package aiuse
 
 import (
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -438,5 +439,41 @@ func TestBytesWhenHandshakesReadFirst(t *testing.T) {
 	}
 	if up["chatgpt"] != 1100 || up["openai-api"] != 400 {
 		t.Fatalf("up = %v", up)
+	}
+}
+
+// 疑似域名表满时：.ai 噪声不挤掉含特征词的条目；新的含特征词条目可以淘汰只有一个终端、长期不出现的 .ai 条目
+func TestCandidateEviction(t *testing.T) {
+	m := newTest(t, Options{})
+	old := testNow.Add(-48 * time.Hour)
+	for i := 0; i < maxCandidates; i++ {
+		name := "x" + strconv.Itoa(i) + ".ai"
+		if i == 0 {
+			name = "my-gpt-relay.com" // 含特征词、单终端、长期不出现
+		}
+		m.Observe(dns("10.0.0.5", name, old))
+	}
+	m.Observe(dns("10.0.0.6", "fresh-noise.ai", testNow)) // 满了：淘汰一个旧的 .ai 条目
+	m.Observe(dns("10.0.0.6", "new-llm-proxy.com", testNow))
+	m.mu.Lock()
+	_, kept := m.candidates["my-gpt-relay.com"]
+	_, noise := m.candidates["fresh-noise.ai"]
+	_, proxy := m.candidates["new-llm-proxy.com"]
+	n := len(m.candidates)
+	m.mu.Unlock()
+	if !kept || !noise || !proxy || n != maxCandidates {
+		t.Fatalf("kept=%v noise=%v proxy=%v n=%d", kept, noise, proxy, n)
+	}
+	// 全部是活跃的含特征词条目时，新的 .ai 噪声不能挤掉它们
+	m2 := newTest(t, Options{})
+	for i := 0; i < maxCandidates; i++ {
+		m2.Observe(dns("10.0.0.5", "gpt-"+strconv.Itoa(i)+".com", old))
+	}
+	m2.Observe(dns("10.0.0.6", "noise.ai", testNow))
+	m2.mu.Lock()
+	_, in := m2.candidates["noise.ai"]
+	m2.mu.Unlock()
+	if in {
+		t.Fatal(".ai 噪声挤掉了含特征词的条目")
 	}
 }

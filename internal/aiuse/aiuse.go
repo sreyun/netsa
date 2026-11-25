@@ -217,8 +217,9 @@ type Manager struct {
 	candidates map[string]*Candidate
 	endpoints  map[string]*Endpoint
 
-	dropped   int64 // 超过上限没有记录的
-	bytesSeen bool  // 有会话字节被归到 AI 服务（页面据此提示上传量是否可用）
+	hasPairs  atomic.Bool // 学到过“终端 + 目的地址”：之前的会话日志不需要加锁查找
+	dropped   int64       // 超过上限没有记录的
+	bytesSeen bool        // 有会话字节被归到 AI 服务（页面据此提示上传量是否可用）
 	sniSeen   bool
 	dirty     bool
 	lastSave  time.Time
@@ -424,15 +425,13 @@ func (m *Manager) Observe(ev *model.Event) {
 		m.mu.Unlock()
 	case ev.Kind == model.KindWeb:
 		m.endpoint(ev)
-		if !internal(ev.SrcIP) || ev.DstIP != "" && internal(ev.DstIP) {
-			return
-		}
+		// 先查目录（几次查表，不分配内存），命中后再解析地址：Web 日志是量最大的数据源，绝大多数与 AI 无关
 		name := normName(ev.Host)
 		if name == "" {
 			return
 		}
 		svc := m.match.Load().match(name)
-		if svc == "" {
+		if svc == "" || !internal(ev.SrcIP) || ev.DstIP != "" && internal(ev.DstIP) {
 			return
 		}
 		m.record(ev.Time, svc, ev.SrcIP, func(c *cell) {
@@ -441,7 +440,8 @@ func (m *Manager) Observe(ev *model.Event) {
 			c.down = satAdd(c.down, max(ev.Bytes, 0))
 		})
 	case ev.Kind == model.KindFirewall && !ev.Aux:
-		if ev.SentBytes <= 0 && ev.RecvBytes <= 0 || !internal(ev.SrcIP) || ev.DstIP == "" {
+		// 没有学到任何握手（没有接入 TLS 握手日志）时，会话日志直接跳过，不加锁
+		if ev.SentBytes <= 0 && ev.RecvBytes <= 0 || ev.DstIP == "" || !m.hasPairs.Load() || !internal(ev.SrcIP) {
 			return
 		}
 		m.attributeBytes(ev)
@@ -479,6 +479,7 @@ func (m *Manager) learnFlowLocked(ev *model.Event, svc string) {
 		v = &pairVal{}
 		pk.src, pk.dst = strings.Clone(pk.src), strings.Clone(pk.dst)
 		m.pairs[pk] = v
+		m.hasPairs.Store(true)
 	}
 	v.add(at, svc)
 	v.exp = now + int64(pairTTL/time.Second)
@@ -669,7 +670,8 @@ func (m *Manager) candidate(t time.Time, name, client string) {
 	defer m.mu.Unlock()
 	c := m.candidates[reg]
 	if c == nil {
-		if len(m.candidates) >= maxCandidates {
+		if len(m.candidates) >= maxCandidates && !m.evictCandidateLocked(reason, t) {
+			m.dropped++
 			return
 		}
 		c = &Candidate{Domain: strings.Clone(reg), Sample: strings.Clone(name), Reason: reason, First: t, Last: t, clients: map[string]struct{}{}}
@@ -689,32 +691,82 @@ func (m *Manager) candidate(t time.Time, name, client string) {
 	m.dirty = true
 }
 
-// endpointKind 按路径识别大模型接口。Ollama 的路径（/api/chat、/api/tags）在其他系统里也常见，只认默认端口 11434。
+// evictCandidateLocked 疑似域名表满时腾出一个位置：淘汰只有一个终端、超过 24 小时没有再出现、没有被人工忽略的条目，
+// 优先淘汰只因 .ai 顶级域名列出的（噪声多），其次是最久没有出现的。没有可淘汰的返回 false。
+// 否则 .ai 域名的噪声（统计、SaaS 服务）先把表占满，之后出现的 GPT 中转站就进不来了。
+func (m *Manager) evictCandidateLocked(reason string, now time.Time) bool {
+	isTLD := func(r string) bool { return strings.HasPrefix(r, "使用 .ai") }
+	var victim *Candidate
+	for _, c := range m.candidates {
+		if c.Ignored || c.Clients > 1 || now.Sub(c.Last) < 24*time.Hour {
+			continue
+		}
+		switch {
+		case victim == nil:
+			victim = c
+		case isTLD(c.Reason) != isTLD(victim.Reason):
+			if isTLD(c.Reason) {
+				victim = c // 优先淘汰只因 .ai 列出的
+			}
+		case c.Last.Before(victim.Last):
+			victim = c
+		}
+	}
+	if victim == nil || isTLD(reason) && !isTLD(victim.Reason) {
+		return false // .ai 噪声不挤掉含特征词的条目
+	}
+	delete(m.candidates, victim.Domain)
+	return true
+}
+
+// endpointKind 按路径识别大模型接口（不区分大小写、不分配内存：每条 Web 日志都会调用）。
+// Ollama 的路径（/api/chat、/api/tags）在其他系统里也常见，只认默认端口 11434。
 func endpointKind(path string, port int) string {
-	p := strings.ToLower(path)
+	p := path
 	if i := strings.IndexAny(p, "?#"); i >= 0 {
 		p = p[:i]
 	}
 	p = strings.TrimSuffix(p, "/")
+	if len(p) < 7 {
+		return ""
+	}
 	switch {
-	case strings.HasSuffix(p, "/chat/completions"), strings.HasSuffix(p, "/v1/completions"), strings.HasSuffix(p, "/v1/embeddings"),
-		strings.HasSuffix(p, "/v1/responses"), strings.HasSuffix(p, "/v1/images/generations"), strings.HasSuffix(p, "/v1/audio/transcriptions"),
-		p == "/v1/models":
+	case hasSuffixFold(p, "/chat/completions"), hasSuffixFold(p, "/v1/completions"), hasSuffixFold(p, "/v1/embeddings"),
+		hasSuffixFold(p, "/v1/responses"), hasSuffixFold(p, "/v1/images/generations"), hasSuffixFold(p, "/v1/audio/transcriptions"),
+		strings.EqualFold(p, "/v1/models"):
 		return "openai"
-	case p == "/v1/messages", p == "/v1/messages/count_tokens", strings.HasSuffix(p, "/anthropic/v1/messages"):
+	case strings.EqualFold(p, "/v1/messages"), strings.EqualFold(p, "/v1/messages/count_tokens"), hasSuffixFold(p, "/anthropic/v1/messages"):
 		return "anthropic"
-	case strings.Contains(p, ":generatecontent"), strings.Contains(p, ":streamgeneratecontent"):
+	case containsFold(p, ":generatecontent"), containsFold(p, ":streamgeneratecontent"):
 		return "gemini"
-	case strings.HasSuffix(p, "/v1/chat-messages"), strings.HasSuffix(p, "/v1/completion-messages"), strings.HasSuffix(p, "/v1/workflows/run"):
+	case hasSuffixFold(p, "/v1/chat-messages"), hasSuffixFold(p, "/v1/completion-messages"), hasSuffixFold(p, "/v1/workflows/run"):
 		return "dify"
 	}
 	if port == 11434 {
-		switch p {
-		case "/api/generate", "/api/chat", "/api/tags", "/api/pull", "/api/show", "/api/embed", "/api/embeddings", "/api/ps", "/api/create", "/api/push", "/api/version":
-			return "ollama"
+		for _, x := range ollamaPaths {
+			if strings.EqualFold(p, x) {
+				return "ollama"
+			}
 		}
 	}
 	return ""
+}
+
+var ollamaPaths = []string{"/api/generate", "/api/chat", "/api/tags", "/api/pull", "/api/show", "/api/embed", "/api/embeddings", "/api/ps", "/api/create", "/api/push", "/api/version"}
+
+// hasSuffixFold 判断 s 是否以 suffix 结尾（ASCII 不区分大小写，suffix 为小写）。
+func hasSuffixFold(s, suffix string) bool {
+	return len(s) >= len(suffix) && strings.EqualFold(s[len(s)-len(suffix):], suffix)
+}
+
+// containsFold 判断 s 是否包含 sub（ASCII 不区分大小写，sub 为小写）。
+func containsFold(s, sub string) bool {
+	for i := 0; i+len(sub) <= len(s); i++ {
+		if strings.EqualFold(s[i:i+len(sub)], sub) {
+			return true
+		}
+	}
+	return false
 }
 
 // hostPort 取出 Host 头中的端口（没有时返回 0）。
@@ -742,8 +794,7 @@ func (m *Manager) endpoint(ev *model.Event) {
 	if st := ev.Status; st != 0 && !(st >= 200 && st < 404 || st == 405 || st == 429) {
 		return
 	}
-	host := strings.ToLower(model.Printable(ev.Host, 120))
-	port := hostPort(host)
+	port := hostPort(ev.Host)
 	if port == 0 {
 		port = ev.DstPort
 	}
@@ -751,6 +802,7 @@ func (m *Manager) endpoint(ev *model.Event) {
 	if kind == "" {
 		return
 	}
+	host := strings.ToLower(model.Printable(ev.Host, 120))
 	if host == "" {
 		if ev.DstIP == "" {
 			return

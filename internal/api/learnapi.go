@@ -154,7 +154,17 @@ func (s *Server) learnPin(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, map[string]any{"ok": true})
 		return
 	}
-	pin := r.PathValue("action") == "pin"
+	// 只接受 pin / unpin：此前其他任意写法都按“解锁”处理并返回成功；锁定的规则必须存在（解锁不检查，便于清理已删除规则的锁定）
+	action := r.PathValue("action")
+	if action != "pin" && action != "unpin" {
+		writeError(w, http.StatusNotFound, "未知操作（可选 pin / unpin / enable / disable）")
+		return
+	}
+	pin := action == "pin"
+	if pin && !s.ruleExists(rule) {
+		writeError(w, http.StatusNotFound, "没有这条规则")
+		return
+	}
 	s.Learn.Pin(rule, user, pin)
 	act := "锁定规则（不参与自动校准）"
 	if !pin {
@@ -162,6 +172,16 @@ func (s *Server) learnPin(w http.ResponseWriter, r *http.Request) {
 	}
 	s.audit(r, act, rule, nil)
 	writeJSON(w, map[string]any{"ok": true})
+}
+
+// ruleExists 判断规则是否在当前生效的检测引擎中。
+func (s *Server) ruleExists(id string) bool {
+	for _, r := range s.engine().Rules() {
+		if r.ID == id {
+			return true
+		}
+	}
+	return false
 }
 
 // learnPolicy 修改自学习策略（管理员）：自动校准、确认攻击源复现升级及其阈值，立即生效。

@@ -120,19 +120,24 @@ func (s *Server) senderPolicy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var f struct {
-		Allowlist     bool `json:"allowlist"`
-		IncludeActive bool `json:"include_active"`
+		Allowlist     *bool `json:"allowlist"`
+		IncludeActive bool  `json:"include_active"`
 	}
 	if !decodeForm(w, r, &f) {
+		return
+	}
+	// 白名单是安全控制：必须明确给出开关，缺少字段时不能当作“关闭”
+	if f.Allowlist == nil {
+		writeError(w, http.StatusBadRequest, "缺少 allowlist（true / false）")
 		return
 	}
 	user := ""
 	if sess := sessionOf(r); sess != nil {
 		user = sess.User
 	}
-	n, err := s.Ingest.Senders.SetAllowlist(f.Allowlist, f.IncludeActive, user)
+	n, err := s.Ingest.Senders.SetAllowlist(*f.Allowlist, f.IncludeActive, user)
 	detail := "关闭"
-	if f.Allowlist {
+	if *f.Allowlist {
 		detail = "开启"
 		if n > 0 {
 			detail += "，自动登记 " + strconv.Itoa(n) + " 个活跃发送端"
@@ -143,7 +148,7 @@ func (s *Server) senderPolicy(w http.ResponseWriter, r *http.Request) {
 		s.senderError(w, err)
 		return
 	}
-	writeJSON(w, map[string]any{"allowlist": f.Allowlist, "added": n})
+	writeJSON(w, map[string]any{"allowlist": *f.Allowlist, "added": n})
 }
 
 // pushSenderNotices 推送 syslog 发送端通知：未授权发送端被拒绝、新发送端、登记设备断流与恢复。

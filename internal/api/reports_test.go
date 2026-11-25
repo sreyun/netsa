@@ -109,7 +109,7 @@ func TestReportsComplianceAudit(t *testing.T) {
 		t.Fatalf("月报 HTML: %d %s", rec.Code, body[:min(len(body), 300)])
 	}
 	// 邮件：未配置时报错；配置后发送到本地 SMTP
-	if rec := do(h, http.MethodPost, "/api/reports/email", `{"period":"week","to":["a@example.com"]}`, admin); rec.Code != 502 {
+	if rec := do(h, http.MethodPost, "/api/reports/email", `{"period":"week","to":["a@example.com"]}`, admin); rec.Code != 400 { // 未配置是配置问题（400），不是发信失败
 		t.Fatalf("未配置邮件服务器: %d %s", rec.Code, rec.Body.String())
 	}
 	port, got := smtpSink(t)

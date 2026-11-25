@@ -705,6 +705,29 @@ func (m *Manager) bump(u *User) {
 	m.basicOK.Range(func(k, _ any) bool { m.basicOK.Delete(k); return true })
 }
 
+// PasswordNote 说明账号的密码不能在页面修改的原因（配置文件账号、外部账号），可以修改时返回空串。
+// 页面打开“修改密码”时直接提示，不必填完三个密码框提交后才知道。
+func (m *Manager) PasswordNote(user string) string {
+	if m == nil {
+		return ""
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	u := m.users[user]
+	switch {
+	case u == nil:
+		if m.ext != nil {
+			return ErrExternalAccount.Error() // 外部账号首次登录前本地没有记录
+		}
+		return ""
+	case u.External != "":
+		return ErrExternalAccount.Error()
+	case u.Source == "config":
+		return ErrReadOnly.Error()
+	}
+	return ""
+}
+
 // ChangePassword 修改自己的密码（需校验当前密码），其他已登录会话随之失效。
 func (m *Manager) ChangePassword(user, current, next string) (string, error) {
 	m.mu.Lock()

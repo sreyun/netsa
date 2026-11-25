@@ -94,7 +94,7 @@ func TestWriteSearchVerify(t *testing.T) {
 		t.Fatalf("没有超过上限的行不应标记: %+v", res.Records)
 	}
 	q.Keyword, q.MaxRaw = "", 0
-	if _, err := s.Search(ctx, Query{From: base, To: base.Add(40 * 24 * time.Hour)}); err != ErrRange {
+	if _, err := s.Search(ctx, Query{From: base, To: base.Add(40 * 24 * time.Hour)}); !errors.Is(err, ErrRange) {
 		t.Fatal("时间范围过大应报错")
 	}
 

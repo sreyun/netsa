@@ -87,6 +87,12 @@ var (
 	ErrRange = errors.New("请指定检索的时间范围（最长 31 天）")
 )
 
+// rangeError 是时间范围不可用的具体原因，errors.Is(err, ErrRange) 同样成立。
+type rangeError string
+
+func (e rangeError) Error() string        { return string(e) }
+func (e rangeError) Is(target error) bool { return target == ErrRange }
+
 const maxRange = 31 * 24 * time.Hour
 
 func parseLine(line []byte) (Record, bool) {
@@ -130,8 +136,13 @@ func (s *Store) segmentsIn(from, to time.Time) []string {
 func (s *Store) Search(ctx context.Context, q Query) (Result, error) {
 	began := time.Now()
 	res := Result{Records: []Record{}}
-	if q.From.IsZero() || q.To.IsZero() || q.To.Before(q.From) || q.To.Sub(q.From) > maxRange {
+	switch { // 说明具体原因：此前时间填反也提示“请指定检索的时间范围”
+	case q.From.IsZero() || q.To.IsZero():
 		return res, ErrRange
+	case q.To.Before(q.From):
+		return res, rangeError("开始时间必须早于结束时间")
+	case q.To.Sub(q.From) > maxRange:
+		return res, rangeError("检索的时间范围最长 31 天，请缩小范围")
 	}
 	if q.Limit <= 0 {
 		q.Limit = 200

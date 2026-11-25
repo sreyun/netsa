@@ -471,7 +471,11 @@ func (s *Server) authSession(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, res)
 		return
 	}
-	writeJSON(w, sessionView(sess, s.Auth != nil))
+	v := sessionView(sess, s.Auth != nil)
+	if note := s.Auth.PasswordNote(sess.User); note != "" {
+		v["password_note"] = note // 密码不能在页面修改的原因（配置文件账号、外部账号）
+	}
+	writeJSON(w, v)
 }
 
 func (s *Server) authLogout(w http.ResponseWriter, r *http.Request) {

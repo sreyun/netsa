@@ -34,6 +34,8 @@ async function loadAIUse() {
   const t = rep.totals;
   const cv = rep.coverage || {};
   const notes = [];
+  // 首次使用：还没有任何记录时说明要接入什么日志，而不是只显示一排 0
+  if (!cv.records) notes.push('<b>还没有 AI 使用记录。</b>需要接入内网 DNS 服务器的查询日志（数据源类型 <code>dns</code>）或流量探针的 TLS 握手日志（Zeek ssl.log，类型 <code>zeek</code>），接入后几分钟内即可看到；终端访问 AI 服务时才会产生记录。');
   if (!cv.sni) notes.push('尚未接入 TLS 握手日志（如 Zeek ssl.log）：目前只按 DNS 查询统计，没有上传 / 下载量；不经过内网 DNS 的访问（DoH、浏览器内置解析）也看不到。');
   else if (!cv.bytes) notes.push('已接入 TLS 握手日志，但还没有会话日志（Zeek conn.log、防火墙会话日志）的字节数能归到 AI 服务，上传量暂不可用。');
   if (!r.assets) notes.push('在“资产漏洞”中按部门登记办公网段（如 10.1.10.0/24 → 研发部）或终端后，终端会显示使用者并按部门汇总。');
