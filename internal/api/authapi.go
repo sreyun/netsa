@@ -468,6 +468,9 @@ func (s *Server) authSession(w http.ResponseWriter, r *http.Request) {
 		if s.OIDC != nil {
 			res["oidc"] = s.OIDC.DisplayName()
 		}
+		if c := s.Cfg; c != nil && c.Server.DemoLogin && c.Server.Username != "" {
+			res["demo"] = map[string]string{"username": c.Server.Username, "password": c.Server.Password} // 公开演示环境的账号
+		}
 		writeJSON(w, res)
 		return
 	}

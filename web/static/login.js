@@ -17,8 +17,22 @@ fetch('/api/auth/session', { headers: { Accept: 'application/json' } })
   .then((s) => {
     if (s && s.authenticated) { home(); return; }
     if (s && s.oidc) { $('#ssoName').textContent = s.oidc; $('#ssoBtn').hidden = false; }
+    if (s && s.demo && s.demo.username) showDemo(s.demo);
   })
   .catch(() => {});
+
+// 公开演示环境（server.demo_login）：显示演示账号，可一键填入
+function showDemo(d) {
+  $('#demoUser').textContent = d.username;
+  $('#demoPass').textContent = d.password;
+  $('#demoAcct').hidden = false;
+  $('#demoFill').addEventListener('click', () => {
+    $('#username').value = d.username;
+    pw.value = d.password;
+    msg.textContent = '';
+    btn.focus();
+  });
+}
 
 // 单点登录失败时身份提供方回调会带上原因（只取固定的枚举值，不显示地址栏里的任意文字）
 const SSO_ERRORS = {

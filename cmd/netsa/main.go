@@ -68,7 +68,7 @@ import (
 
 // version 是构建版本号。默认值用于本地构建；镜像构建通过
 // -ldflags "-X main.version=<tag>" 注入，`netsa version` 与 /api/meta 都会显示注入后的值。
-var version = "1.15.1"
+var version = "1.15.2"
 
 func usage() {
 	fmt.Fprintf(os.Stderr, `netsa %s —— 网络安全态势感知与攻击面分析系统
@@ -1469,6 +1469,9 @@ func securityHints(cfg *config.Config) {
 	}
 	if cfg.Syslog.Enabled && !cfg.Syslog.Allowlist {
 		log.Printf("[security] 提示：syslog 未开启发送端白名单（syslog.allowlist）；任何能访问该端口的主机都可以写入日志")
+	}
+	if cfg.Server.DemoLogin {
+		log.Printf("[security] 提示：登录页公开显示了账号 %s 的密码（server.demo_login），只用于对外演示，生产环境请关闭", cfg.Server.Username)
 	}
 }
 

@@ -56,6 +56,28 @@ func TestReviewHardening(t *testing.T) {
 }
 
 // 配置文件账号不能在页面修改密码：会话信息中带上原因，页面打开“修改密码”时直接提示
+// 公开演示环境：未登录的会话带演示账号；没有开启时不带
+func TestSessionDemoLogin(t *testing.T) {
+	s, _ := testServer(t, "admin", "Demo-pass-2026")
+	h := s.Handler()
+	if rec := do(h, http.MethodGet, "/api/auth/session", "", nil); strings.Contains(rec.Body.String(), "demo") {
+		t.Fatalf("没有开启 demo_login 时不应返回演示账号：%s", rec.Body.String())
+	}
+	s.Cfg.Server.DemoLogin = true
+	rec := do(h, http.MethodGet, "/api/auth/session", "", nil)
+	var v struct {
+		Authenticated bool              `json:"authenticated"`
+		Demo          map[string]string `json:"demo"`
+	}
+	decode(t, rec.Body.Bytes(), &v)
+	if v.Authenticated || v.Demo["username"] != "admin" || v.Demo["password"] != "Demo-pass-2026" {
+		t.Fatalf("开启 demo_login 后未登录的会话应带演示账号：%s", rec.Body.String())
+	}
+	if rec := get(h, "/api/auth/session", "admin", "Demo-pass-2026"); strings.Contains(rec.Body.String(), "Demo-pass-2026") {
+		t.Fatalf("已登录的会话不需要再返回密码：%s", rec.Body.String())
+	}
+}
+
 func TestSessionPasswordNote(t *testing.T) {
 	s, _ := testServer(t, "admin", "secret")
 	h := s.Handler()

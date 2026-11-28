@@ -73,6 +73,9 @@ type ServerConfig struct {
 	// Pprof 开启 /debug/pprof 性能剖析接口（仅管理员，默认关闭）。用于排查 CPU / 内存 / 协程问题，
 	// 剖析期间会带来额外开销，排障结束后建议关闭。
 	Pprof bool `yaml:"pprof"`
+	// DemoLogin 公开演示环境：登录页显示配置文件中的账号与密码（server.username / password）并可一键填入。
+	// 只用于对外演示，生产环境不要开启；password 须为明文。
+	DemoLogin bool `yaml:"demo_login"`
 	// LDAP / OIDC 外部账号登录（说明见 docs/integrations.md）
 	LDAP LDAPConfig `yaml:"ldap"`
 	OIDC OIDCConfig `yaml:"oidc"`
@@ -597,6 +600,14 @@ func (c *Config) Validate() error {
 	}
 	if (c.Server.Username == "") != (c.Server.Password == "") {
 		return fmt.Errorf("server.username 与 server.password 需同时设置")
+	}
+	if c.Server.DemoLogin {
+		if c.Server.Username == "" {
+			return fmt.Errorf("server.demo_login 需要同时设置 server.username 与 server.password（登录页显示的就是这个账号）")
+		}
+		if strings.HasPrefix(c.Server.Password, "pbkdf2-sha256$") {
+			return fmt.Errorf("server.demo_login 需要明文的 server.password：哈希无法在登录页显示")
+		}
 	}
 	if t := strings.TrimSpace(c.Alert.ReportTime); t != "" && t != "off" {
 		tt, err := time.Parse("15:04", t)

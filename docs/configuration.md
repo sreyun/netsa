@@ -18,6 +18,7 @@
 | `server.tls_cert` / `tls_key` | 直接提供 HTTPS |
 | `server.allow_networks` | 只允许这些来源网段访问大屏与 API（本机与 `/healthz` 不受限）；反向代理之后需配合 `real_ip.trusted_proxies` |
 | `server.require_2fa` | 强制所有界面账号绑定身份验证器（双因素认证） |
+| `server.demo_login` | 公开演示环境：登录页显示配置文件中的账号与密码（`server.username` / `password`，密码须为明文），可一键填入。只用于对外演示，生产环境不要开启 |
 | `syslog.tls` / `tls_cert` / `tls_key` / `tls_client_ca` | syslog over TLS 监听与证书；配置客户端 CA 时要求双向认证 |
 | `syslog.allowlist` / `senders` / `rate_limit` | 发送端白名单（`true` 时界面不能关闭）/ 配置文件登记的发送端（名称、分组、`allow` / `block`、断流阈值）/ 单发送端每秒日志上限 |
 | `alert.source_silence` / `sources[].silence` | 数据源断流告警的默认阈值（默认 30m，`off` 关闭）/ 单个数据源的阈值 |

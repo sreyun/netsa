@@ -5,6 +5,7 @@ server:
   username: admin
   password: "Netsa@demo2026"
   pprof: true            # 演示环境开启性能剖析，便于验证 /debug/pprof/（仅管理员）
+  demo_login: true       # 登录页显示上面的演示账号并可一键填入（只用于对外演示，生产环境不要开启）
 
 home:
   name: "上海数据中心"

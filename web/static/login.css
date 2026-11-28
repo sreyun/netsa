@@ -133,6 +133,19 @@ body {
 .login-btn span { position: relative; }
 .login-btn:hover { filter: brightness(1.12); transform: translateY(-1px); }
 .login-btn:disabled { opacity: .65; cursor: progress; transform: none; }
+.demo-acct {
+  display: flex; align-items: center; justify-content: space-between; gap: 12px; margin: -8px 0 18px; padding: 10px 12px;
+  border: 1px dashed rgba(95, 227, 255, .45); border-radius: 7px; background: rgba(54, 207, 201, .08);
+}
+.demo-acct[hidden] { display: none; }
+.demo-acct-info { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 14px; font-size: 13px; color: var(--muted); }
+.demo-acct-info b { color: var(--accent); font-weight: 600; letter-spacing: 1px; }
+.demo-acct-info code { color: #eaf6ff; font-family: var(--mono); font-size: 14px; user-select: all; }
+.demo-fill {
+  flex: none; padding: 6px 12px; border-radius: 6px; cursor: pointer; font: inherit; font-size: 12px; letter-spacing: 1px;
+  color: var(--cyan); background: transparent; border: 1px solid rgba(95, 227, 255, .5);
+}
+.demo-fill:hover { color: #fff; border-color: var(--cyan); background: rgba(95, 227, 255, .12); }
 .card-foot { margin: 20px 0 0; text-align: center; color: var(--muted); font-size: 12px; }
 .card-foot code { color: #8fe9ff; font-family: var(--mono); }
 

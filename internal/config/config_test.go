@@ -44,6 +44,19 @@ func TestValidate(t *testing.T) {
 		t.Fatal("只设置用户名应报错")
 	}
 	c = Default()
+	c.Server.DemoLogin = true
+	if err := c.Validate(); err == nil || !strings.Contains(err.Error(), "demo_login") {
+		t.Fatalf("demo_login 没有配置账号应报错: %v", err)
+	}
+	c.Server.Username, c.Server.Password = "admin", "pbkdf2-sha256$600000$c2FsdA$a2V5"
+	if err := c.Validate(); err == nil || !strings.Contains(err.Error(), "明文") {
+		t.Fatalf("demo_login 的密码是哈希时应报错: %v", err)
+	}
+	c.Server.Password = "Netsa@demo2026"
+	if err := c.Validate(); err != nil {
+		t.Fatalf("demo_login 配置明文账号应通过: %v", err)
+	}
+	c = Default()
 	c.Sources = []SourceConfig{{Name: "a", Paths: []string{"x"}}, {Name: "a", Paths: []string{"y"}}}
 	if c.Validate() == nil {
 		t.Fatal("数据源重名应报错")
